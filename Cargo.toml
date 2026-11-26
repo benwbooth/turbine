@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/benwbooth/turbine"
+
+[workspace.dependencies]
+turbine-text = { path = "crates/turbine-text" }
+turbine-ui = { path = "crates/turbine-ui" }
+turbine-tui = { path = "crates/turbine-tui" }
+ropey = "1.6"
+encoding_rs = "0.8"
+chardetng = "0.1"
+unicode-width = "0.2"
+unicode-segmentation = "1.12"
+unicode-bidi = "0.3"
+crossterm = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

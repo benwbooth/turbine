@@ -1,0 +1,10 @@
+[package]
+name = "turbine-tui"
+description = "Terminal front end for Turbine (crossterm, kitty keyboard protocol)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+turbine-ui.workspace = true
+crossterm.workspace = true

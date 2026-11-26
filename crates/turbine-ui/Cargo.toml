@@ -1,0 +1,12 @@
+[package]
+name = "turbine-ui"
+description = "Turbine's cell-grid widget toolkit: surface, themes, control styles, widgets, automation tree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+turbine-text.workspace = true
+unicode-width.workspace = true
+unicode-segmentation.workspace = true
+serde.workspace = true

@@ -1,0 +1,122 @@
+// Turbine extension interface (draft).
+//
+// Extensions are WASI preview 2 components. Built-in features implement the
+// same world natively, so moving a feature in or out of the core never
+// changes its API.
+
+package turbine:ext@0.1.0;
+
+interface types {
+  record rect { x: s32, y: s32, w: s32, h: s32 }
+  record color { r: u8, g: u8, b: u8 }
+  record style { fg: color, bg: color, bold: bool, italic: bool, underline: bool }
+
+  record key-event { key: string, shift: bool, ctrl: bool, alt: bool, meta: bool }
+
+  record position { line: u32, column: u32 }
+  record range { start: position, end: position }
+
+  record menu-item {
+    /// "~S~ave" style label with the hotkey letter between tildes.
+    label: string,
+    shortcut: option<string>,
+    command: string,
+  }
+}
+
+/// What the host offers extensions.
+interface host {
+  use types.{range, position, menu-item};
+
+  type document-id = u32;
+
+  log: func(message: string);
+  status: func(message: string);
+
+  /// Documents.
+  active-document: func() -> option<document-id>;
+  document-text: func(doc: document-id) -> string;
+  document-path: func(doc: document-id) -> option<string>;
+  document-language: func(doc: document-id) -> option<string>;
+  edit: func(doc: document-id, at: range, text: string);
+  cursor: func(doc: document-id) -> position;
+
+  /// UI contributions.
+  add-menu-item: func(menu-path: string, item: menu-item);
+  bind-key: func(chord: string, command: string, when: option<string>);
+  run-command: func(command: string, args: string) -> result<string, string>;
+
+  /// Settings (TOML values as strings).
+  setting: func(key: string) -> option<string>;
+}
+
+/// A view an extension draws itself, on a cell canvas.
+interface view {
+  use types.{rect, style, key-event};
+
+  record cell-run { x: s32, y: s32, text: string, style: style }
+
+  render: func(width: s32, height: s32) -> list<cell-run>;
+  key: func(event: key-event) -> bool;
+  click: func(x: s32, y: s32) -> bool;
+}
+
+/// Language support.
+interface language {
+  record server-launch { command: string, args: list<string>, env: list<tuple<string, string>> }
+
+  /// File names / extensions / shebangs this language claims.
+  file-patterns: func() -> list<string>;
+  /// How to start its language server, if any.
+  lsp-server: func(root: string) -> option<server-launch>;
+  /// How to start its debug adapter, if any.
+  dap-adapter: func() -> option<server-launch>;
+  /// Tree-sitter grammar name (downloaded on demand).
+  grammar: func() -> option<string>;
+}
+
+/// File viewers (hex, images, tables, archives, ...).
+interface viewer {
+  /// Priority for this file (0 = can't view).
+  can-view: func(path: string, head: list<u8>) -> u32;
+  open: func(path: string) -> result<_, string>;
+}
+
+/// AI model providers and agent tools.
+interface ai {
+  record message { role: string, content: string }
+
+  models: func() -> list<string>;
+  chat: func(model: string, messages: list<message>) -> result<string, string>;
+  /// Fill-in-the-middle completion for tab completion.
+  complete: func(model: string, prefix: string, suffix: string) -> result<string, string>;
+}
+
+world extension {
+  import host;
+  export activate: func();
+}
+
+world view-extension {
+  import host;
+  export activate: func();
+  export view;
+}
+
+world language-extension {
+  import host;
+  export activate: func();
+  export language;
+}
+
+world viewer-extension {
+  import host;
+  export activate: func();
+  export viewer;
+}
+
+world ai-extension {
+  import host;
+  export activate: func();
+  export ai;
+}

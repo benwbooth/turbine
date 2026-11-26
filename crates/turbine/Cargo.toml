@@ -1,0 +1,13 @@
+[package]
+name = "turbine"
+description = "A retro DOS-style, AI-first code editor and IDE"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+turbine-text.workspace = true
+turbine-ui.workspace = true
+turbine-tui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
