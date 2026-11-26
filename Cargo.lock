@@ -403,11 +403,13 @@ dependencies = [
 name = "turbine"
 version = "0.1.0"
 dependencies = [
+ "crossterm",
  "serde",
  "serde_json",
  "turbine-text",
  "turbine-tui",
  "turbine-ui",
+ "turbine-vi",
 ]
 
 [[package]]
@@ -438,6 +440,13 @@ dependencies = [
  "turbine-text",
  "unicode-segmentation",
  "unicode-width",
+]
+
+[[package]]
+name = "turbine-vi"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
 ]
 
 [[package]]

@@ -2,6 +2,8 @@
 //! bar, and the automation endpoint agents drive it through.
 
 use crate::agent::{Driver, Output, Step};
+use crate::vim::{self, Keymap};
+use turbine_vi::{ExAction, Out as VimOut, Session};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -26,6 +28,8 @@ pub struct Request {
 struct EdWin {
     win: Window,
     ed: EditorView,
+    /// The window's vim state while the Vim keymap is on.
+    vim: Option<Session>,
 }
 
 pub struct Workbench {
@@ -47,20 +51,46 @@ pub struct Workbench {
     /// Editor (window index) selecting with the mouse.
     selecting: Option<usize>,
     last_click: Option<(Point, Instant)>,
+    keymap: Keymap,
 }
 
+/// The menu bar: Cursor's (VS Code's) menus and layout, merged with
+/// Borland's (the ≡ system menu, Search, Run's compile/debug items, Options
+/// and Window). Items whose feature isn't built yet are shown disabled so
+/// the structure is complete.
 fn menus() -> Vec<Menu> {
     let it = MenuItem::new;
     let sep = MenuItem::separator;
+    let soon = |l: &str, k: &str, c: &str| MenuItem::new(l, k, c).disabled();
     vec![
+        Menu::new(
+            "≡",
+            vec![
+                it("~A~bout Turbine...", "", "help.about"),
+                sep(),
+                it("~R~epaint Desktop", "", "app.repaint"),
+                soon("Show ~C~lipboard", "", "edit.show_clipboard"),
+                soon("~C~alculator", "", "tools.calculator"),
+            ],
+        ),
         Menu::new(
             "~F~ile",
             vec![
-                it("~N~ew", "Ctrl+N", "file.new"),
-                it("~O~pen...", "F3", "file.open"),
+                it("~N~ew Text File", "Ctrl+N", "file.new"),
+                soon("New ~W~indow", "Ctrl+Shift+N", "file.new_window"),
+                sep(),
+                it("~O~pen File...", "F3", "file.open"),
+                soon("Open ~F~older...", "", "file.open_folder"),
+                soon("Open ~R~ecent", "", "file.recent"),
+                sep(),
                 it("~S~ave", "F2", "file.save"),
                 it("Save ~A~s...", "", "file.save_as"),
+                it("Save A~l~l", "", "file.save_all"),
                 sep(),
+                it("Re~v~ert File", "", "file.revert"),
+                it("~C~lose Editor", "Alt+F3", "window.close"),
+                sep(),
+                soon("~D~OS Shell", "", "view.terminal"),
                 it("E~x~it", "Alt+X", "app.quit"),
             ],
         ),
@@ -74,36 +104,114 @@ fn menus() -> Vec<Menu> {
                 it("~C~opy", "Ctrl+C", "edit.copy"),
                 it("~P~aste", "Ctrl+V", "edit.paste"),
                 sep(),
+                soon("Toggle Line ~C~omment", "Ctrl+/", "edit.comment"),
+                soon("~F~ormat Document", "Ctrl+Shift+I", "edit.format"),
+            ],
+        ),
+        Menu::new(
+            "Se~l~ection",
+            vec![
                 it("Select ~A~ll", "Ctrl+A", "edit.select_all"),
+                soon("~E~xpand Selection", "Shift+Alt+Right", "selection.expand"),
+                soon("~S~hrink Selection", "Shift+Alt+Left", "selection.shrink"),
+                sep(),
+                soon("Copy Line ~U~p", "Shift+Alt+Up", "selection.copy_up"),
+                soon("Copy Line ~D~own", "Shift+Alt+Down", "selection.copy_down"),
+                soon("Mo~v~e Line Up", "Alt+Up", "selection.move_up"),
+                soon("Move Line Do~w~n", "Alt+Down", "selection.move_down"),
+                sep(),
+                soon("Add Cursor A~b~ove", "Ctrl+Alt+Up", "selection.cursor_above"),
+                soon("Add Cursor Be~l~ow", "Ctrl+Alt+Down", "selection.cursor_below"),
+                soon("~C~olumn Selection Mode", "", "selection.column"),
             ],
         ),
         Menu::new(
             "~S~earch",
-            vec![it("~F~ind...", "Ctrl+F", "search.find").disabled(), it("~G~o to Line...", "Ctrl+G", "search.goto")],
+            vec![
+                soon("~F~ind...", "Ctrl+F", "search.find"),
+                soon("~R~eplace...", "Ctrl+H", "search.replace"),
+                soon("~S~earch Again", "", "search.again"),
+                soon("Find in F~i~les...", "Ctrl+Shift+F", "search.files"),
+                sep(),
+                it("~G~o to Line Number...", "Ctrl+G", "search.goto"),
+                soon("Find ~P~rocedure...", "Ctrl+Shift+O", "go.symbol"),
+                sep(),
+                soon("Pre~v~ious Error", "Alt+F7", "go.prev_problem"),
+                soon("~N~ext Error", "Alt+F8", "go.next_problem"),
+            ],
         ),
         Menu::new(
             "~V~iew",
             vec![
-                it("~L~ine Numbers", "", "view.line_numbers"),
-                it("~R~ight to Left", "", "view.rtl"),
+                soon("~C~ommand Palette...", "Ctrl+Shift+P", "view.palette"),
                 sep(),
-                it("~T~erminal", "Ctrl+`", "view.terminal").disabled(),
-                it("~F~iles", "", "view.files").disabled(),
+                soon("~E~xplorer", "Ctrl+Shift+E", "view.files"),
+                soon("~S~ource Control", "Ctrl+Shift+G", "view.scm"),
+                soon("~R~un and Debug", "Ctrl+Shift+D", "view.debug"),
+                soon("E~x~tensions", "Ctrl+Shift+X", "view.extensions"),
+                sep(),
+                soon("~P~roblems", "Ctrl+Shift+M", "view.problems"),
+                soon("~O~utput", "", "view.output"),
+                soon("~T~erminal", "Ctrl+`", "view.terminal"),
+                sep(),
+                it("~L~ine Numbers", "", "view.line_numbers"),
+                it("Right to Le~f~t", "", "view.rtl"),
+                soon("~W~ord Wrap", "Alt+Z", "view.wrap"),
+            ],
+        ),
+        Menu::new(
+            "~G~o",
+            vec![
+                soon("~B~ack", "Alt+Left", "go.back"),
+                soon("~F~orward", "Alt+Right", "go.forward"),
+                sep(),
+                soon("Go to ~F~ile...", "Ctrl+P", "go.file"),
+                soon("Go to ~S~ymbol...", "Ctrl+Shift+O", "go.symbol"),
+                soon("Go to ~D~efinition", "F12", "go.definition"),
+                soon("Go to ~R~eferences", "Shift+F12", "go.references"),
+                it("Go to ~L~ine...", "Ctrl+G", "search.goto"),
+                soon("Go to ~B~racket", "Ctrl+Shift+\\", "go.bracket"),
             ],
         ),
         Menu::new(
             "~R~un",
             vec![
-                it("~R~un", "Ctrl+F9", "run.run").disabled(),
-                it("~D~ebug", "F9", "run.debug").disabled(),
-                it("Toggle ~B~reakpoint", "Ctrl+F8", "run.breakpoint").disabled(),
+                soon("~R~un", "Ctrl+F9", "run.run"),
+                soon("Start ~D~ebugging", "", "run.debug"),
+                soon("Program R~e~set", "Ctrl+F2", "run.reset"),
+                soon("~G~o to Cursor", "F4", "run.to_cursor"),
+                soon("~T~race Into", "F7", "run.step_into"),
+                soon("~S~tep Over", "F8", "run.step_over"),
+                soon("~A~rguments...", "", "run.arguments"),
+                sep(),
+                soon("Toggle ~B~reakpoint", "Ctrl+F8", "run.breakpoint"),
+                soon("Add ~W~atch...", "Ctrl+F7", "run.watch"),
+                soon("E~v~aluate/Modify...", "Ctrl+F4", "run.evaluate"),
+                soon("~C~all Stack", "Ctrl+F3", "run.stack"),
+                sep(),
+                soon("C~o~mpile", "Alt+F9", "build.compile"),
+                soon("~M~ake", "F9", "build.make"),
+                soon("Bui~l~d All", "", "build.all"),
+            ],
+        ),
+        Menu::new(
+            "~T~erminal",
+            vec![
+                soon("~N~ew Terminal", "Ctrl+Shift+`", "terminal.new"),
+                soon("~S~plit Terminal", "", "terminal.split"),
+                sep(),
+                soon("~R~un Task...", "", "terminal.task"),
+                soon("Run ~B~uild Task...", "Ctrl+Shift+B", "terminal.build"),
             ],
         ),
         Menu::new(
             "~A~I",
             vec![
-                it("~A~ssistant", "Ctrl+L", "ai.assistant").disabled(),
-                it("~C~omplete", "Tab", "ai.complete").disabled(),
+                soon("~C~hat", "Ctrl+L", "ai.chat"),
+                soon("~I~nline Edit", "Ctrl+K", "ai.inline"),
+                soon("~A~gent", "Ctrl+I", "ai.agent"),
+                soon("~T~ab Completion", "", "ai.tab"),
+                soon("~M~odels...", "", "ai.models"),
                 sep(),
                 it("Agent ~D~emo", "", "agent.demo"),
                 it("~S~top Agent", "Esc", "agent.stop"),
@@ -112,9 +220,13 @@ fn menus() -> Vec<Menu> {
         Menu::new(
             "~O~ptions",
             vec![
+                it("~K~eymap...", "", "options.keymap"),
                 it("~C~olors...", "", "options.colors"),
                 it("Control ~S~tyle...", "", "options.style"),
-                it("~K~eymap...", "", "options.keymap").disabled(),
+                sep(),
+                soon("~E~ditor...", "", "options.editor"),
+                soon("~D~irectories...", "", "options.dirs"),
+                soon("Se~t~tings File", "Ctrl+,", "options.settings"),
             ],
         ),
         Menu::new(
@@ -122,12 +234,28 @@ fn menus() -> Vec<Menu> {
             vec![
                 it("~T~ile", "", "window.tile"),
                 it("C~a~scade", "", "window.cascade"),
-                it("~N~ext", "F6", "window.next"),
+                sep(),
                 it("~Z~oom", "F5", "window.zoom"),
+                it("~N~ext", "F6", "window.next"),
+                it("~P~revious", "Shift+F6", "window.prev"),
                 it("~C~lose", "Alt+F3", "window.close"),
+                it("C~l~ose All", "", "window.close_all"),
+                sep(),
+                it("~L~ist...", "Alt+0", "window.list"),
             ],
         ),
-        Menu::new("~H~elp", vec![it("~K~eyboard...", "F1", "help.keys"), it("~A~bout...", "", "help.about")]),
+        Menu::new(
+            "~H~elp",
+            vec![
+                soon("~C~ontents", "", "help.contents"),
+                soon("~I~ndex", "Shift+F1", "help.index"),
+                sep(),
+                it("~K~eyboard...", "F1", "help.keys"),
+                it("~V~im Keys...", "", "help.vim"),
+                sep(),
+                it("~A~bout...", "", "help.about"),
+            ],
+        ),
     ]
 }
 
@@ -162,6 +290,7 @@ impl Workbench {
             dragging: None,
             selecting: None,
             last_click: None,
+            keymap: Keymap::Cua,
         };
         for f in files {
             wb.open_path(f);
@@ -171,6 +300,23 @@ impl Workbench {
         }
         wb.sync_menu_checks();
         wb
+    }
+
+    pub fn set_keymap(&mut self, k: Keymap) {
+        self.keymap = k;
+        for w in &mut self.windows {
+            match k {
+                Keymap::Vim => {
+                    if w.vim.is_none() {
+                        w.vim = Some(vim::attach(&mut w.ed));
+                    }
+                }
+                Keymap::Cua => {
+                    w.vim = None;
+                    vim::detach(&mut w.ed);
+                }
+            }
+        }
     }
 
     pub fn set_requests(&mut self, rx: Receiver<Request>) {
@@ -214,7 +360,11 @@ impl Workbench {
             win.zoomed = false;
         }
         self.next_id += 1;
-        self.windows.push(EdWin { win, ed: EditorView::new(doc) });
+        let mut ew = EdWin { win, ed: EditorView::new(doc), vim: None };
+        if self.keymap == Keymap::Vim {
+            ew.vim = Some(vim::attach(&mut ew.ed));
+        }
+        self.windows.push(ew);
         self.renumber();
     }
 
@@ -334,6 +484,76 @@ impl Workbench {
                     w.win.rect = Rect::new(desk.x + o, desk.y + o, (desk.w - o).max(20), (desk.h - o).max(6));
                 }
             }
+            "window.prev" => {
+                if self.windows.len() > 1 {
+                    let w = self.windows.pop().unwrap();
+                    self.windows.insert(0, w);
+                    self.renumber();
+                }
+            }
+            "window.close_all" => {
+                self.windows.retain(|w| w.ed.doc.dirty);
+                self.renumber();
+                if !self.windows.is_empty() {
+                    self.say("Windows with unsaved changes were left open");
+                }
+            }
+            "window.list" => {
+                let items: Vec<String> = self
+                    .windows
+                    .iter()
+                    .rev()
+                    .map(|w| format!("{}{}", w.win.title, if w.ed.doc.dirty { " *" } else { "" }))
+                    .collect();
+                if items.is_empty() {
+                    return;
+                }
+                let d = Dialog::new("winlist", "Window List", 56, 14)
+                    .list("windows", Rect::new(1, 1, 38, 9), items, 0)
+                    .button("ok", 41, 1, "~G~o to", true)
+                    .button("cancel", 41, 4, "Cancel", false);
+                self.dialog = Some(d);
+            }
+            "file.save_all" => self.vim_actions(vec![ExAction::WriteAll(false)]),
+            "file.revert" => self.vim_actions(vec![ExAction::EditFile(String::new(), true)]),
+            "app.repaint" => {}
+            "options.keymap" => {
+                let names = vec![Keymap::Cua.name().to_string(), Keymap::Vim.name().to_string()];
+                let cur = if self.keymap == Keymap::Vim { 1 } else { 0 };
+                let d = Dialog::new("keymap", "Keymap", 40, 10)
+                    .label(1, 0, "Editor keys:")
+                    .list("keymap", Rect::new(1, 1, 22, 5), names, cur)
+                    .button("ok", 25, 1, "O~K~", true)
+                    .button("cancel", 25, 4, "Cancel", false);
+                self.dialog = Some(d);
+            }
+            "help.vim" => {
+                let mut items = Vec::new();
+                for (section, keys) in turbine_vi::vi::Vi::help() {
+                    items.push(format!("── {section} ──"));
+                    for (k, what) in keys {
+                        items.push(format!("{k:<14} {what}"));
+                    }
+                }
+                items.push("── Turbine ──".into());
+                for (k, what) in [
+                    ("q{reg} … q", "record a macro"),
+                    ("[n]@{reg} @@", "play a macro (@: repeats the last :)"),
+                    ("Ctrl-W w/W", "next / previous window"),
+                    ("Ctrl-W h/j/k/l", "window to the left/below/above/right"),
+                    ("Ctrl-W q / o / n", "close / only this / new window"),
+                    (":e :w :q :wq :x", "files and windows, as vim"),
+                    (":sp :vs {file}", "open a file beside this one"),
+                    (":bn :bp :new :only", "windows as buffers"),
+                ] {
+                    items.push(format!("{k:<14} {what}"));
+                }
+                let h = (self.size.1 - 4).clamp(10, 30);
+                let d = Dialog::new("vimhelp", "Vim Keys", 72.min(self.size.0 - 2), h)
+                    .list("keys", Rect::new(0, 0, 66.min(self.size.0 - 8), h - 5), items, 0)
+                    .button("ok", 28, h - 4, "O~K~", true);
+                self.dialog = Some(d);
+            }
             "window.next" => {
                 if self.windows.len() > 1 {
                     let w = self.windows.remove(0);
@@ -371,7 +591,7 @@ impl Workbench {
                     "Shift+arrows select; Ctrl+X/C/V clipboard",
                     "Ctrl+Z/Y undo/redo; Ins overwrite",
                     "Drag title to move, edges to resize",
-                    "Esc stops an agent; any key pauses it",
+                    "Agents: Esc stops, Space pauses/resumes",
                 ];
                 let mut d = Dialog::new("keys", "Keyboard", 50, lines.len() as i32 + 6);
                 for (i, l) in lines.iter().enumerate() {
@@ -523,6 +743,21 @@ impl Workbench {
                     }
                 }
             }
+            "keymap" => {
+                let k = if d.selected_index("keymap") == Some(1) { Keymap::Vim } else { Keymap::Cua };
+                self.set_keymap(k);
+                self.say(format!("Keymap: {}", k.name()));
+            }
+            "winlist" => {
+                if let Some(i) = d.selected_index("windows") {
+                    let n = self.windows.len();
+                    if i < n {
+                        let w = self.windows.remove(n - 1 - i);
+                        self.windows.push(w);
+                        self.renumber();
+                    }
+                }
+            }
             "style" => {
                 if let Some(i) = d.selected_index("style") {
                     if let Some(s) = ControlStyle::all().into_iter().nth(i) {
@@ -575,7 +810,7 @@ impl Workbench {
                 self.driver.cancel();
                 self.say("Agent stopped");
             }
-            Event::Key(k) if k.key == Key::F(12) => {
+            Event::Key(k) if k.key == Key::Char(' ') && k.mods == Mods::NONE => {
                 self.driver.paused = !self.driver.paused;
             }
             Event::Key(_) | Event::Mouse(MouseEvent { kind: MouseKind::Down(_), .. }) => {
@@ -589,6 +824,7 @@ impl Workbench {
         match ev {
             Event::Resize(w, h) => {
                 self.size = (w, h);
+                self.menubar.width = w;
                 let d = self.desktop();
                 for w in &mut self.windows {
                     w.win.fit(d);
@@ -627,7 +863,23 @@ impl Workbench {
             MenuResult::Consumed => return,
             MenuResult::Ignored => {}
         }
-        let shortcut = if k.is_ctrl('n') {
+        // Vim gets every key but the F-keys and Alt chords (menus).
+        let vim_on = self.keymap == Keymap::Vim && !self.windows.is_empty();
+        if vim_on && !matches!(k.key, Key::F(_)) && !k.mods.alt {
+            let w = self.windows.last_mut().unwrap();
+            let session = w.vim.get_or_insert_with(Session::new);
+            match vim::key(&mut w.ed, session, &k) {
+                VimOut::Handled => return,
+                VimOut::Actions(a) => return self.vim_actions(a),
+                VimOut::Window(c) => return self.vim_window(c),
+                VimOut::NotMine => {}
+            }
+        }
+        let shortcut = if k.is(Key::F(6), Mods::SHIFT) {
+            Some("window.prev")
+        } else if k.is_alt('0') {
+            Some("window.list")
+        } else if k.is_ctrl('n') {
             Some("file.new")
         } else if k.is(Key::F(3), Mods::NONE) || k.is_ctrl('o') {
             Some("file.open")
@@ -662,11 +914,224 @@ impl Workbench {
                 return;
             }
         }
+        // In vim, only paging keys vim doesn't take reach the editor.
+        if vim_on && !matches!(k.key, Key::PageUp | Key::PageDown) {
+            return;
+        }
         let mut clip = std::mem::take(&mut self.clipboard);
         if let Some(w) = self.windows.last_mut() {
             w.ed.handle_key(&k, &mut clip);
         }
         self.clipboard = clip;
+    }
+
+    /// What vim's ex commands ask of Turbine: files and windows.
+    fn vim_actions(&mut self, actions: Vec<ExAction>) {
+        let mut split: Option<bool> = None;
+        for a in actions {
+            match a {
+                ExAction::Write(p, _) => {
+                    if p.is_empty() {
+                        self.save(false);
+                    } else if let Some(w) = self.windows.last_mut() {
+                        let path = PathBuf::from(&p);
+                        let msg = match w.ed.doc.save_as(&path) {
+                            Ok(()) => {
+                                w.win.title = path.display().to_string();
+                                format!("\"{}\" written", path.display())
+                            }
+                            Err(e) => format!("E212: Can't open file for writing: {e}"),
+                        };
+                        self.say(msg);
+                    }
+                }
+                ExAction::WriteAll(_) => {
+                    let mut n = 0;
+                    for w in &mut self.windows {
+                        if w.ed.doc.dirty && w.ed.doc.path.is_some() && w.ed.doc.save().is_ok() {
+                            n += 1;
+                        }
+                    }
+                    self.say(format!("{n} file(s) written"));
+                }
+                ExAction::Quit(bang) => {
+                    let Some(w) = self.windows.last_mut() else { continue };
+                    if w.ed.doc.dirty && !bang {
+                        self.say("E37: No write since last change (add ! to override)");
+                        return;
+                    }
+                    self.windows.pop();
+                    self.renumber();
+                    if self.windows.is_empty() {
+                        self.quit = true;
+                    }
+                }
+                ExAction::QuitAll(bang) => {
+                    if !bang && self.windows.iter().any(|w| w.ed.doc.dirty) {
+                        self.say("E37: No write since last change (add ! to override)");
+                        return;
+                    }
+                    self.quit = true;
+                }
+                ExAction::EditFile(p, bang) => {
+                    if let Some(vertical) = split.take() {
+                        self.open_path(Path::new(&p));
+                        self.arrange_split(vertical);
+                        continue;
+                    }
+                    let Some(w) = self.windows.last_mut() else { continue };
+                    if w.ed.doc.dirty && !bang {
+                        self.say("E37: No write since last change (add ! to override)");
+                        return;
+                    }
+                    let path = if p.is_empty() { w.ed.doc.path.clone() } else { Some(PathBuf::from(&p)) };
+                    let Some(path) = path else {
+                        self.say("E32: No file name");
+                        return;
+                    };
+                    let doc = if path.exists() {
+                        match Document::open(&path) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                self.say(format!("Can't open {}: {e}", path.display()));
+                                return;
+                            }
+                        }
+                    } else {
+                        let mut d = Document::new();
+                        d.path = Some(path.clone());
+                        d
+                    };
+                    let msg = format!("\"{}\" {} lines, {}", path.display(), doc.len_lines(), doc.encoding.name());
+                    w.win.title = path.display().to_string();
+                    w.ed = EditorView::new(doc);
+                    if let Some(old) = w.vim.take() {
+                        drop(old);
+                        w.vim = Some(vim::attach(&mut w.ed));
+                    }
+                    self.say(msg);
+                }
+                ExAction::Window(c) => match c.as_str() {
+                    "split" | "vsplit" => split = Some(c == "vsplit"),
+                    "new" | "vnew" => {
+                        self.new_window(Document::new());
+                        self.arrange_split(c == "vnew");
+                    }
+                    "enew" => {
+                        if self.windows.last().is_some_and(|w| !w.ed.doc.dirty) {
+                            self.windows.pop();
+                        }
+                        self.new_window(Document::new());
+                    }
+                    "only" => {
+                        let n = self.windows.len();
+                        let mut kept = 0;
+                        let mut i = 0;
+                        self.windows.retain(|w| {
+                            i += 1;
+                            let keep = i == n || w.ed.doc.dirty;
+                            if keep && i != n {
+                                kept += 1;
+                            }
+                            keep
+                        });
+                        self.renumber();
+                        let desk = self.desktop();
+                        if let Some(w) = self.windows.last_mut() {
+                            if !w.win.zoomed {
+                                w.win.toggle_zoom(desk);
+                            }
+                        }
+                        if kept > 0 {
+                            self.say("E445: Other window contains changes");
+                        }
+                    }
+                    "bnext" => self.run_command("window.next"),
+                    "bprev" => self.run_command("window.prev"),
+                    _ => {}
+                },
+                ExAction::SetOption(name, value) => {
+                    let on = value != "false" && value != "0";
+                    match name.as_str() {
+                        "number" | "nu" => {
+                            if let Some(w) = self.windows.last_mut() {
+                                w.ed.line_numbers = on;
+                            }
+                        }
+                        "rightleft" | "rl" => {
+                            if let Some(w) = self.windows.last_mut() {
+                                w.ed.base_rtl = if on { Some(true) } else { None };
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if split.is_some() {
+            self.say("Two views of one buffer aren't in yet: give :sp a file name");
+        }
+        self.sync_menu_checks();
+    }
+
+    /// Ctrl-W commands.
+    fn vim_window(&mut self, c: &str) {
+        match c {
+            "next" => self.run_command("window.next"),
+            "prev" => self.run_command("window.prev"),
+            "close" => self.vim_actions(vec![ExAction::Quit(false)]),
+            "only" => self.vim_actions(vec![ExAction::Window("only".into())]),
+            "new" => self.vim_actions(vec![ExAction::Window("new".into())]),
+            "split" | "vsplit" => self.say("Two views of one buffer aren't in yet: use :sp {file}"),
+            dir => self.focus_direction(dir),
+        }
+    }
+
+    /// Focus the nearest window to the left/right/above/below.
+    fn focus_direction(&mut self, dir: &str) {
+        let Some(cur) = self.windows.last().map(|w| w.win.rect.center()) else { return };
+        let best = self
+            .windows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| {
+                let c = w.win.rect.center();
+                let (dx, dy) = (c.x - cur.x, c.y - cur.y);
+                let ok = match dir {
+                    "left" => dx < 0,
+                    "right" => dx > 0,
+                    "up" => dy < 0,
+                    "down" => dy > 0,
+                    _ => false,
+                };
+                ok.then_some((i, dx.abs() + dy.abs() * 2))
+            })
+            .min_by_key(|&(_, d)| d);
+        if let Some((i, _)) = best {
+            let w = self.windows.remove(i);
+            self.windows.push(w);
+            self.renumber();
+        }
+    }
+
+    /// Put the two top windows side by side (vertical) or stacked.
+    fn arrange_split(&mut self, vertical: bool) {
+        let n = self.windows.len();
+        if n < 2 {
+            return;
+        }
+        let d = self.desktop();
+        let (a, b) = if vertical {
+            let half = d.w / 2;
+            (Rect::new(d.x, d.y, half, d.h), Rect::new(d.x + half, d.y, d.w - half, d.h))
+        } else {
+            let half = d.h / 2;
+            (Rect::new(d.x, d.y, d.w, half), Rect::new(d.x, d.y + half, d.w, d.h - half))
+        };
+        self.windows[n - 2].win.zoomed = false;
+        self.windows[n - 2].win.rect = a;
+        self.windows[n - 1].win.zoomed = false;
+        self.windows[n - 1].win.rect = b;
     }
 
     fn mouse(&mut self, m: MouseEvent) {
@@ -815,6 +1280,9 @@ impl Workbench {
                     w.ed.doc.len_lines(),
                     if w.ed.doc.dirty { ", modified" } else { "" }
                 ));
+            if let Some(v) = &w.vim {
+                ed.value = Some(format!("{}, vim {}", ed.value.unwrap_or_default(), v.vi.mode_name()));
+            }
             ed.enabled = true;
             wn = wn.child(ed);
             root = root.child(wn);
@@ -885,7 +1353,7 @@ impl Workbench {
 
     fn queue_demo(&mut self) {
         self.driver.agent_name = "Demo agent".into();
-        self.queue_menu("File/New");
+        self.queue_menu("File/New Text File");
         self.driver.queue.push_back(Step::Pause(Duration::from_millis(300)));
         self.queue_type(DEMO_CODE);
         self.driver.queue.push_back(Step::Pause(Duration::from_millis(400)));
@@ -1101,22 +1569,40 @@ impl App for Workbench {
                     col + 1,
                     w.ed.doc.encoding.name(),
                     w.ed.doc.line_ending.name(),
-                    if w.ed.overwrite { "OVR" } else { "INS" }
+                    if w.vim.is_some() {
+                        ""
+                    } else if w.ed.overwrite {
+                        "OVR"
+                    } else {
+                        "INS"
+                    }
                 )
             })
             .unwrap_or_default();
-        self.status.info = info;
+        let vim_line = self.windows.last().and_then(|w| w.vim.as_ref()).map(|v| (v.mode_line(), v.command_line()));
+        self.status.info = match &vim_line {
+            Some((mode, _)) => format!("{mode}  {info}"),
+            None => info,
+        };
+        let cmdline = vim_line.and_then(|(_, c)| c);
         self.status.message = if self.driver.busy() {
             Some(format!(
-                "{} {} - Esc stops, F12 {}",
+                "{} {} - Esc stops, Space {}",
                 if self.driver.paused { "⏸" } else { "►" },
                 self.driver.agent_name,
                 if self.driver.paused { "resumes" } else { "pauses" }
             ))
+        } else if let Some((line, _, _)) = &cmdline {
+            Some(line.clone())
         } else {
             self.message.as_ref().map(|(m, _)| m.clone())
         };
         self.status.draw(&mut c, &theme, Rect::new(0, self.size.1 - 1, self.size.0, 1));
+        if let Some((_, Some(col), _)) = &cmdline {
+            if self.dialog.is_none() && !self.driver.busy() {
+                c.set_cursor(Point::new(1 + *col as i32, self.size.1 - 1), turbine_ui::CursorShape::Bar);
+            }
+        }
         self.menubar.draw(&mut c, &theme, screen);
         if let Some(d) = &mut self.dialog {
             d.layout(screen);
@@ -1164,7 +1650,7 @@ mod tests {
     #[test]
     fn agent_types_through_the_ui() {
         let mut wb = bench();
-        assert_eq!(run(&mut wb, json!({"cmd": "menu", "path": "File/New"}))["ok"], true);
+        assert_eq!(run(&mut wb, json!({"cmd": "menu", "path": "File/New Text File"}))["ok"], true);
         assert_eq!(wb.windows.len(), 2);
         run(&mut wb, json!({"cmd": "type", "text": "hello\nworld"}));
         assert_eq!(run(&mut wb, json!({"cmd": "text"}))["text"], "hello\nworld");
@@ -1189,6 +1675,68 @@ mod tests {
         let mut wb = bench();
         let r = run(&mut wb, json!({"cmd": "click", "target": "button:Nope"}));
         assert_eq!(r["ok"], false);
+    }
+
+    fn keys(wb: &mut Workbench, chords: &[&str]) {
+        for c in chords {
+            assert_eq!(run(wb, json!({"cmd": "key", "key": c}))["ok"], true, "{c}");
+        }
+    }
+
+    #[test]
+    fn vim_edits_saves_and_quits() {
+        let mut wb = bench();
+        wb.set_keymap(Keymap::Vim);
+        run(&mut wb, json!({"cmd": "type", "text": "ihello world"}));
+        keys(&mut wb, &["Esc"]);
+        run(&mut wb, json!({"cmd": "type", "text": "0dwyyp"}));
+        assert_eq!(run(&mut wb, json!({"cmd": "text"}))["text"], "world\nworld");
+        // Macro: append ";" to each line.
+        run(&mut wb, json!({"cmd": "type", "text": "ggqqA;"}));
+        keys(&mut wb, &["Esc"]);
+        run(&mut wb, json!({"cmd": "type", "text": "jq@q"}));
+        assert_eq!(run(&mut wb, json!({"cmd": "text"}))["text"], "world;\nworld;");
+        // :w to a file, then :q closes the window and, being the last, quits.
+        let dir = std::env::temp_dir().join(format!("turbine-vim-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("out.txt");
+        run(&mut wb, json!({"cmd": "type", "text": format!(":w {}", f.display())}));
+        keys(&mut wb, &["Enter"]);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "world;\nworld;");
+        run(&mut wb, json!({"cmd": "type", "text": ":q"}));
+        keys(&mut wb, &["Enter"]);
+        assert!(wb.should_quit());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn vim_refuses_to_quit_with_changes_and_menus_still_work() {
+        let mut wb = bench();
+        wb.set_keymap(Keymap::Vim);
+        run(&mut wb, json!({"cmd": "type", "text": "ix"}));
+        keys(&mut wb, &["Esc"]);
+        run(&mut wb, json!({"cmd": "type", "text": ":q"}));
+        keys(&mut wb, &["Enter"]);
+        assert!(!wb.should_quit());
+        assert!(wb.message.as_ref().unwrap().0.starts_with("E37"));
+        // Ctrl-W n opens a window; F6 and menus work in vim mode.
+        keys(&mut wb, &["Ctrl+W", "n"]);
+        assert_eq!(wb.windows.len(), 2);
+        run(&mut wb, json!({"cmd": "menu", "path": "Window/Tile"}));
+        let snap = run(&mut wb, json!({"cmd": "snapshot"}));
+        assert!(snap.to_string().contains("vim NORMAL"));
+    }
+
+    #[test]
+    fn narrow_menu_bar_fits_or_stays_reachable() {
+        let mut wb = bench();
+        wb.dispatch(Event::Resize(80, 25));
+        let rects = wb.menubar.title_rects();
+        assert!(rects.iter().all(|r| r.right() <= 80));
+        assert!(rects.iter().all(|r| r.w > 0), "all menus fit at 80 columns");
+        wb.dispatch(Event::Resize(40, 25));
+        keys(&mut wb, &["Alt+H"]);
+        assert!(wb.menubar.open.is_some(), "Help opens from the keyboard even when it doesn't fit");
     }
 
     #[test]

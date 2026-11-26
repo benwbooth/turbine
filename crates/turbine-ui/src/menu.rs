@@ -83,6 +83,8 @@ pub struct MenuBar {
     pub item_sel: usize,
     /// Mouse button held since opening (release on an item picks it).
     tracking: bool,
+    /// Screen width, for laying the titles out (0 = unlimited).
+    pub width: i32,
 }
 
 impl MenuBar {
@@ -101,13 +103,20 @@ impl MenuBar {
     }
 
     /// Rectangle of each title in the bar.
+    /// Rectangle of each title in the bar. When they don't fit, the bar
+    /// tightens (one space between titles); titles past the right edge get
+    /// an empty rect and stay reachable from the keyboard.
     pub fn title_rects(&self) -> Vec<Rect> {
-        let mut x = 2;
-        self.menus
+        let widths: Vec<i32> = self.menus.iter().map(|m| str_width(&m.plain_title()) as i32).collect();
+        let roomy: i32 = 2 + widths.iter().map(|w| w + 2).sum::<i32>();
+        let tight = self.width > 0 && roomy > self.width;
+        let (mut x, pad) = if tight { (0, 1) } else { (2, 2) };
+        widths
             .iter()
-            .map(|m| {
-                let w = str_width(&m.plain_title()) as i32 + 2;
-                let r = Rect::new(x, 0, w, 1);
+            .map(|&tw| {
+                let w = tw + pad;
+                let fits = self.width <= 0 || x + w <= self.width;
+                let r = if fits { Rect::new(x, 0, w, 1) } else { Rect::new(self.width, 0, 0, 1) };
                 x += w;
                 r
             })
@@ -123,6 +132,7 @@ impl MenuBar {
         let h = m.items.len() as i32 + 2;
         let tr = self.title_rects()[i];
         let x = (tr.x - 1).min(screen.right() - w - 2).max(0);
+        let w = w.min(screen.w);
         Rect::new(x, 1, w, h)
     }
 
@@ -167,6 +177,13 @@ impl MenuBar {
     }
 
     pub fn handle_key(&mut self, ev: &KeyEvent) -> MenuResult {
+        // Alt+Space opens the ≡ system menu (the first one without a hotkey).
+        if ev.mods.alt && !ev.mods.ctrl && ev.key == Key::Char(' ') {
+            if let Some(i) = self.menus.iter().position(|m| hotkey(&m.title).is_none()) {
+                self.open_menu(i);
+                return MenuResult::Consumed;
+            }
+        }
         // Alt+letter opens a menu from anywhere.
         if ev.mods.alt && !ev.mods.ctrl {
             if let Key::Char(c) = ev.key {
@@ -293,6 +310,9 @@ impl MenuBar {
         for (i, (m, r)) in self.menus.iter().zip(&titles).enumerate() {
             let sel = self.active && self.title_sel == i;
             let (st, hot) = if sel { (s.menu_selected, s.menu_selected_hotkey) } else { (s.menu, s.menu_hotkey) };
+            if r.w == 0 {
+                continue;
+            }
             c.fill(*r, " ", st);
             c.print_hot(r.x + 1, 0, &m.title, st, hot);
         }

@@ -4,7 +4,8 @@
 |---|---|
 | Cell surface, wide chars, clipping, diff rendering | done |
 | Terminal front end (crossterm, kitty keys, SGR mouse, paste) | done |
-| Menu bar, drop-downs, status bar | done |
+| Menu bar (Cursor's menus + Borland's ≡, Search, Run/Compile/Debug, Options, Window), drop-downs, status bar | done; unbuilt features shown disabled |
+| Responsive menu bar (tightens; overflow stays keyboard-reachable) | done; overflow "»" menu for the mouse planned |
 | Windows: move, resize from edges/corner, zoom, tile, cascade | done |
 | Dialogs: label, input, button, list | done |
 | Editor: graphemes, selection, clipboard, undo, auto-indent, bidi | done |
@@ -14,7 +15,10 @@
 | Headless mode with scripts and text screenshots | done |
 | Find/replace | planned |
 | Splitters inside windows, file tree panel | planned |
-| Vim mode (port tessh's vi/ex engine into turbine-vi) | planned |
+| Vim mode (turbine-vi, from tessh): modes, operators, text objects, surround, registers, marks, dot, `:` ex with ranges/:s/:g/:norm/:sort | done |
+| Vim additions: macros (q/@/@@/@:), Ctrl-W windows, :e :w :q :wq :x :wa :qa :sp/:vs {file} :new :only :bn :bp, :set nu/rl | done |
+| Vim: two views of one buffer (:sp with no file), vimrc, more :set options, `"+` via system clipboard | planned |
+| Keymaps: CUA (DOS) and Vim, Options > Keymap or `--keymap` | done |
 | Emacs / VS Code keymaps | planned |
 | tree-sitter highlighting (Helix grammars on demand) | planned |
 | LSP client | planned |

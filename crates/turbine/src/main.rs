@@ -2,6 +2,7 @@
 
 mod agent;
 mod server;
+mod vim;
 mod workbench;
 
 use std::path::PathBuf;
@@ -16,6 +17,7 @@ turbine [options] [files...]
 Options:
   --automation [PATH]   Listen for agent commands (JSON lines) on a Unix socket.
                         Default: $XDG_RUNTIME_DIR/turbine-<pid>.sock
+  --keymap NAME         Editor keys: cua (default, DOS style) or vim
   --speed CPS           Agent typing speed in characters per second (0 = instant)
   --demo                Start the agent demo right away
   --headless            Run without a terminal (for tests and screenshots)
@@ -29,6 +31,7 @@ struct Args {
     files: Vec<PathBuf>,
     automation: Option<Option<PathBuf>>,
     speed: Option<f64>,
+    keymap: Option<vim::Keymap>,
     demo: bool,
     headless: bool,
     size: (i32, i32),
@@ -41,6 +44,7 @@ fn parse_args() -> Result<Args, String> {
         files: Vec::new(),
         automation: None,
         speed: None,
+        keymap: None,
         demo: false,
         headless: false,
         size: (100, 30),
@@ -60,6 +64,10 @@ fn parse_args() -> Result<Args, String> {
                 a.automation = Some(path);
             }
             "--speed" => a.speed = Some(val("--speed")?.parse().map_err(|_| "bad --speed")?),
+            "--keymap" => {
+                let v = val("--keymap")?;
+                a.keymap = Some(vim::Keymap::parse(&v).ok_or_else(|| format!("unknown keymap {v} (cua, vim)"))?);
+            }
             "--demo" => a.demo = true,
             "--headless" => a.headless = true,
             "--size" => {
@@ -85,6 +93,9 @@ fn main() {
         }
     };
     let mut wb = Workbench::new(&args.files);
+    if let Some(k) = args.keymap {
+        wb.set_keymap(k);
+    }
     if let Some(s) = args.speed {
         wb.driver_mut().cps = s;
     } else if args.headless {

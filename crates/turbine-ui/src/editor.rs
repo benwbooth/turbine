@@ -59,6 +59,10 @@ pub struct EditorView {
     pub base_rtl: Option<bool>,
     /// AI completion shown as ghost text after the cursor; Tab accepts.
     pub ghost: Option<String>,
+    /// Overrides the cursor shape (vim's normal mode: a block).
+    pub cursor_shape: Option<CursorShape>,
+    /// Extra selected char ranges (vim's visual block).
+    pub block: Vec<(usize, usize)>,
     /// Text area from the last draw, for mouse hit testing.
     area: Rect,
     dragging: bool,
@@ -77,6 +81,8 @@ impl EditorView {
             overwrite: false,
             base_rtl: None,
             ghost: None,
+            cursor_shape: None,
+            block: Vec::new(),
             area: Rect::default(),
             dragging: false,
         }
@@ -439,7 +445,8 @@ impl EditorView {
                     continue;
                 }
                 let ch = line_start + p.char_off;
-                let selected = sel.is_some_and(|(a, b)| ch >= a && ch < b);
+                let selected = sel.is_some_and(|(a, b)| ch >= a && ch < b)
+                    || self.block.iter().any(|&(a, b)| ch >= a && ch < b);
                 let st = if selected { s.editor_selection } else { s.editor };
                 let g = &text[p.offset..p.offset + p.len];
                 if g == "\t" {
@@ -465,7 +472,7 @@ impl EditorView {
         if focused {
             let x = text_x + cur_col as i32 - self.scroll_x as i32;
             let y = area.y + cur_line as i32 - self.scroll_y as i32;
-            let shape = if self.overwrite { CursorShape::Block } else { CursorShape::Underline };
+            let shape = self.cursor_shape.unwrap_or(if self.overwrite { CursorShape::Block } else { CursorShape::Underline });
             c.set_cursor(Point::new(x, y), shape);
         }
     }

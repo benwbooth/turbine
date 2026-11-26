@@ -12,6 +12,7 @@ repository = "https://github.com/benwbooth/turbine"
 turbine-text = { path = "crates/turbine-text" }
 turbine-ui = { path = "crates/turbine-ui" }
 turbine-tui = { path = "crates/turbine-tui" }
+turbine-vi = { path = "crates/turbine-vi" }
 ropey = "1.6"
 encoding_rs = "0.8"
 chardetng = "0.1"

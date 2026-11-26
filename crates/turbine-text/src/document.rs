@@ -23,6 +23,8 @@ pub struct Document {
     pub line_ending: LineEnding,
     pub lossy: bool,
     pub dirty: bool,
+    /// Bumped on every change, so views and modes can tell when to resync.
+    pub version: u64,
     undo: Vec<Vec<Edit>>,
     redo: Vec<Vec<Edit>>,
     /// Group consecutive typing into one undo step.
@@ -45,6 +47,7 @@ impl Document {
             line_ending: if cfg!(windows) { LineEnding::CrLf } else { LineEnding::Lf },
             lossy: false,
             dirty: false,
+            version: 0,
             undo: Vec::new(),
             redo: Vec::new(),
             open_group: false,
@@ -127,6 +130,36 @@ impl Document {
         start + text[..byte].chars().count()
     }
 
+    /// Make the text equal to `new` with one edit over the part that differs.
+    /// Returns true if anything changed.
+    pub fn replace_all_minimal(&mut self, new: &str, cursor_before: usize) -> bool {
+        let old = self.rope.to_string();
+        if old == new {
+            return false;
+        }
+        let mut pre = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+        while !old.is_char_boundary(pre) || !new.is_char_boundary(pre) {
+            pre -= 1;
+        }
+        let max_suf = old.len().min(new.len()) - pre;
+        let mut suf = old.bytes().rev().zip(new.bytes().rev()).take_while(|(a, b)| a == b).count().min(max_suf);
+        while !old.is_char_boundary(old.len() - suf) || !new.is_char_boundary(new.len() - suf) {
+            suf -= 1;
+        }
+        let from = old[..pre].chars().count();
+        let to = from + old[pre..old.len() - suf].chars().count();
+        let ins = &new[pre..new.len() - suf];
+        self.break_undo_group();
+        if to > from {
+            self.remove(from, to, cursor_before);
+        }
+        if !ins.is_empty() {
+            self.insert(from, ins, cursor_before);
+        }
+        self.break_undo_group();
+        true
+    }
+
     pub fn insert(&mut self, at: usize, text: &str, cursor_before: usize) {
         self.apply(Edit { at, removed: String::new(), inserted: text.into(), cursor_before });
     }
@@ -144,6 +177,7 @@ impl Document {
         self.rope.remove(e.at..e.at + n);
         self.rope.insert(e.at, &e.inserted);
         self.dirty = true;
+        self.version += 1;
         self.redo.clear();
         let typing = e.removed.is_empty() && e.inserted.chars().count() == 1 && !e.inserted.contains('\n');
         if self.open_group && typing {
@@ -174,6 +208,7 @@ impl Document {
         }
         self.redo.push(group);
         self.dirty = true;
+        self.version += 1;
         Some(cursor)
     }
 
@@ -189,6 +224,7 @@ impl Document {
         }
         self.undo.push(group);
         self.dirty = true;
+        self.version += 1;
         Some(cursor)
     }
 }
@@ -196,6 +232,16 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimal_replace() {
+        let mut d = Document::from_str("héllo wörld");
+        assert!(d.replace_all_minimal("héllo big wörld", 0));
+        assert_eq!(d.rope.to_string(), "héllo big wörld");
+        assert!(d.replace_all_minimal("hé", 0));
+        assert_eq!(d.rope.to_string(), "hé");
+        assert!(!d.replace_all_minimal("hé", 0));
+    }
 
     #[test]
     fn typing_groups_and_undo() {

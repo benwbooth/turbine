@@ -29,7 +29,7 @@ reflows when the screen changes.
 Agents drive Turbine through its own widget tree and the same input path
 you use. The pointer glides to its target, menus drop open, dialogs fill
 in, and code is typed at a speed you can read, so you can watch what the AI
-is doing. Pressing any key pauses it, **F12** resumes, and **Esc** stops it.
+is doing. Pressing any key pauses it, **Space** pauses or resumes, and **Esc** stops it.
 Try **AI > Agent Demo**.
 
 ```bash
@@ -54,7 +54,14 @@ comes back once the action has finished on screen.
   wheel), bracketed paste, and the kitty keyboard protocol when the terminal
   has it
 - Movable, resizable, zoomable windows; tile and cascade; Alt+1..9
-- Full menu bar (F10, Alt+letter, mouse) and dialogs
+- Full menu bar (F10, Alt+letter, Alt+Space for ≡, mouse) laid out like
+  Cursor's, plus Borland's system menu, Search, Run/Compile/Debug items,
+  Options and Window; dialogs; a window list (Alt+0)
+- **Vim** (Options > Keymap, or `--keymap vim`): normal, insert, visual,
+  visual line/block and replace modes; operators, motions, text objects and
+  surround; registers, marks, dot repeat, macros; the `:` command line with
+  ranges, `:s`, `:g`, `:norm`, `:sort`; `:e`/`:w`/`:q`/`:sp`/`:bn` and
+  `Ctrl-W` work on Turbine's windows. The engine comes from tessh's editor.
 - Editing: graphemes, wide characters, selection, clipboard, undo/redo,
   auto-indent, overwrite mode
 - Unicode: grapheme clusters, East Asian wide characters (two cells each),
@@ -67,7 +74,7 @@ comes back once the action has finished on screen.
 - The automation socket, plus `--headless --script` for tests and screenshots
 
 The plan covers much more: LSP, DAP, tree-sitter, an embedded terminal
-(libghostty-vt), WASI extensions, full vim mode, AI completion and an
+(libghostty-vt), WASI extensions, Emacs and VS Code keymaps, AI completion and an
 assistant, hearth AI hub integration, a global menu, desktop and web front
 ends, and retro platforms. See [docs/DESIGN.md](docs/DESIGN.md) and
 [docs/STATUS.md](docs/STATUS.md).

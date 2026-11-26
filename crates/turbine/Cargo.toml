@@ -11,3 +11,5 @@ turbine-ui.workspace = true
 turbine-tui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+turbine-vi.workspace = true
+crossterm.workspace = true

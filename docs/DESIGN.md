@@ -130,6 +130,20 @@ macros, windows (`:sp`, `Ctrl-W`), buffers, `:set` options and a vimrc
 subset. It lives in `turbine-vi` behind a small text trait so the same
 engine runs on the rope.
 
+### Menus
+
+The menu bar follows Cursor's (VS Code's) structure and names — File,
+Edit, Selection, View, Go, Run, Terminal, Help, plus Cursor's AI menu —
+merged with Borland's: the ≡ system menu (Alt+Space), Search, the Run
+menu's Compile/Make/Build and debugger items (Trace Into F7, Step Over F8,
+Go to Cursor F4, Toggle Breakpoint Ctrl+F8, Evaluate/Modify Ctrl+F4),
+Options and Window (Tile, Cascade, Zoom F5, Next F6, List Alt+0). In the
+DOS keymap the shortcuts are Borland's where the two disagree (F2 Save,
+F3 Open, F5 Zoom); the VS Code keymap will show VS Code's. Items for
+features not built yet stay in the menus, disabled, so the structure is
+always the final one. When the bar is too narrow it tightens, and titles
+that still don't fit stay reachable with Alt+letter and the arrow keys.
+
 ### Embedded terminal
 
 `turbine-term` wraps a VT engine and draws its cell grid into a
@@ -283,6 +297,7 @@ crates/
   turbine-text   rope, encodings, unicode width/graphemes/bidi
   turbine-ui     surface, themes, widgets, layout, automation tree
   turbine-tui    terminal front end (crossterm, kitty keyboard)
+  turbine-vi     vim engine (from tessh) + host session (macros, Ctrl-W)
   turbine        the binary
 wit/turbine.wit  extension interface
 docs/            design and status
@@ -291,5 +306,5 @@ docs/            design and status
 The binary also holds the workbench (`workbench.rs`), the agent driver
 (`agent.rs`) and the automation socket (`server.rs`) for now.
 
-Planned crates: `turbine-vi`, `turbine-term`, `turbine-ext`, `turbine-lsp`,
+Planned crates: `turbine-term`, `turbine-ext`, `turbine-lsp`,
 `turbine-dap`, `turbine-ai`, `turbine-app`, `turbine-web`.

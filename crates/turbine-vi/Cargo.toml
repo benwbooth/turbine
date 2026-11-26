@@ -1,0 +1,9 @@
+[package]
+name = "turbine-vi"
+description = "Vim for Turbine: normal/visual/replace modes, operators, text objects, surround, registers, marks, macros and the ex command line (from tessh's editor)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crossterm.workspace = true
