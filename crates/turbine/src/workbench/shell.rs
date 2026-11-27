@@ -64,8 +64,6 @@ pub(super) struct Shell {
     /// The tabs that didn't fit: "▼ n" (its place, how many), and its list.
     pub tab_more: Option<(Rect, usize)>,
     pub tab_menu: Option<(turbine_ui::popup::ListPopup, Vec<u32>, Point)>,
-    /// The panel's height before Maximize (None: not maximized).
-    pub panel_restore: Option<i32>,
     /// The cursor: "Block", "Underline" or "Bar", and whether it blinks.
     pub cursor_style: String,
     pub cursor_blink: bool,
@@ -115,7 +113,6 @@ impl Shell {
             tab_click: None,
             tab_more: None,
             tab_menu: None,
-            panel_restore: None,
             cursor_style: "Block".into(),
             cursor_blink: true,
             mirrored: HashMap::new(),
@@ -218,7 +215,7 @@ impl Workbench {
         let Some(r) = self.layout().bottom else { return Vec::new() };
         let icons = self.theme.style.icons;
         let on_term = matches!(self.shell.dock.bottom.current(), Some(Tab::Pane(id)) if self.windows.iter().any(|w| w.win.id == id && w.term.is_some()));
-        let max = self.shell.panel_restore.is_some();
+        let max = self.shell.dock.maximized;
         let mut items: Vec<(&'static str, &'static str, &str)> = Vec::new();
         if on_term {
             items.push(("new_terminal", "New Terminal", if icons { "\u{ea60}" } else { "+" }));
@@ -243,13 +240,7 @@ impl Workbench {
     pub(super) fn panel_button(&mut self, action: &str) {
         match action {
             "new_terminal" => self.show_tab(Tab::Terminal),
-            "maximize" => match self.shell.panel_restore.take() {
-                Some(h) => self.shell.dock.bottom.size = h,
-                None => {
-                    self.shell.panel_restore = Some(self.shell.dock.bottom.size);
-                    self.shell.dock.bottom.size = 400;
-                }
-            },
+            "maximize" => self.shell.dock.maximized = !self.shell.dock.maximized,
             _ => {
                 self.shell.dock.bottom.visible = false;
                 self.shell.focus = Focus::Editors;
@@ -1487,7 +1478,7 @@ impl Workbench {
             self.shell.dock.tab_rects(Side::Bottom, r, &title).iter().any(|(_, tr, _)| tr.contains(m.pos)) || self.panel_buttons().iter().any(|b| b.0.contains(m.pos))
         };
         if press && !on_panel_control && self.shell.dock.begin_drag(&l, m.pos) {
-            self.shell.panel_restore = None;
+            self.shell.dock.maximized = false;
             return true;
         }
         // Breadcrumbs: a folder shows in the Explorer, the file or a symbol

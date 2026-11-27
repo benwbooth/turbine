@@ -148,6 +148,8 @@ pub struct Dock {
     pub crumbs_hidden: bool,
     /// Tabs with emoji icons and rounded ends (from the control style).
     pub icons: bool,
+    /// The panel covers the editors (VS Code's Maximize Panel Size).
+    pub maximized: bool,
     drag: Option<Drag>,
 }
 
@@ -161,6 +163,7 @@ impl Default for Dock {
             breadcrumbs: true,
             crumbs_hidden: false,
             icons: false,
+            maximized: false,
             drag: None,
         }
     }
@@ -255,6 +258,11 @@ impl Dock {
             (None, ed)
         };
         let editor_tabs = (self.editor_tabs && editors.h > 4 && editors.w > 16).then(|| Rect::new(editors.x + 2, editors.y, editors.w - 9, 1));
+        // Maximized: the panel over the whole of the editors' place (they
+        // keep theirs underneath, drawn over).
+        if self.maximized && bottom.is_some() {
+            return Layout { left, bottom: Some(mid), right, editors, editor_tabs: None, breadcrumbs: None };
+        }
         Layout { left, bottom, right, editors, editor_tabs, breadcrumbs }
     }
 

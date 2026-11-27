@@ -5103,7 +5103,9 @@ mod tests {
         // Maximize, then restore.
         let h = wb.layout().bottom.unwrap().h;
         run(&mut wb, json!({"cmd": "click", "target": "panel.maximize"}));
-        assert!(wb.layout().bottom.unwrap().h > h);
+        // (Over the whole of the editors' place.)
+        let l = wb.layout();
+        assert!(l.bottom.unwrap().y <= l.editors.y && l.bottom.unwrap().h > h, "{l:?}");
         run(&mut wb, json!({"cmd": "click", "target": "panel.maximize"}));
         assert_eq!(wb.layout().bottom.unwrap().h, h);
         // The top edge (not on a tab) drags it taller.

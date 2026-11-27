@@ -4,6 +4,7 @@
 
 #include <QtCore/QCoreApplication>
 #include <QtGui/QClipboard>
+#include <QtCore/QSettings>
 #include <QtGui/QFontDatabase>
 #include <QtGui/QFontMetricsF>
 #include <QtGui/QGuiApplication>
@@ -149,19 +150,10 @@ CellView::CellView(QQuickItem* parent)
     }
     m_boldItalic = m_bold;
     if (!singleFace(m_font)) m_boldItalic.setItalic(true);
-    QFontMetricsF fm(m_font);
-    // Whole pixels per cell, so lines and glyphs land on the same grid.
-    m_cw = std::ceil(fm.horizontalAdvance(QLatin1Char('M')));
-    m_ch = std::ceil(fm.lineSpacing());
-    m_ascent = fm.ascent() + (m_ch - fm.lineSpacing()) / 2;
-    if (m_vga) {
-        // A 9-dot cell 9 px wide; 16 lines at 4:3 (720x400 on a 4:3 tube)
-        // make it 16 x 1.35 = 21.6 px tall. (8-dot VB-DOS: 640x400, the
-        // same cell: 8 dots x 1.125 wide, 16 lines x 1.35.)
-        m_cw = 9;
-        m_ch = 21.6;
-        setSmooth(true);
-    }
+    // The zoom (Ctrl+= / Ctrl+- / Ctrl+0), kept between runs; a little
+    // under the VGA's own size by default.
+    m_zoom = std::clamp(QSettings(QStringLiteral("turbine"), QStringLiteral("view")).value(QStringLiteral("zoom"), 0.85).toDouble(), 0.5, 3.0);
+    applyZoom();
 
     m_blink.setInterval(530);
     connect(&m_blink, &QTimer::timeout, this, [this] {
@@ -202,6 +194,38 @@ void CellView::relayout()
         turbine::app_resize(cols, rows);
         afterInput();
     }
+}
+
+// The cell's size at the zoom: the VGA's 9 x 21.6 cell scaled, or the
+// font at its size times the zoom.
+void CellView::applyZoom()
+{
+    if (m_vga) {
+        // A 9-dot cell 9 px wide; 16 lines at 4:3 (720x400 on a 4:3 tube)
+        // make it 16 x 1.35 = 21.6 px tall. (8-dot VB-DOS: 640x400, the
+        // same cell: 8 dots x 1.125 wide, 16 lines x 1.35.)
+        m_cw = 9 * m_zoom;
+        m_ch = 21.6 * m_zoom;
+        setSmooth(true);
+        return;
+    }
+    if (m_basePx <= 0) m_basePx = m_font.pixelSize() > 0 ? m_font.pixelSize() : 14;
+    const int px = std::max(6, int(std::lround(m_basePx * m_zoom / 0.85)));
+    for (QFont* f : { &m_font, &m_bold, &m_italic, &m_boldItalic }) f->setPixelSize(px);
+    QFontMetricsF fm(m_font);
+    // Whole pixels per cell, so lines and glyphs land on the same grid.
+    m_cw = std::ceil(fm.horizontalAdvance(QLatin1Char('M')));
+    m_ch = std::ceil(fm.lineSpacing());
+    m_ascent = fm.ascent() + (m_ch - fm.lineSpacing()) / 2;
+}
+
+void CellView::zoomBy(int step)
+{
+    m_zoom = step == 0 ? 0.85 : std::clamp(m_zoom * (step > 0 ? 1.1 : 1 / 1.1), 0.5, 3.0);
+    QSettings(QStringLiteral("turbine"), QStringLiteral("view")).setValue(QStringLiteral("zoom"), m_zoom);
+    applyZoom();
+    relayout();
+    update();
 }
 
 void CellView::geometryChange(const QRectF& now, const QRectF& old)
@@ -278,6 +302,15 @@ bool CellView::event(QEvent* e)
 void CellView::keyPressEvent(QKeyEvent* e)
 {
     const auto mods = e->modifiers();
+    // Zoom, as VS Code's: Ctrl+= (or +) bigger, Ctrl+- smaller, Ctrl+0 back.
+    if ((mods & Qt::ControlModifier) && !(mods & (Qt::AltModifier | Qt::MetaModifier))) {
+        const int k = e->key();
+        if (k == Qt::Key_Equal || k == Qt::Key_Plus || k == Qt::Key_Minus || k == Qt::Key_Underscore || (k == Qt::Key_0 && !(mods & Qt::ShiftModifier))) {
+            zoomBy(k == Qt::Key_0 ? 0 : (k == Qt::Key_Minus || k == Qt::Key_Underscore) ? -1 : 1);
+            e->accept();
+            return;
+        }
+    }
     // Before a key that may paste, Turbine learns what the desktop copied.
     if ((mods & Qt::ControlModifier) || (e->key() == Qt::Key_Insert && (mods & Qt::ShiftModifier)))
         turbine::app_set_clipboard(rust::Str(QGuiApplication::clipboard()->text().toStdString()));

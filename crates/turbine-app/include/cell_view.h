@@ -62,6 +62,10 @@ private:
     // there, and paint() runs on Qt Quick's render thread on a real display.
     std::shared_ptr<turbine::Frame> m_frame;
     QFont m_font, m_bold, m_italic, m_boldItalic;
+    qreal m_zoom = 0.85;
+    int m_basePx = 0;
+    void applyZoom();
+    void zoomBy(int step);
     qreal m_cw = 8, m_ch = 16, m_ascent = 12;
     // VGA mode (the default with the DOS font installed): the screen is
     // drawn at text mode's own pixels, 8 or 9 dots by 16 per character
