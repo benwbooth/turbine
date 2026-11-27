@@ -17,22 +17,41 @@ namespace {
 
 QColor rgb(uint32_t c) { return QColor((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff); }
 
-// The desktop's monospace font, or TURBINE_FONT ("Family 12" or "Family").
+// The IBM VGA 9x16 text-mode font (the Oldschool PC Font Pack's PxPlus
+// version: the DOS glyphs plus most of Unicode's European and symbol
+// ranges), then Ac437's, then good monospace fonts for anything else. The
+// desktop's monospace font when none of those is installed. TURBINE_FONT
+// overrides ("Family 16", "Family"; a size in pixels).
 QFont baseFont()
 {
-    QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     const QString env = qEnvironmentVariable("TURBINE_FONT").trimmed();
+    QFont f;
     if (!env.isEmpty()) {
         const int sp = env.lastIndexOf(QLatin1Char(' '));
         bool ok = false;
         const double size = sp > 0 ? env.mid(sp + 1).toDouble(&ok) : 0;
-        f.setFamily(ok ? env.left(sp) : env);
-        if (ok && size > 0) f.setPointSizeF(size);
+        f.setFamilies({ ok ? env.left(sp) : env, QStringLiteral("PxPlus IBM VGA 9x16"), QStringLiteral("UbuntuMono Nerd Font Mono"), QStringLiteral("Hack") });
+        f.setPixelSize(ok && size > 0 ? int(size) : 16);
+    } else if (QFontDatabase::hasFamily(QStringLiteral("PxPlus IBM VGA 9x16")) || QFontDatabase::hasFamily(QStringLiteral("Ac437 IBM VGA 9x16"))) {
+        f.setFamilies({ QStringLiteral("PxPlus IBM VGA 9x16"), QStringLiteral("Ac437 IBM VGA 9x16"),
+                        QStringLiteral("UbuntuMono Nerd Font Mono"), QStringLiteral("Hack"), QStringLiteral("DejaVu Sans Mono") });
+        // 16 pixels: the font's own cell height.
+        f.setPixelSize(16);
+    } else {
+        f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     }
     f.setStyleHint(QFont::Monospace);
     f.setFixedPitch(true);
     f.setKerning(false);
     return f;
+}
+
+// Pixel fonts from the DOS era have one weight: emphasis there is a bright
+// colour, and a synthesised bold or slant only smears the glyphs.
+bool singleFace(const QFont& f)
+{
+    const QString fam = f.families().value(0, f.family());
+    return fam.startsWith(QLatin1String("PxPlus")) || fam.startsWith(QLatin1String("Px437")) || fam.startsWith(QLatin1String("Ac437")) || fam.startsWith(QLatin1String("Mx437"));
 }
 
 // Box drawing: the four arms of a character (up, right, down, left), each
@@ -108,11 +127,13 @@ CellView::CellView(QQuickItem* parent)
 
     m_font = baseFont();
     m_bold = m_font;
-    m_bold.setBold(true);
     m_italic = m_font;
-    m_italic.setItalic(true);
+    if (!singleFace(m_font)) {
+        m_bold.setBold(true);
+        m_italic.setItalic(true);
+    }
     m_boldItalic = m_bold;
-    m_boldItalic.setItalic(true);
+    if (!singleFace(m_font)) m_boldItalic.setItalic(true);
     QFontMetricsF fm(m_font);
     // Whole pixels per cell, so lines and glyphs land on the same grid.
     m_cw = std::ceil(fm.horizontalAdvance(QLatin1Char('M')));
