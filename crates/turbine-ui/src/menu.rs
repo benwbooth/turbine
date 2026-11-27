@@ -118,9 +118,28 @@ impl MenuBar {
         let tight = self.width > 0 && roomy > self.width;
         let (mut x, pad) = if tight { (0, 1) } else { (2, 2) };
         let n = widths.len();
+        // (Still too wide: VS Code's own menus give way first, Selection
+        // then Go, keeping Borland's and QBasic's, and Help at the right;
+        // their Alt keys still open them.)
+        let mut gone: Vec<usize> = Vec::new();
+        if tight {
+            let shown = |gone: &[usize]| widths.iter().enumerate().filter(|(i, _)| !gone.contains(i) && !(self.hide_system && hotkey(&self.menus[*i].title).is_none())).map(|(_, w)| w + pad).sum::<i32>();
+            for name in ["Selection", "Go"] {
+                if shown(&gone) <= self.width {
+                    break;
+                }
+                if let Some(i) = self.menus.iter().position(|m| m.plain_title() == name) {
+                    gone.push(i);
+                }
+            }
+        }
         let mut rects: Vec<Rect> = widths
             .iter()
-            .map(|&tw| {
+            .enumerate()
+            .map(|(i, &tw)| {
+                if gone.contains(&i) {
+                    return Rect::new(x, 0, 0, 1);
+                }
                 let w = tw + pad;
                 let fits = self.width <= 0 || x + w <= self.width;
                 let r = if fits { Rect::new(x, 0, w, 1) } else { Rect::new(self.width, 0, 0, 1) };

@@ -311,9 +311,6 @@ fn menus() -> Vec<Menu> {
                 it("~A~bout Turbine...", "", "help.about"),
                 sep(),
                 it("~R~epaint Desktop", "", "app.repaint"),
-                it("Show ~C~lipboard", "", "edit.show_clipboard"),
-                it("~C~alculator", "", "tools.calculator"),
-                it("~F~ile Manager", "Ctrl+Alt+F", "tools.file_manager"),
             ],
         ),
         Menu::new(
@@ -476,7 +473,7 @@ fn menus() -> Vec<Menu> {
             ],
         ),
         Menu::new(
-            "~T~erminal",
+            "Ter~m~inal",
             vec![
                 it("~N~ew Terminal", "Ctrl+Shift+`", "terminal.new"),
                 it("~S~plit Terminal", "", "terminal.split"),
@@ -515,6 +512,20 @@ fn menus() -> Vec<Menu> {
                 sep(),
                 it("Agent ~D~emo", "", "agent.demo"),
                 it("~S~top Agent", "Esc", "agent.stop"),
+            ],
+        ),
+        // Turbo Pascal 7's Tools menu: the programs that come with Turbine
+        // (extensions add theirs at the end).
+        Menu::new(
+            "~T~ools",
+            vec![
+                it("~F~ile Manager", "Ctrl+Alt+F", "tools.file_manager"),
+                it("~C~alculator", "", "tools.calculator"),
+                it("Show C~l~ipboard", "", "edit.show_clipboard"),
+                sep(),
+                it("~G~rep (Find in Files)...", "Ctrl+Shift+F", "search.files"),
+                it("New ~T~erminal", "Ctrl+Shift+`", "terminal.new"),
+                it("Command ~P~alette...", "Ctrl+Shift+P", "view.palette"),
             ],
         ),
         Menu::new(
@@ -4773,10 +4784,11 @@ mod tests {
     #[test]
     fn narrow_menu_bar_fits_or_stays_reachable() {
         let mut wb = bench();
-        wb.dispatch(Event::Resize(80, 25));
+        // (VS Code's menus and Borland's together: 84 columns for all.)
+        wb.dispatch(Event::Resize(84, 25));
         let rects = wb.menubar.title_rects();
-        assert!(rects.iter().all(|r| r.right() <= 80));
-        assert!(rects.iter().all(|r| r.w > 0), "all menus fit at 80 columns");
+        assert!(rects.iter().all(|r| r.right() <= 84));
+        assert!(rects.iter().all(|r| r.w > 0), "all menus fit at 84 columns");
         wb.dispatch(Event::Resize(40, 25));
         keys(&mut wb, &["Alt+H"]);
         assert!(wb.menubar.open.is_some(), "Help opens from the keyboard even when it doesn't fit");
@@ -5449,7 +5461,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("exts/hello")).unwrap();
         std::fs::write(dir.join("exts/hello/extension.wasm"), turbine_ext::pack(&core).unwrap()).unwrap();
         wb.start_extensions(vec![dir.join("exts")]);
-        wait_until(&mut wb, "the Tools menu", |wb| wb.menubar.menus.iter().any(|m| m.plain_title() == "Tools" && m.items.len() == 2));
+        wait_until(&mut wb, "the Tools menu", |wb| wb.menubar.menus.iter().any(|m| m.plain_title() == "Tools" && m.items.iter().filter(|i| i.command.starts_with("ext:")).count() == 2));
         // The menu item, through the palette as a person would find it.
         wb.goto_file(&dir.join("notes.md"), Some(0), 0);
         keys(&mut wb, &["Ctrl+Shift+P"]);

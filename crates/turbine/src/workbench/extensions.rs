@@ -128,6 +128,10 @@ impl Workbench {
             }
         };
         if !menus[i].items.iter().any(|it| it.command == command) {
+            // (Below a line under the menu's own items.)
+            if menus[i].items.last().is_some_and(|it| !it.command.starts_with("ext:") && !it.is_separator()) {
+                menus[i].items.push(MenuItem::separator());
+            }
             menus[i].items.push(MenuItem::new(label, shortcut, command));
         }
     }

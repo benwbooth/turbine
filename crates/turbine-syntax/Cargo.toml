@@ -32,3 +32,4 @@ tree-sitter-yaml = "0.7.2"
 tree-sitter-sequel = "0.3.13"
 # tessh's grammar lives in Tessera; scripts/sync-tessh-grammar.sh copies it here.
 tree-sitter-tessh = { path = "../../vendor/tree-sitter-tessh" }
+xdg-mime = "0.4.0"

@@ -277,6 +277,91 @@ pub fn detect(path: Option<&Path>, first_line: &str) -> Option<String> {
     if l.to_ascii_lowercase().starts_with("<!doctype html") || l.starts_with("<html") {
         return Some("html".into());
     }
+    // Then the desktop's MIME database (shared-mime-info, as grove and
+    // the file managers use): its globs for the name, its magic for the
+    // first line, and each type's parents in turn.
+    by_mime(path, first_line)
+}
+
+fn mime_db() -> &'static std::sync::Mutex<xdg_mime::SharedMimeInfo> {
+    static DB: std::sync::OnceLock<std::sync::Mutex<xdg_mime::SharedMimeInfo>> = std::sync::OnceLock::new();
+    DB.get_or_init(|| std::sync::Mutex::new(xdg_mime::SharedMimeInfo::new()))
+}
+
+/// Load the MIME database ahead (off the UI thread) so the first look is quick.
+pub fn warm_mime_db() {
+    std::thread::spawn(|| {
+        let _ = mime_db();
+    });
+}
+
+/// A language for a MIME type: the names that differ, else the type's
+/// own name when a grammar goes by it (text/x-toml: toml).
+fn lang_for_mime(m: &str) -> Option<String> {
+    let named = match m {
+        "application/x-shellscript" | "text/x-shellscript" | "application/x-sh" => "bash",
+        "text/x-python" | "text/x-python3" | "application/x-python" => "python",
+        "text/x-csrc" | "text/x-chdr" => "c",
+        "text/x-c++src" | "text/x-c++hdr" => "cpp",
+        "text/x-csharp" => "c-sharp",
+        "application/json" | "application/x-ipynb+json" | "application/geo+json" | "application/ld+json" => "json",
+        "application/xml" | "text/xml" | "image/svg+xml" | "application/x-desktop" => {
+            if m == "application/x-desktop" { "ini" } else { "xml" }
+        }
+        "application/javascript" | "text/javascript" | "application/x-javascript" => "javascript",
+        "application/x-ruby" | "text/x-ruby" => "ruby",
+        "text/x-makefile" => "make",
+        "application/yaml" | "application/x-yaml" | "text/x-yaml" => "yaml",
+        "application/toml" | "text/x-toml" => "toml",
+        "text/markdown" | "text/x-markdown" => "markdown",
+        "text/x-tex" | "text/x-latex" => "latex",
+        "text/x-patch" | "text/x-diff" => "diff",
+        "application/sql" | "text/x-sql" => "sql",
+        "text/x-dsrc" => "d",
+        "text/x-objcsrc" => "objc",
+        "text/x-gettext-translation" | "text/x-gettext-translation-template" => "po",
+        "application/x-php" => "php",
+        "application/x-perl" | "text/x-perl" => "perl",
+        "text/x-systemd-unit" | "text/x-ini" | "text/x-ini-file" => "ini",
+        _ => "",
+    };
+    if !named.is_empty() {
+        return Some(named.into());
+    }
+    let sub = m.split_once('/')?.1;
+    let name = sub.trim_start_matches("x-").trim_end_matches("src").to_ascii_lowercase();
+    let known = BUILTIN.iter().any(|(n, _)| *n == name) || grammars::known().iter().any(|n| *n == name);
+    known.then_some(name)
+}
+
+fn by_mime(path: Option<&Path>, first_line: &str) -> Option<String> {
+    let db = mime_db().lock().ok()?;
+    let mut g = db.guess_mime_type();
+    if let Some(name) = path.and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()) {
+        g.file_name(&name);
+    }
+    if !first_line.is_empty() {
+        g.data(first_line.as_bytes());
+    }
+    let guess = g.guess();
+    let mut todo = vec![guess.mime_type().clone()];
+    let mut seen = 0;
+    while let Some(m) = todo.pop() {
+        let s = m.essence_str().to_string();
+        if s == "text/plain" || s == "application/octet-stream" {
+            continue;
+        }
+        if let Some(l) = lang_for_mime(&s) {
+            return Some(l);
+        }
+        seen += 1;
+        if seen > 12 {
+            break;
+        }
+        if let Some(ps) = db.get_parents(&m) {
+            todo.extend(ps);
+        }
+    }
     None
 }
 
