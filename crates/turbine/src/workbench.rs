@@ -5682,6 +5682,31 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_l_opens_the_chat_in_vim_mode_too() {
+        let (dir, mut wb) = project("vimchat");
+        wb.set_keymap(Keymap::Vim);
+        wb.goto_file(&dir.join("src/main.rs"), Some(0), 0);
+        keys(&mut wb, &["Ctrl+L"]);
+        assert!(wb.shell.dock.right.visible, "the chat side bar shows");
+        assert_eq!(wb.shell.focus, Focus::Chat);
+        run(&mut wb, json!({"cmd": "type", "text": "hi"}));
+        assert_eq!(wb.shell.chat_input.text, "hi");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_secondary_side_bar_button_opens_the_chat() {
+        let (dir, mut wb) = project("rightbar");
+        assert!(wb.shell.dock.right.tabs.is_empty());
+        wb.run_command("view.secondary");
+        assert!(wb.shell.dock.right.visible && !wb.shell.dock.right.tabs.is_empty());
+        assert_eq!(wb.shell.focus, Focus::Chat);
+        wb.run_command("view.secondary");
+        assert!(!wb.shell.dock.right.visible);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn panel_terminal_and_chat_dock_and_toggle() {
         let (dir, mut wb) = project("panel");
         assert!(!wb.shell.dock.bottom.visible);
@@ -6175,6 +6200,15 @@ mod tests {
         let name = other.file_name().unwrap().to_string_lossy().into_owned();
         wait_until(&mut wb, "both trees", |wb| wb.shell.explorer.list.rows.iter().any(|r| r.text == "second.txt") && wb.shell.explorer.list.rows.iter().any(|r| r.text == "notes.md"));
         assert!(wb.shell.explorer.list.rows.iter().any(|r| r.heading && r.text == name));
+        // Each folder folds to its heading (▾ ▸), as VS Code's do.
+        let i = wb.shell.explorer.list.rows.iter().position(|r| r.heading && r.text == name).unwrap();
+        assert_eq!(wb.shell.explorer.list.rows[i].icon, "▾");
+        assert_eq!(wb.shell.explorer.activate(i), None);
+        assert_eq!(wb.shell.explorer.list.rows[i].icon, "▸");
+        assert!(!wb.shell.explorer.list.rows.iter().any(|r| r.text == "second.txt"));
+        assert!(wb.shell.explorer.list.rows.iter().any(|r| r.text == "notes.md"), "the other stays open");
+        wb.shell.explorer.expand(i);
+        assert!(wb.shell.explorer.list.rows.iter().any(|r| r.text == "second.txt"));
         // Right-click its heading: Remove Folder from Workspace.
         let i = wb.shell.explorer.list.rows.iter().position(|r| r.heading && r.text == name).unwrap();
         wb.ex_command("remove_root", i);

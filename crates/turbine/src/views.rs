@@ -92,6 +92,8 @@ pub struct Explorer {
     /// (File > Add Folder to Workspace).
     pub extra: Vec<PathBuf>,
     pub expanded: HashSet<PathBuf>,
+    /// Workspace folders folded to their heading (▸).
+    pub closed_roots: HashSet<PathBuf>,
     children: HashMap<PathBuf, Vec<(String, bool)>>,
     pending: HashSet<PathBuf>,
     tx: Sender<(PathBuf, Vec<(String, bool)>, Vec<(PathBuf, Meta)>)>,
@@ -179,6 +181,7 @@ impl Explorer {
             root: root.clone(),
             extra: Vec::new(),
             expanded: HashSet::from([root.clone()]),
+            closed_roots: HashSet::new(),
             children: HashMap::new(),
             pending: HashSet::new(),
             tx,
@@ -426,9 +429,13 @@ impl Explorer {
         // Each folder of the workspace: its name, then its tree.
         for root in self.roots() {
             let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
-            rows.push(Row::new(name).heading());
+            // (Each folds to its heading, as VS Code's workspace folders do.)
+            let open = !self.closed_roots.contains(&root);
+            rows.push(Row::new(name).heading().icon(if open { "▾" } else { "▸" }));
             paths.push((root.clone(), true));
-            self.walk(&root, 0, &mut rows, &mut paths);
+            if open {
+                self.walk(&root, 0, &mut rows, &mut paths);
+            }
         }
         self.paths = paths;
         self.list.set_rows(rows);
@@ -519,7 +526,11 @@ impl Explorer {
 
     /// Open or close a folder.
     pub fn toggle(&mut self, dir: &Path) {
-        if dir == self.root {
+        if self.roots().iter().any(|r| r == dir) {
+            if !self.closed_roots.remove(dir) {
+                self.closed_roots.insert(dir.to_path_buf());
+            }
+            self.rebuild();
             return;
         }
         if !self.expanded.remove(dir) {
@@ -591,6 +602,12 @@ impl Explorer {
     /// Left: close the folder (or go to the parent); Right: open it.
     pub fn collapse(&mut self, i: usize) {
         let Some((p, dir)) = self.paths.get(i).cloned() else { return };
+        if self.is_root_row(i) {
+            if !self.closed_roots.contains(&p) {
+                self.toggle(&p);
+            }
+            return;
+        }
         if dir && self.expanded.contains(&p) && p != self.root {
             self.toggle(&p);
         } else if let Some(parent) = p.parent() {
@@ -601,6 +618,13 @@ impl Explorer {
     }
 
     pub fn expand(&mut self, i: usize) {
+        if self.is_root_row(i) {
+            let p = self.paths[i].0.clone();
+            if self.closed_roots.contains(&p) {
+                self.toggle(&p);
+            }
+            return;
+        }
         if let Some((p, true)) = self.paths.get(i).cloned() {
             if !self.expanded.contains(&p) {
                 self.toggle(&p);
@@ -624,6 +648,12 @@ impl Explorer {
 
     /// Show a file: open the folders down to it and select it.
     pub fn reveal(&mut self, file: &Path) {
+        // (Its workspace folder unfolded first.)
+        if let Some(r) = self.roots().into_iter().find(|r| file.starts_with(r)) {
+            if self.closed_roots.remove(&r) {
+                self.rebuild();
+            }
+        }
         let Ok(rel) = file.strip_prefix(&self.root) else { return };
         let mut d = self.root.clone();
         let parts: Vec<_> = rel.components().collect();

@@ -1078,6 +1078,12 @@ impl Workbench {
 
     /// Toggle a part; showing one focuses its view.
     fn toggle_part(&mut self, side: Side) {
+        // (The secondary side bar is the AI chat's, as Cursor's: shown
+        // before any chat, it opens one rather than showing nothing.)
+        if side == Side::Right && !self.shell.dock.right.visible && self.shell.dock.right.tabs.is_empty() {
+            self.show_chat();
+            return;
+        }
         let p = self.shell.dock.part_mut(side);
         p.visible = !p.visible && !p.tabs.is_empty();
         if p.visible {
