@@ -144,6 +144,8 @@ pub struct EditorView {
     /// Dragging after a multi-click: the unit (2 word, 3 line, 4 paragraph)
     /// and the first one's range, so the selection grows by whole units.
     unit_drag: Option<(u8, usize, usize)>,
+    /// The widest line, measured at a version of the text.
+    longest: std::cell::Cell<Option<(u64, usize)>>,
     /// A minimap at the right (Cursor's), when there's room; where it was
     /// drawn, and a drag on it.
     pub minimap: bool,
@@ -197,6 +199,7 @@ impl EditorView {
             dragging: false,
             clicks: None,
             unit_drag: None,
+            longest: std::cell::Cell::new(None),
             minimap: false,
             minimap_rect: None,
             minimap_drag: false,
@@ -812,10 +815,18 @@ impl EditorView {
         self.area
     }
 
-    /// The widest line in view (tabs as four), for the sideways bar.
+    /// The file's widest line (tabs as four), for the sideways bar: the
+    /// whole file's, so scrolling up and down doesn't change the thumb.
+    /// (Measured once per change of the text.)
     pub fn longest_in_view(&self) -> usize {
-        let lines = self.doc.len_lines();
-        (self.scroll_y..(self.scroll_y + self.area.h.max(1) as usize).min(lines)).map(|l| turbine_text::unicode::str_width(&self.doc.line(l).replace('\t', "    "))).max().unwrap_or(0)
+        if let Some((v, n)) = self.longest.get() {
+            if v == self.doc.version {
+                return n;
+            }
+        }
+        let n = (0..self.doc.len_lines()).map(|l| turbine_text::unicode::str_width(&self.doc.line(l).replace('\t', "    "))).max().unwrap_or(0);
+        self.longest.set(Some((self.doc.version, n)));
+        n
     }
 
     /// The text's width in columns (without the line numbers).
@@ -1106,8 +1117,7 @@ impl EditorView {
             return;
         }
         let w = (self.area.w - self.gutter_width()).max(1) as usize;
-        let lines = self.doc.len_lines();
-        let longest = (self.scroll_y..(self.scroll_y + self.area.h.max(1) as usize).min(lines)).map(|l| turbine_text::unicode::str_width(&self.doc.line(l).replace('\t', "    "))).max().unwrap_or(0);
+        let longest = self.longest_in_view();
         if longest <= w && self.scroll_x == 0 {
             return;
         }
@@ -1122,8 +1132,7 @@ impl EditorView {
         let rows = self.area.h.max(1) as usize;
         draw_vscroll(c, frame.right() - 1, frame.y + 1, frame.h - 2, self.scroll_y, rows, self.doc.len_lines().max(self.scroll_y + rows), theme.scheme.scrollbar, ch);
         let w = (self.area.w - self.gutter_width()).max(1) as usize;
-        let lines = self.doc.len_lines();
-        let longest = (self.scroll_y..(self.scroll_y + rows).min(lines)).map(|l| turbine_text::unicode::str_width(&self.doc.line(l).replace('\t', "    "))).max().unwrap_or(0).max(self.scroll_x + w);
+        let longest = self.longest_in_view().max(self.scroll_x + w);
         // (Borland's windows show line:column in the bottom edge's first
         // cells: the bar starts after them.)
         let skip = if theme.style.window_numbers && frame.w > 20 { 13 } else { 2 };
