@@ -68,6 +68,14 @@ pub(super) struct Shell {
     pub tab_click: Option<(u32, Instant)>,
     /// The tabs that didn't fit: "▼ n" (its place, how many), and its list.
     pub tab_more: Option<(Rect, usize)>,
+    /// The tab row scrolled by the wheel: the first tab shown, while the
+    /// front editor stays the one it was then.
+    pub tab_scroll: Option<(usize, Option<u32>)>,
+    /// The breadcrumbs scrolled by the wheel: cells from their start, for
+    /// that window.
+    pub crumb_scroll: Option<(i32, u32)>,
+    /// How far the breadcrumbs can scroll (cells), as last laid out.
+    pub crumb_max: i32,
     pub tab_menu: Option<(turbine_ui::popup::ListPopup, Vec<u32>, Point)>,
     /// The cursor: "Block", "Underline" or "Bar", and whether it blinks.
     pub cursor_style: String,
@@ -124,6 +132,9 @@ impl Shell {
             tab_click: None,
             tab_more: None,
             tab_menu: None,
+            tab_scroll: None,
+            crumb_scroll: None,
+            crumb_max: 0,
             cursor_style: "Block".into(),
             cursor_blink: true,
             show_whitespace: false,
@@ -413,10 +424,27 @@ impl Workbench {
         // Too many: the front tab stays in view, the rest that fit with it,
         // and "▼ n" opens a list of them all.
         let more_w = 6;
+        let front_now = self.editor_index().map(|i| self.windows[i].win.id);
+        // (Scrolled by the wheel: from that tab, until another editor comes
+        // to the front.)
+        let scrolled = self.shell.tab_scroll.filter(|(_, f)| *f == front_now).map(|(s, _)| s);
         let (shown, overflow) = if total <= tr.w {
             (eds.clone(), 0)
+        } else if let Some(start) = scrolled {
+            let start = start.min(eds.len().saturating_sub(1));
+            let mut x = 0;
+            let mut v = Vec::new();
+            for w in &eds[start..] {
+                if x + width(w) > tr.w - more_w {
+                    break;
+                }
+                x += width(w);
+                v.push(*w);
+            }
+            let n = eds.len() - v.len();
+            (v, n)
         } else {
-            let front = self.editor_index().map(|i| self.windows[i].win.id);
+            let front = front_now;
             let mut start = 0;
             loop {
                 let mut x = 0;
@@ -502,24 +530,22 @@ impl Workbench {
                 items.push((format!("{icon} {name}"), Crumb::Symbol(l)));
             }
         }
-        // Fit: drop from the start (keeping the file and symbols).
+        // Too long: the end in view (the file and symbols), the start cut;
+        // the wheel scrolls it sideways (until another editor's in front).
         let sep = 3;
-        let total = |it: &[(String, Crumb)]| it.iter().map(|(t, _)| str_width(t) as i32 + sep).sum::<i32>();
-        let mut dropped = false;
-        while total(&items) > r.w - 3 && items.len() > 1 && matches!(items[0].1, Crumb::Folder(_)) {
-            items.remove(0);
-            dropped = true;
-        }
-        let mut x = r.x + 1;
-        if dropped {
-            x += 2;
-        }
+        let total: i32 = items.iter().map(|(t, _)| str_width(t) as i32 + sep).sum::<i32>() - sep + 2;
+        let max = (total - r.w).max(0);
+        let off = match self.shell.crumb_scroll {
+            Some((o, win)) if win == w.win.id => o.clamp(0, max),
+            _ => max,
+        };
+        self.shell.crumb_max = max;
+        let mut x = r.x + 1 - off;
         for (t, c) in items {
             let wdt = str_width(&t) as i32;
-            if x + wdt > r.right() {
-                break;
+            if x + wdt > r.x && x < r.right() {
+                self.shell.crumbs.push((Rect::new(x, r.y, wdt, 1), t, c));
             }
-            self.shell.crumbs.push((Rect::new(x, r.y, wdt, 1), t, c));
             x += wdt + sep;
         }
     }
@@ -1566,6 +1592,38 @@ impl Workbench {
         }
         // Breadcrumbs: a folder shows in the Explorer, the file or a symbol
         // opens Go to Symbol.
+        // The wheel on the breadcrumbs or the tab row scrolls them sideways.
+        let wheel = match m.kind {
+            MouseKind::ScrollUp | MouseKind::ScrollLeft => Some(-1),
+            MouseKind::ScrollDown | MouseKind::ScrollRight => Some(1),
+            _ => None,
+        };
+        if let (Some(dir), Some(br)) = (wheel, l.breadcrumbs) {
+            if br.contains(m.pos) {
+                if let Some(id) = self.editor_index().map(|i| self.windows[i].win.id) {
+                    let cur = match self.shell.crumb_scroll {
+                        Some((o, w)) if w == id => o,
+                        _ => self.shell.crumb_max,
+                    };
+                    self.shell.crumb_scroll = Some(((cur + dir * 4).clamp(0, self.shell.crumb_max), id));
+                    self.layout_dock();
+                }
+                return true;
+            }
+        }
+        if let (Some(dir), Some(tr)) = (wheel, l.editor_tabs) {
+            if tr.contains(m.pos) && self.shell.tab_more.is_some() {
+                let front = self.editor_index().map(|i| self.windows[i].win.id);
+                let mut eds: Vec<u32> = self.windows.iter().filter(|w| w.dock.is_none()).map(|w| w.win.id).collect();
+                eds.sort();
+                let first = self.shell.editor_tab_rects.first().and_then(|t| eds.iter().position(|id| *id == t.0)).unwrap_or(0);
+                let last_shown = self.shell.editor_tab_rects.last().and_then(|t| eds.iter().position(|id| *id == t.0)).unwrap_or(0);
+                let start = if dir > 0 && last_shown + 1 < eds.len() { first + 1 } else if dir < 0 { first.saturating_sub(1) } else { first };
+                self.shell.tab_scroll = Some((start, front));
+                self.layout_dock();
+                return true;
+            }
+        }
         if let Some(br) = l.breadcrumbs {
             if br.contains(m.pos) {
                 if press {
@@ -1827,15 +1885,19 @@ impl Workbench {
             let row = s.crumbs;
             c.fill(br, " ", row);
             let mut bc = c.sub(br);
-            if self.shell.crumbs.first().is_some_and(|(r, ..)| r.x > br.x + 1) {
-                bc.print(br.x + 1, br.y, "…", row);
-            }
             let n = self.shell.crumbs.len();
             for (k, (r, t, _)) in self.shell.crumbs.iter().enumerate() {
                 bc.print(r.x, r.y, t, if k + 1 == n { s.crumbs_last } else { row });
                 if k + 1 < n {
                     bc.print(r.right() + 1, r.y, "»", s.crumbs_sep);
                 }
+            }
+            // (Cut off at either end: … there; the wheel scrolls.)
+            if self.shell.crumbs.first().is_some_and(|(r, ..)| r.x < br.x + 1) {
+                bc.print(br.x, br.y, "…", row);
+            }
+            if self.shell.crumbs.last().is_some_and(|(r, ..)| r.right() > br.right()) {
+                bc.print(br.right() - 1, br.y, "…", row);
             }
         }
         let focused_side = self.focused_side();

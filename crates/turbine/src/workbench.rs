@@ -6167,6 +6167,41 @@ mod tests {
     }
 
     #[test]
+    fn the_wheel_scrolls_tabs_and_breadcrumbs_sideways() {
+        let dir = std::env::temp_dir().join(format!("turbine-tabscroll-{}/a/very/deeply/nested/folder/structure/here", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut wb = bench();
+        wb.dispatch(Event::Resize(90, 20));
+        if wb.shell.dock.left.visible {
+            wb.run_command("view.sidebar");
+        }
+        for i in 0..8 {
+            let p = dir.join(format!("a_long_file_name_{i:02}.rs"));
+            std::fs::write(&p, "fn main() {}\n").unwrap();
+            wb.goto_file(&p, Some(0), 0);
+        }
+        let mut surf = Surface::new(90, 20);
+        wb.render(&mut surf);
+        let l = wb.layout();
+        let tr = l.editor_tabs.unwrap();
+        assert!(wb.shell.tab_more.is_some());
+        let first = |wb: &Workbench| wb.shell.editor_tab_rects.first().map(|t| t.0);
+        let before = first(&wb);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::ScrollUp, pos: Point::new(tr.x + 2, tr.y), mods: Mods::NONE }));
+        wb.render(&mut surf);
+        assert_ne!(first(&wb), before, "the wheel scrolls the tabs");
+        // The breadcrumbs: cut at the start; the wheel shows it.
+        let br = wb.layout().breadcrumbs.unwrap();
+        let x0 = wb.shell.crumbs.first().map(|c| c.0.x).unwrap();
+        for _ in 0..30 {
+            wb.event(Event::Mouse(MouseEvent { kind: MouseKind::ScrollUp, pos: Point::new(br.x + 3, br.y), mods: Mods::NONE }));
+        }
+        wb.render(&mut surf);
+        assert!(wb.shell.crumbs.first().map(|c| c.0.x).unwrap() > x0, "scrolled to the start");
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("turbine-tabscroll-{}", std::process::id())));
+    }
+
+    #[test]
     fn scrolling_sideways() {
         let (dir, mut wb) = project("hscroll");
         std::fs::write(dir.join("wide.txt"), format!("{}\n", "x".repeat(400))).unwrap();
