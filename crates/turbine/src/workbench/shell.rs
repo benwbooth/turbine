@@ -18,6 +18,8 @@ pub(super) enum Focus {
     Chat,
     /// The editor's find box.
     Find,
+    /// Ctrl+K's prompt box.
+    Inline,
 }
 
 /// The views' state.
@@ -42,6 +44,8 @@ pub(super) struct Shell {
     pub palette: Option<Palette>,
     /// The project came from the command line (else the last one returns).
     pub explicit_project: bool,
+    /// The chat sends to the agent (which works the UI) instead of asking.
+    pub chat_agent: bool,
 }
 
 impl Shell {
@@ -62,6 +66,7 @@ impl Shell {
             editor_tab_rects: Vec::new(),
             palette: None,
             explicit_project,
+            chat_agent: false,
         }
     }
 }
@@ -197,7 +202,7 @@ impl Workbench {
         match self.shell.focus {
             Focus::View(t) => self.shell.dock.side_of(t),
             Focus::Chat => Some(Side::Right),
-            Focus::Find => None,
+            Focus::Find | Focus::Inline => None,
             Focus::Editors => self.windows.last().and_then(|w| w.dock),
         }
     }
@@ -541,6 +546,16 @@ impl Workbench {
         }
     }
 
+    /// The chat's mode pill and its field's hint.
+    fn chat_mode_label(&self, icons: bool) -> (String, &'static str) {
+        match (self.shell.chat_agent, icons) {
+            (true, true) => (" 🤖 Agent ".into(), "What should the agent do? (Enter)"),
+            (true, false) => (" Agent ".into(), "What should the agent do? (Enter)"),
+            (false, true) => (" 💬 Ask ".into(), "Ask about the code… (Enter)"),
+            (false, false) => (" Ask ".into(), "Ask about the code… (Enter)"),
+        }
+    }
+
     // ---- remembering the layout --------------------------------------------------------
 
     pub(super) fn layout_json(&self) -> Value {
@@ -625,6 +640,11 @@ impl Workbench {
                 self.shell.dock.right.tabs = tabs.1;
             }
             "view.palette" => self.open_palette(">"),
+            "ai.inline" => {
+                self.focus_editor();
+                self.inline_start();
+            }
+            "ai.chat_mode" => self.shell.chat_agent = !self.shell.chat_agent,
             "search.find" => {
                 self.focus_editor();
                 self.open_find(false);
@@ -661,7 +681,9 @@ impl Workbench {
         if self.ex_key(k) {
             return true;
         }
-        let cmd = if k.is_ctrl('f') && !k.mods.shift && !vim_editor && !self.windows.last().is_some_and(|w| w.is_terminal() && self.shell.focus == Focus::Editors) {
+        let cmd = if k.is_ctrl('k') && !k.mods.shift && !vim_editor && self.shell.focus == Focus::Editors && self.windows.last().is_some_and(|w| w.dock.is_none()) {
+            Some("ai.inline")
+        } else if k.is_ctrl('f') && !k.mods.shift && !vim_editor && !self.windows.last().is_some_and(|w| w.is_terminal() && self.shell.focus == Focus::Editors) {
             Some("search.find")
         } else if k.is_ctrl('h') && !k.mods.shift && !vim_editor && self.shell.focus == Focus::Editors && self.windows.last().is_some_and(|w| w.dock.is_none()) {
             Some("search.replace")
@@ -704,6 +726,10 @@ impl Workbench {
                 self.find_key(k);
                 true
             }
+            Focus::Inline => {
+                self.inline_key(k);
+                true
+            }
             Focus::Chat => {
                 self.chat_key(k);
                 true
@@ -720,13 +746,22 @@ impl Workbench {
     }
 
     fn chat_key(&mut self, k: &KeyEvent) {
+        if k.is_ctrl('.') {
+            self.shell.chat_agent = !self.shell.chat_agent;
+            return;
+        }
         match k.key {
             Key::Esc => self.focus_editor(),
             Key::Enter => {
                 let q = std::mem::take(&mut self.shell.chat_input.text);
                 self.shell.chat_input.cursor = 0;
                 if !q.trim().is_empty() {
-                    self.ask(q.trim());
+                    if self.shell.chat_agent {
+                        self.append_chat(&format!("\n## You (to the agent)\n\n{}\n\n", q.trim()));
+                        self.start_agent(q.trim());
+                    } else {
+                        self.ask(q.trim());
+                    }
                 }
             }
             Key::PageUp | Key::PageDown => {
@@ -945,6 +980,12 @@ impl Workbench {
                     if is_chat && m.pos.y >= r.bottom() - 3 {
                         if press {
                             self.shell.focus = Focus::Chat;
+                            // (The mode pill at the row's start switches the mode.)
+                            let (mode, _) = self.chat_mode_label(self.theme.style.icons);
+                            let pill_w = str_width(&mode) as i32 + if self.theme.style.icons { 2 } else { 0 };
+                            if m.pos.y == r.bottom() - 2 && m.pos.x <= r.x + pill_w {
+                                self.shell.chat_agent = !self.shell.chat_agent;
+                            }
                         }
                         return true;
                     }
@@ -1119,8 +1160,19 @@ impl Workbench {
                         c.print(r.x, y, if fc.v == "║" { "╟" } else { "├" }, fs);
                         c.hline(r.x + 1, y, r.w - 2, "─", fs);
                         c.print(r.right() - 1, y, if fc.v == "║" { "╢" } else { "┤" }, fs);
-                        let field = Rect::new(r.x + 1, r.bottom() - 2, r.w - 2, 1);
-                        self.shell.chat_input.draw(c, field, theme, chat_focus, "Ask about the code… (Enter)");
+                        // The mode (Ctrl+. or a click switches it), then the field.
+                        let (mode, hint) = self.chat_mode_label(theme.style.icons);
+                        let pill = s.menu_selected;
+                        let mx = r.x + 1;
+                        let mut px = mx;
+                        if theme.style.icons {
+                            c.print(px, r.bottom() - 2, crate::dock::CAP_LEFT, Style::new(pill.bg, s.panel.bg));
+                            px += 1;
+                        }
+                        let px = c.print(px, r.bottom() - 2, &mode, pill);
+                        let px = if theme.style.icons { c.print(px, r.bottom() - 2, crate::dock::CAP_RIGHT, Style::new(pill.bg, s.panel.bg)) } else { px };
+                        let field = Rect::new(px + 1, r.bottom() - 2, (r.right() - 1 - (px + 1)).max(4), 1);
+                        self.shell.chat_input.draw(c, field, theme, chat_focus, hint);
                     }
                 }
                 Some(Tab::Search) => {
@@ -1186,6 +1238,12 @@ impl Workbench {
                 Some(Tab::Pane(id)) => {
                     if self.windows.iter().any(|w| w.win.id == id && w.special == Some("chat")) {
                         let field = Rect::new(r.x + 1, r.bottom() - 2, r.w - 2, 1);
+                        let (mode, _) = self.chat_mode_label(self.theme.style.icons);
+                        let pill_w = str_width(&mode) as i32 + if self.theme.style.icons { 2 } else { 0 };
+                        let field = Rect::new(r.x + 2 + pill_w, field.y, (r.right() - 1 - (r.x + 2 + pill_w)).max(4), 1);
+                        pn = pn.child(
+                            Node::new("chat.mode", "button", if self.shell.chat_agent { "Mode: Agent" } else { "Mode: Ask" }, Rect::new(r.x + 1, r.bottom() - 2, pill_w, 1)),
+                        );
                         pn = pn.child(
                             Node::new("chat.input", "input", "Ask AI", field).focused(self.shell.focus == Focus::Chat).value(self.shell.chat_input.text.clone()),
                         );

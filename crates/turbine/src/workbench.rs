@@ -12,6 +12,7 @@ use turbine_ui::Canvas;
 
 mod explorer_ops;
 mod find;
+mod inline_ai;
 mod shell;
 use find::FindBar;
 use shell::{Focus, Shell};
@@ -253,6 +254,8 @@ pub struct Workbench {
     find: FindBar,
     /// The Explorer's file operations and right-click menu.
     ex: explorer_ops::ExOps,
+    /// Ctrl+K: an inline AI edit in progress.
+    inline: Option<inline_ai::InlineEdit>,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -422,7 +425,7 @@ fn menus() -> Vec<Menu> {
             "~A~I",
             vec![
                 it("~C~hat...", "Ctrl+L", "ai.chat"),
-                soon("~I~nline Edit", "Ctrl+K", "ai.inline"),
+                it("~I~nline Edit", "Ctrl+K", "ai.inline"),
                 it("~A~gent...", "Ctrl+I", "ai.agent"),
                 it("~T~ab Completion", "", "ai.tab"),
                 it("~M~odels...", "", "ai.models"),
@@ -544,6 +547,7 @@ impl Workbench {
             shell: Shell::new(shell::project_of(files), !files.is_empty()),
             find: FindBar::default(),
             ex: explorer_ops::ExOps::default(),
+            inline: None,
         };
         for f in files {
             // (A folder is the project: the Explorer shows it.)
@@ -1341,6 +1345,9 @@ impl Workbench {
                     }
                 }
                 AiEvent::HubGone(why) => self.say(format!("AI hub: {why}")),
+                AiEvent::Chunk { id, text } if self.inline_chunk(id, &text) => {}
+                AiEvent::Done { id } if self.inline_done(id) => {}
+                AiEvent::Error { id, ref message } if self.inline_error(id, message) => {}
                 AiEvent::Chunk { id, text } => {
                     if self.chat_streaming.as_ref().is_some_and(|(i, _)| *i == id) {
                         self.chat_streaming.as_mut().unwrap().1.push_str(&text);
@@ -3229,6 +3236,7 @@ impl Workbench {
         root = self.shell_nodes(root);
         root = self.find_nodes(root);
         root = self.ex_nodes(root);
+        root = self.inline_nodes(root);
         if let Some(d) = &self.dialog {
             root = root.child(d.automation_node());
         }
@@ -3697,6 +3705,7 @@ impl App for Workbench {
         }
         self.draw_ex(&mut c, &theme);
         self.draw_find(&mut c, &theme);
+        self.draw_inline(&mut c, &theme);
         self.draw_palette(&mut c, &theme);
         self.layout_dialogs();
         for d in [&mut self.dialog, &mut self.overwrite_q].into_iter().flatten() {
@@ -4473,6 +4482,46 @@ mod tests {
         assert_eq!(wb.windows.last().unwrap().ed.ghost.as_deref(), Some("println!(\"hi\");"));
         wb.key(KeyEvent::plain(Key::Tab));
         assert_eq!(wb.windows.last().unwrap().ed.doc.line(0), "fn main() { println!(\"hi\");");
+    }
+
+    #[test]
+    fn ctrl_k_rewrites_the_line_and_esc_puts_it_back() {
+        let addr = fake_model_server();
+        let mut wb = bench();
+        wb.set_ai(Ai::with_models(vec![ai::Model {
+            provider: "ollama-test".into(),
+            name: "test-model".into(),
+            base: format!("http://{addr}/v1"),
+            key: None,
+            loaded: true,
+            fim: false,
+            chat: true,
+        }]));
+        wb.tab_complete = false;
+        run(&mut wb, json!({"cmd": "type", "text": "let x = 1;\nkeep"}));
+        keys(&mut wb, &["Up", "Ctrl+K"]);
+        assert_eq!(wb.shell.focus, Focus::Inline);
+        run(&mut wb, json!({"cmd": "type", "text": "say hello"}));
+        keys(&mut wb, &["Enter"]);
+        wait_until(&mut wb, "the rewrite", |wb| matches!(wb.inline.as_ref().map(|i| &i.phase), Some(inline_ai::Phase::Review)));
+        let text = |wb: &mut Workbench| run(wb, json!({"cmd": "text"}))["text"].as_str().unwrap().to_string();
+        assert_eq!(text(&mut wb), "Hello world\nkeep");
+        // Esc: the old line back, in one step.
+        keys(&mut wb, &["Esc"]);
+        assert_eq!(text(&mut wb), "let x = 1;\nkeep");
+        assert!(wb.inline.is_none());
+        // Again, and Enter keeps it.
+        keys(&mut wb, &["Ctrl+Home", "Ctrl+K"]);
+        run(&mut wb, json!({"cmd": "type", "text": "say hello"}));
+        keys(&mut wb, &["Enter"]);
+        wait_until(&mut wb, "the rewrite", |wb| matches!(wb.inline.as_ref().map(|i| &i.phase), Some(inline_ai::Phase::Review)));
+        keys(&mut wb, &["Enter"]);
+        assert_eq!(text(&mut wb), "Hello world\nkeep");
+        assert!(wb.windows.last().unwrap().ed.found.is_empty(), "no highlight left");
+        // The chat's mode: Ctrl+. switches Ask to Agent.
+        keys(&mut wb, &["Ctrl+L", "Ctrl+."]);
+        assert!(wb.shell.chat_agent);
+        assert_eq!(wb.tree().find_target("chat.mode").map(|n| n.name.clone()).as_deref(), Some("Mode: Agent"));
     }
 
     /// A pretend tool-calling model: answers each chat turn from a script,
