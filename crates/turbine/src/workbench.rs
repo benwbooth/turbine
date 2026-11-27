@@ -292,7 +292,6 @@ pub struct Workbench {
 fn menus() -> Vec<Menu> {
     let it = MenuItem::new;
     let sep = MenuItem::separator;
-    let soon = |l: &str, k: &str, c: &str| MenuItem::new(l, k, c).disabled();
     vec![
         Menu::new(
             "≡",
