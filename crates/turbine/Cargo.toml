@@ -11,6 +11,7 @@ turbine-ui.workspace = true
 turbine-tui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+regex = "1.13.1"
 turbine-vi.workspace = true
 crossterm.workspace = true
 turbine-term.workspace = true

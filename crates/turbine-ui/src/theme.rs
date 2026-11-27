@@ -118,6 +118,9 @@ pub struct Scheme {
     pub label_focused: Style,
     /// The default button's text (Turbo Vision: light cyan).
     pub button_default: Style,
+    /// Find's matches in the editor, and the current one.
+    pub find_match: Style,
+    pub find_current: Style,
 }
 
 /// Highlight kinds, in index order (the same list as turbine-syntax's).
@@ -209,6 +212,8 @@ impl Scheme {
             label_hotkey: s!(YELLOW on LIGHT_GRAY),
             label_focused: s!(WHITE on LIGHT_GRAY),
             button_default: s!(LIGHT_CYAN on GREEN),
+            find_match: s!(BLACK on CYAN),
+            find_current: s!(BLACK on LIGHT_GREEN),
         }
     }
 
@@ -260,6 +265,8 @@ impl Scheme {
             label_hotkey: s!(WHITE on LIGHT_GRAY),
             label_focused: s!(BLACK on LIGHT_GRAY),
             button_default: s!(BLACK on LIGHT_GRAY),
+            find_match: s!(BLACK on CYAN),
+            find_current: s!(BLUE on LIGHT_GRAY),
         }
     }
 
@@ -372,6 +379,8 @@ impl Scheme {
             label_hotkey: Style { attrs: Attrs { bold: true, ..Attrs::default() }, ..r },
             label_focused: r,
             button_default: n,
+            find_match: Style { attrs: Attrs { underline: true, ..Attrs::default() }, ..n },
+            find_current: r,
         }
     }
 

@@ -83,6 +83,9 @@ pub struct EditorView {
     pub exec_line: Option<usize>,
     /// Extra selected char ranges (vim's visual block).
     pub block: Vec<(usize, usize)>,
+    /// Find's matches (char ranges, in order) and the current one.
+    pub found: Vec<(usize, usize)>,
+    pub found_current: Option<usize>,
     /// Text area from the last draw, for mouse hit testing.
     area: Rect,
     dragging: bool,
@@ -107,6 +110,8 @@ impl EditorView {
             breakpoints: Vec::new(),
             exec_line: None,
             block: Vec::new(),
+            found: Vec::new(),
+            found_current: None,
             area: Rect::default(),
             dragging: false,
         }
@@ -533,8 +538,17 @@ impl EditorView {
                 let ch = line_start + p.char_off;
                 let selected = sel.is_some_and(|(a, b)| ch >= a && ch < b)
                     || self.block.iter().any(|&(a, b)| ch >= a && ch < b);
+                // (Find's matches: the current one, then the others.)
+                let found = if self.found.is_empty() {
+                    None
+                } else {
+                    let k = self.found.partition_point(|&(_, e)| e <= ch);
+                    self.found.get(k).filter(|&&(a, _)| a <= ch).map(|_| self.found_current == Some(k))
+                };
                 let st = if selected {
                     s.editor_selection
+                } else if let Some(cur) = found {
+                    if cur { s.find_current } else { s.find_match }
                 } else if let Some(b) = bar {
                     b
                 } else {

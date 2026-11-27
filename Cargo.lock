@@ -1796,6 +1796,7 @@ name = "turbine"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "regex",
  "serde",
  "serde_json",
  "turbine-services",

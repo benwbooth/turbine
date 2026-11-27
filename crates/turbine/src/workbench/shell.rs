@@ -16,6 +16,8 @@ pub(super) enum Focus {
     View(Tab),
     /// The AI chat's question field.
     Chat,
+    /// The editor's find box.
+    Find,
 }
 
 /// The views' state.
@@ -169,6 +171,7 @@ impl Workbench {
         match self.shell.focus {
             Focus::View(t) => self.shell.dock.side_of(t),
             Focus::Chat => Some(Side::Right),
+            Focus::Find => None,
             Focus::Editors => self.windows.last().and_then(|w| w.dock),
         }
     }
@@ -565,6 +568,15 @@ impl Workbench {
                 self.shell.dock.right.tabs = tabs.1;
             }
             "view.palette" => self.open_palette(">"),
+            "search.find" => {
+                self.focus_editor();
+                self.open_find(false);
+            }
+            "search.replace" => {
+                self.focus_editor();
+                self.open_find(true);
+            }
+            "search.again" => self.find_step(true),
             "go.file" => self.open_palette(""),
             "go.symbol" => self.open_palette("@"),
             _ => return false,
@@ -589,7 +601,11 @@ impl Workbench {
             self.palette_key(k);
             return true;
         }
-        let cmd = if cs && ch('p') {
+        let cmd = if k.is_ctrl('f') && !k.mods.shift && !vim_editor && !self.windows.last().is_some_and(|w| w.is_terminal() && self.shell.focus == Focus::Editors) {
+            Some("search.find")
+        } else if k.is_ctrl('h') && !k.mods.shift && !vim_editor && self.shell.focus == Focus::Editors && self.windows.last().is_some_and(|w| w.dock.is_none()) {
+            Some("search.replace")
+        } else if cs && ch('p') {
             Some("view.palette")
         } else if k.is_ctrl('p') && !vim_editor {
             Some("go.file")
@@ -624,6 +640,10 @@ impl Workbench {
         }
         match self.shell.focus {
             Focus::Editors => false,
+            Focus::Find => {
+                self.find_key(k);
+                true
+            }
             Focus::Chat => {
                 self.chat_key(k);
                 true

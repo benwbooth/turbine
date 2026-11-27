@@ -10,7 +10,9 @@ use turbine_ui::list::ListView;
 use turbine_ui::theme::vga;
 use turbine_ui::Canvas;
 
+mod find;
 mod shell;
+use find::FindBar;
 use shell::{Focus, Shell};
 use turbine_term::{MouseOutcome, Spawn, TerminalView};
 use turbine_services::ai::{self, Ai, AiEvent, ChatMessage};
@@ -246,6 +248,8 @@ pub struct Workbench {
     look_path: Option<PathBuf>,
     /// The docked parts and their views (Explorer, Search, ...).
     shell: Shell,
+    /// Find and Replace in the editor.
+    find: FindBar,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -324,9 +328,9 @@ fn menus() -> Vec<Menu> {
         Menu::new(
             "~S~earch",
             vec![
-                soon("~F~ind...", "Ctrl+F", "search.find"),
-                soon("~R~eplace...", "Ctrl+H", "search.replace"),
-                soon("~S~earch Again", "", "search.again"),
+                it("~F~ind...", "Ctrl+F", "search.find"),
+                it("~R~eplace...", "Ctrl+H", "search.replace"),
+                it("~S~earch Again", "Enter", "search.again"),
                 it("Find in F~i~les...", "Ctrl+Shift+F", "search.files"),
                 sep(),
                 it("~G~o to Line Number...", "Ctrl+G", "search.goto"),
@@ -535,6 +539,7 @@ impl Workbench {
             socket_path: None,
             look_path: None,
             shell: Shell::new(shell::project_of(files)),
+            find: FindBar::default(),
         };
         for f in files {
             // (A folder is the project: the Explorer shows it.)
@@ -2990,7 +2995,7 @@ impl Workbench {
             }
             return;
         }
-        if self.shell_mouse(&m) {
+        if self.shell_mouse(&m) || self.find_mouse(&m) {
             return;
         }
         if let Some(i) = self.dragging {
@@ -3186,6 +3191,7 @@ impl Workbench {
             root = root.child(wn);
         }
         root = self.shell_nodes(root);
+        root = self.find_nodes(root);
         if let Some(d) = &self.dialog {
             root = root.child(d.automation_node());
         }
@@ -3643,6 +3649,7 @@ impl App for Workbench {
                 comp.popup.draw(&mut c, at, desk, &theme);
             }
         }
+        self.draw_find(&mut c, &theme);
         self.draw_palette(&mut c, &theme);
         self.layout_dialogs();
         for d in [&mut self.dialog, &mut self.overwrite_q].into_iter().flatten() {
@@ -4130,6 +4137,44 @@ mod tests {
         keys(&mut wb, &["Esc"]);
         assert!(wb.shell.palette.is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn find_and_replace_in_the_editor() {
+        let mut wb = bench();
+        run(&mut wb, json!({"cmd": "type", "text": "cat dog Cat\ncatalog cat"}));
+        keys(&mut wb, &["Ctrl+Home", "Ctrl+F"]);
+        assert_eq!(wb.shell.focus, Focus::Find);
+        run(&mut wb, json!({"cmd": "type", "text": "cat"}));
+        let ed = |wb: &Workbench| wb.windows.iter().rev().find(|w| w.dock.is_none()).unwrap().ed.found.clone();
+        assert_eq!(ed(&wb).len(), 4, "case-insensitive by default");
+        // Whole words only (Alt+W): "catalog" drops out.
+        keys(&mut wb, &["Alt+W"]);
+        assert_eq!(ed(&wb).len(), 3);
+        // Match case (Alt+C): "Cat" drops out; Enter steps through the rest.
+        keys(&mut wb, &["Alt+C"]);
+        assert_eq!(ed(&wb), vec![(0, 3), (20, 23)]);
+        keys(&mut wb, &["Enter"]);
+        let w = wb.windows.iter().rev().find(|w| w.dock.is_none()).unwrap();
+        assert_eq!((w.ed.found_current, w.ed.selected_text().as_deref()), (Some(1), Some("cat")));
+        // Replace: one, then all.
+        // (Ctrl+H with something to find: the cursor goes to Replace.)
+        keys(&mut wb, &["Esc", "Ctrl+H"]);
+        assert!(wb.find.in_replace);
+        run(&mut wb, json!({"cmd": "type", "text": "fox"}));
+        keys(&mut wb, &["Enter"]);
+        let text = |wb: &mut Workbench| run(wb, json!({"cmd": "text"}))["text"].as_str().unwrap().to_string();
+        assert_eq!(text(&mut wb).matches("fox").count(), 1);
+        keys(&mut wb, &["Ctrl+Alt+Enter"]);
+        assert_eq!(text(&mut wb), "fox dog Cat\ncatalog fox");
+        // Undo puts back what Replace All changed in one step.
+        keys(&mut wb, &["Esc", "Ctrl+Z"]);
+        assert_eq!(text(&mut wb).matches("fox").count(), 1);
+        // A bad regex says so instead of matching.
+        keys(&mut wb, &["Ctrl+F", "Alt+R"]);
+        keys(&mut wb, &["End"]);
+        run(&mut wb, json!({"cmd": "type", "text": "("}));
+        assert!(wb.find.error.is_some());
     }
 
     #[test]
