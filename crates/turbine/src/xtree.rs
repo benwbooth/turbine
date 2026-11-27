@@ -52,6 +52,8 @@ pub struct Entry {
     pub dir: bool,
     pub size: u64,
     pub modified: Option<std::time::SystemTime>,
+    /// Permission bits (XTree's attributes).
+    pub mode: u32,
 }
 
 /// What the worker thread is asked.
@@ -60,12 +62,18 @@ enum Job {
     Copy(Vec<PathBuf>, PathBuf),
     Move(Vec<PathBuf>, PathBuf),
     Delete(Vec<PathBuf>),
+    /// chmod: 644, +x, -w ...
+    Chmod(Vec<PathBuf>, String),
+    /// Files here (path, size, modified) against another directory.
+    Compare(Vec<(PathBuf, u64, Option<std::time::SystemTime>)>, PathBuf),
 }
 
 /// What it answers.
 enum Done {
     Listed(PathBuf, Result<Vec<Entry>, String>),
     Finished(String, Vec<PathBuf>),
+    /// Files to tag (Compare), and what to say.
+    Tag(Vec<PathBuf>, String),
 }
 
 /// A command being asked for on the bottom lines: what, its question,
@@ -78,6 +86,28 @@ pub enum Ask {
     Delete,
     MakeDir,
     Filespec,
+    Attributes,
+    Prune,
+    Graft,
+    Compare,
+}
+
+/// Which files the file window lists: the directory's, the branch's (it
+/// and everything under it), or every logged directory's (Global, Showall).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Show {
+    Dir,
+    Branch,
+    Global,
+}
+
+/// The file window's order (Alt+S): by name, extension, date or size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sort {
+    Name,
+    Ext,
+    Date,
+    Size,
 }
 
 /// What the file manager wants the editor to do.
@@ -119,6 +149,18 @@ pub struct XTree {
     tree_rect: Rect,
     files_rect: Rect,
     file_cols: usize,
+    pub show: Show,
+    /// Names starting with a dot hidden (Hide/Unhide).
+    pub hide_dots: bool,
+    pub sort: Sort,
+    pub sort_desc: bool,
+    /// The file window one file a line with its size, date and attributes.
+    pub details: bool,
+    /// The command bars' places, for clicks and tooltips: (place, key, what it does).
+    cmd_rects: Vec<(Rect, KeyEvent, String)>,
+    /// The statistics' lines: (place, the whole value).
+    stat_rects: Vec<(Rect, String)>,
+    last_click: Option<(Point, std::time::Instant)>,
 }
 
 fn read_dir(p: &Path) -> Result<Vec<Entry>, String> {
@@ -131,6 +173,10 @@ fn read_dir(p: &Path) -> Result<Vec<Entry>, String> {
                 name: e.file_name().to_string_lossy().into_owned(),
                 dir: e.file_type().is_ok_and(|t| t.is_dir()),
                 size: md.as_ref().map_or(0, |m| m.len()),
+                mode: md.as_ref().map_or(0, |m| {
+                    use std::os::unix::fs::PermissionsExt;
+                    m.permissions().mode()
+                }),
                 modified: md.and_then(|m| m.modified().ok()),
             }
         })
@@ -187,6 +233,41 @@ fn worker(jobs: Receiver<Job>, done: Sender<Done>) {
                 }
                 Done::Finished(err.unwrap_or_else(|| format!("{n} moved")), changed)
             }
+            Job::Chmod(files, spec) => {
+                use std::os::unix::fs::PermissionsExt;
+                let mut n = 0;
+                let mut err = None;
+                let mut changed = Vec::new();
+                for f in &files {
+                    let r = std::fs::metadata(f).and_then(|m| {
+                        let mode = apply_mode(m.permissions().mode(), &spec).ok_or_else(|| std::io::Error::other(format!("{spec:?}: try 644, +x or -w")))?;
+                        std::fs::set_permissions(f, std::fs::Permissions::from_mode(mode))
+                    });
+                    match r {
+                        Ok(()) => n += 1,
+                        Err(e) => err = Some(format!("{}: {e}", f.display())),
+                    }
+                    changed.extend(f.parent().map(Path::to_path_buf));
+                }
+                Done::Finished(err.unwrap_or_else(|| format!("{n} changed")), changed)
+            }
+            Job::Compare(files, other) => {
+                let mut tag = Vec::new();
+                for (f, size, modified) in &files {
+                    let Some(name) = f.file_name() else { continue };
+                    match std::fs::metadata(other.join(name)) {
+                        // (Not there, a different size, or newer here: tagged.)
+                        Ok(m) => {
+                            if m.len() != *size || modified.zip(m.modified().ok()).is_some_and(|(a, b)| a > b) {
+                                tag.push(f.clone());
+                            }
+                        }
+                        Err(_) => tag.push(f.clone()),
+                    }
+                }
+                let msg = format!("{} of {} differ from {} (tagged)", tag.len(), files.len(), other.display());
+                Done::Tag(tag, msg)
+            }
             Job::Delete(files) => {
                 let mut n = 0;
                 let mut err = None;
@@ -210,6 +291,29 @@ fn worker(jobs: Receiver<Job>, done: Sender<Done>) {
             return;
         }
     }
+}
+
+/// chmod's way: octal (644), or +x / -w / +rw (for all).
+fn apply_mode(mode: u32, spec: &str) -> Option<u32> {
+    let spec = spec.trim();
+    if let Ok(m) = u32::from_str_radix(spec, 8) {
+        return Some((mode & !0o7777) | (m & 0o7777));
+    }
+    let (add, letters) = match spec.split_at_checked(1)? {
+        ("+", l) => (true, l),
+        ("-", l) => (false, l),
+        _ => return None,
+    };
+    let mut bits = 0;
+    for c in letters.chars() {
+        bits |= match c {
+            'r' => 0o444,
+            'w' => 0o222,
+            'x' => 0o111,
+            _ => return None,
+        };
+    }
+    Some(if add { mode | bits } else { mode & !bits })
 }
 
 /// A size as XTree shows it: 262,111,744.
@@ -269,6 +373,14 @@ impl XTree {
             tree_rect: Rect::default(),
             files_rect: Rect::default(),
             file_cols: 1,
+            show: Show::Dir,
+            hide_dots: false,
+            sort: Sort::Name,
+            sort_desc: false,
+            details: false,
+            cmd_rects: Vec::new(),
+            stat_rects: Vec::new(),
+            last_click: None,
         };
         x.expanded.insert(root.to_path_buf());
         x.list(root);
@@ -297,6 +409,10 @@ impl XTree {
                         }
                         Err(e) => self.message = format!("{}: {e}", p.display()),
                     }
+                }
+                Done::Tag(files, msg) => {
+                    self.tagged.extend(files);
+                    self.message = msg;
                 }
                 Done::Finished(msg, dirs) => {
                     self.message = msg;
@@ -350,19 +466,44 @@ impl XTree {
         self.tree.get(self.tree_sel).map(|t| t.0.clone()).unwrap_or_else(|| self.root.clone())
     }
 
-    /// The current directory's files matching the filespec.
-    fn files(&self) -> Vec<Entry> {
-        self.dirs.get(&self.current_dir()).map(|v| v.iter().filter(|e| !e.dir && matches(&self.filespec, &e.name)).cloned().collect()).unwrap_or_default()
+    /// The files the file window lists (the directory's, the branch's or
+    /// every logged one's), matching the filespec, in the chosen order.
+    fn files(&self) -> Vec<(PathBuf, Entry)> {
+        let dir = self.current_dir();
+        let mut out: Vec<(PathBuf, Entry)> = Vec::new();
+        for (d, v) in &self.dirs {
+            let wanted = match self.show {
+                Show::Dir => *d == dir,
+                Show::Branch => d.starts_with(&dir),
+                Show::Global => true,
+            };
+            if !wanted || (self.hide_dots && d.strip_prefix(&self.root).is_ok_and(|r| r.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.')))) {
+                continue;
+            }
+            out.extend(v.iter().filter(|e| !e.dir && matches(&self.filespec, &e.name) && !(self.hide_dots && e.name.starts_with('.'))).map(|e| (d.join(&e.name), e.clone())));
+        }
+        let ext = |n: &str| n.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+        out.sort_by(|a, b| {
+            let o = match self.sort {
+                Sort::Name => a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()),
+                Sort::Ext => ext(&a.1.name).cmp(&ext(&b.1.name)).then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase())),
+                Sort::Date => a.1.modified.cmp(&b.1.modified),
+                Sort::Size => a.1.size.cmp(&b.1.size),
+            };
+            if self.sort_desc { o.reverse() } else { o }
+        });
+        out
     }
 
     fn current_file(&self) -> Option<PathBuf> {
-        self.files().get(self.file_sel).map(|e| self.current_dir().join(&e.name))
+        self.files().get(self.file_sel).map(|e| e.0.clone())
     }
 
     /// What a command works on: the tagged files, else the current one.
     fn targets(&self) -> Vec<PathBuf> {
         let dir = self.current_dir();
-        let tagged: Vec<PathBuf> = self.tagged.iter().filter(|t| t.parent() == Some(dir.as_path())).cloned().collect();
+        let listed: HashSet<PathBuf> = self.files().into_iter().map(|e| e.0).collect();
+        let tagged: Vec<PathBuf> = self.tagged.iter().filter(|t| listed.contains(*t)).cloned().collect();
         if !tagged.is_empty() && self.in_files {
             tagged
         } else if self.in_files {
@@ -380,6 +521,9 @@ impl XTree {
         }
         self.file_sel = 0;
         self.file_top = 0;
+        if self.show != Show::Dir && !self.in_files {
+            self.show = Show::Dir;
+        }
     }
 
     // ---- keys ---------------------------------------------------------------------------
@@ -423,20 +567,40 @@ impl XTree {
                 let d = self.current_dir();
                 self.expand_all(&d, 3);
             }
+            // XTree Gold's Alt commands: Sort, File display, Compare, Graft, Prune.
+            Key::Char(c) if m.alt && !m.ctrl => match c.to_ascii_lowercase() {
+                's' => {
+                    // (Name, extension, date, size; each ascending then descending.)
+                    (self.sort, self.sort_desc) = match (self.sort, self.sort_desc) {
+                        (s, false) => (s, true),
+                        (Sort::Name, true) => (Sort::Ext, false),
+                        (Sort::Ext, true) => (Sort::Date, false),
+                        (Sort::Date, true) => (Sort::Size, false),
+                        (Sort::Size, true) => (Sort::Name, false),
+                    };
+                    self.message = format!("Sorted by {:?}, {}", self.sort, if self.sort_desc { "descending" } else { "ascending" }).to_lowercase().replacen('s', "S", 1);
+                }
+                'f' => self.details = !self.details,
+                'c' => self.ask = Some((Ask::Compare, String::new())),
+                'g' if !self.in_files => self.ask = Some((Ask::Graft, self.current_dir().parent().map(|p| p.display().to_string() + "/").unwrap_or_default())),
+                'p' if !self.in_files => self.ask = Some((Ask::Prune, String::new())),
+                _ => {}
+            },
             Key::Char(c) if plain => {
                 let c = c.to_ascii_lowercase();
                 return self.command(c);
             }
-            Key::F(1) => self.message = "Enter files/tree  Tab switch  + - * branches  T tag  U untag  Ctrl+T/U all  C copy  M move  D delete  R rename  F filespec  E edit  V view  O open  X execute  Q quit".into(),
+            Key::F(1) => self.message = "Enter files/tree  Tab switch  + - * branches  B branch  G global  H hide  A avail/attribs  Alt+S sort  Alt+F details  Alt+C compare  Alt+G graft  Alt+P prune  Q quit".into(),
             _ if m.ctrl => match k.key {
                 Key::Char('t' | 'T') => {
                     for e in self.files() {
-                        self.tagged.insert(self.current_dir().join(e.name));
+                        self.tagged.insert(e.0);
                     }
                 }
                 Key::Char('u' | 'U') => {
-                    let d = self.current_dir();
-                    self.tagged.retain(|t| t.parent() != Some(d.as_path()));
+                    for e in self.files() {
+                        self.tagged.remove(&e.0);
+                    }
                 }
                 _ => {}
             },
@@ -529,18 +693,49 @@ impl XTree {
             }
             (false, 't') => {
                 for e in self.files() {
-                    self.tagged.insert(dir.join(e.name));
+                    self.tagged.insert(e.0);
                 }
             }
-            (false, 'u') => self.tagged.retain(|t| t.parent() != Some(dir.as_path())),
+            (false, 'u') => {
+                for e in self.files() {
+                    self.tagged.remove(&e.0);
+                }
+            }
             (true, 'i') | (false, 'i') => {
                 for e in self.files() {
-                    let p = dir.join(e.name);
-                    if !self.tagged.remove(&p) {
-                        self.tagged.insert(p);
+                    if !self.tagged.remove(&e.0) {
+                        self.tagged.insert(e.0);
                     }
                 }
             }
+            // Avail: the disk's room. Attributes: chmod.
+            (false, 'a') => {
+                self.message = match disk_space(&dir) {
+                    Some((free, total)) => format!("Available {} of {} ({}% used)", crate::views::human_size(free), crate::views::human_size(total), if total > 0 { 100 - free * 100 / total } else { 0 }),
+                    None => "Can't read the disk's size".into(),
+                };
+            }
+            (true, 'a') => self.ask = Some((Ask::Attributes, String::new())),
+            // Branch: this directory's files and everything under it; Global
+            // and Showall: every directory's.
+            (false, 'b') | (true, 'b') => {
+                self.expand_all(&dir, 8);
+                self.show = Show::Branch;
+                self.in_files = true;
+                self.file_sel = 0;
+            }
+            (_, 'g') => {
+                let root = self.root.clone();
+                self.expand_all(&root, 8);
+                self.show = Show::Global;
+                self.in_files = true;
+                self.file_sel = 0;
+            }
+            (_, 'h') => {
+                self.hide_dots = !self.hide_dots;
+                self.message = if self.hide_dots { "Hidden (dot) files hidden".into() } else { "Hidden (dot) files shown".into() };
+            }
+            (false, 'p') => self.ask = Some((Ask::Prune, String::new())),
             (true, 'e') => return self.current_file().map(Out::Edit).unwrap_or(Out::None),
             (true, 'v') => return self.current_file().map(Out::View).unwrap_or(Out::None),
             (true, 'o') => return self.current_file().map(Out::Open).unwrap_or(Out::None),
@@ -560,9 +755,12 @@ impl XTree {
                 self.list(&dir);
             }
             (false, 's') => {
-                // Showall: every branch.
+                // Showall: every file of every directory, in one list.
                 let root = self.root.clone();
-                self.expand_all(&root, 6);
+                self.expand_all(&root, 8);
+                self.show = Show::Global;
+                self.in_files = true;
+                self.file_sel = 0;
             }
             _ => {}
         }
@@ -577,12 +775,13 @@ impl XTree {
                 text.pop();
             }
             Key::Char(c) if !k.mods.ctrl && !k.mods.alt => {
-                if *what == Ask::Delete {
+                if matches!(*what, Ask::Delete | Ask::Prune) {
                     let yes = c.eq_ignore_ascii_case(&'y');
+                    let prune = *what == Ask::Prune;
                     self.ask = None;
                     if yes {
-                        let t = self.targets();
-                        self.message = format!("Deleting {}…", t.len());
+                        let t = if prune { vec![self.current_dir()] } else { self.targets() };
+                        self.message = format!("{} {}…", if prune { "Pruning" } else { "Deleting" }, describe(&t));
                         let _ = self.jobs.send(Job::Delete(t));
                     }
                     return Out::None;
@@ -624,7 +823,24 @@ impl XTree {
                         self.filespec = if text.trim().is_empty() { "*.*".into() } else { text.trim().to_string() };
                         self.file_sel = 0;
                     }
-                    Ask::Delete => {}
+                    Ask::Attributes => {
+                        self.message = format!("Changing {}…", describe(&t));
+                        let _ = self.jobs.send(Job::Chmod(t, text.trim().to_string()));
+                    }
+                    Ask::Graft => {
+                        let dest = PathBuf::from(text.trim());
+                        let dest = if dest.is_absolute() { dest } else { dir.parent().unwrap_or(&dir).join(dest) };
+                        self.message = format!("Grafting {}…", describe(&[dir.clone()]));
+                        let _ = self.jobs.send(Job::Move(vec![dir.clone()], dest));
+                    }
+                    Ask::Compare => {
+                        let other = PathBuf::from(text.trim());
+                        let other = if other.is_absolute() { other } else { dir.join(other) };
+                        let files: Vec<(PathBuf, u64, Option<std::time::SystemTime>)> = self.files().into_iter().map(|(p, e)| (p, e.size, e.modified)).collect();
+                        self.message = "Comparing…".into();
+                        let _ = self.jobs.send(Job::Compare(files, other));
+                    }
+                    Ask::Delete | Ask::Prune => {}
                 }
             }
             _ => {}
@@ -741,13 +957,12 @@ impl XTree {
             let note = if self.dirs.contains_key(&dir) { " No files match" } else { " Dir Not Logged" };
             c.print(self.files_rect.x + 1, self.files_rect.y, note, colour::text());
         }
-        for (k, e) in files.iter().enumerate().skip(self.file_top).take(page) {
+        for (k, (p, e)) in files.iter().enumerate().skip(self.file_top).take(page) {
             let k0 = k - self.file_top;
             let (col, row) = (k0 / rows, k0 % rows);
             let x = self.files_rect.x + 1 + (col * colw) as i32;
             let y = self.files_rect.y + row as i32;
-            let p = dir.join(&e.name);
-            let tagged = self.tagged.contains(&p);
+            let tagged = self.tagged.contains(p);
             let mark = if tagged { "♦" } else { " " };
             // (Its type's icon and colour, as the Explorer shows them.)
             let shown = format!("{} {}", crate::filetypes::icon(&e.name, false, false), e.name);
@@ -778,8 +993,8 @@ impl XTree {
         let all = self.dirs.get(&dir).cloned().unwrap_or_default();
         let total_files = all.iter().filter(|e| !e.dir).count() as u64;
         let total_bytes: u64 = all.iter().filter(|e| !e.dir).map(|e| e.size).sum();
-        let match_bytes: u64 = files.iter().map(|e| e.size).sum();
-        let tagged_here: Vec<&Entry> = files.iter().filter(|e| self.tagged.contains(&dir.join(&e.name))).collect();
+        let match_bytes: u64 = files.iter().map(|e| e.1.size).sum();
+        let tagged_here: Vec<&Entry> = files.iter().filter(|e| self.tagged.contains(&e.0)).map(|e| &e.1).collect();
         line(c, &mut y, &format!("FILE  {}", self.filespec), String::new(), 0);
         c.hline(side.x + 1, y, stats_w - 1, "─", f);
         y += 1;
@@ -802,7 +1017,7 @@ impl XTree {
         line(c, &mut y, if self.in_files { "Current File" } else { "Current Directory" }, String::new(), 1);
         let cur = if self.in_files { self.current_file().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())) } else { dir.file_name().map(|n| n.to_string_lossy().into_owned()).or(Some("/".into())) };
         line(c, &mut y, &cur.unwrap_or_default().chars().take(stats_w as usize - 4).collect::<String>(), String::new(), 2);
-        let cur_bytes = if self.in_files { self.files().get(self.file_sel).map(|e| e.size).unwrap_or(0) } else { total_bytes };
+        let cur_bytes = if self.in_files { self.files().get(self.file_sel).map(|e| e.1.size).unwrap_or(0) } else { total_bytes };
         line(c, &mut y, "Bytes", commas(cur_bytes), 2);
         // The commands of the window in use, or the question being asked.
         let cy = r.bottom() - cmd_h;
@@ -816,6 +1031,10 @@ impl XTree {
                 Ask::Delete => format!("DELETE {} (Y/N)?", describe(&t)),
                 Ask::MakeDir => "MAKE DIRECTORY:".to_string(),
                 Ask::Filespec => "FILESPEC:".to_string(),
+                Ask::Attributes => format!("ATTRIBUTES of {} (644, +x, -w):", describe(&t)),
+                Ask::Prune => format!("PRUNE {} and everything in it (Y/N)?", describe(&[self.current_dir()])),
+                Ask::Graft => format!("GRAFT {} to:", describe(&[self.current_dir()])),
+                Ask::Compare => "COMPARE with directory (differing files get tagged):".to_string(),
             };
             c.print(r.x, cy, &what_s, colour::prompt());
             let x = c.print(r.x, cy + 1, " ", b);
@@ -856,7 +1075,16 @@ fn describe(t: &[PathBuf]) -> String {
     }
 }
 
+/// The disk's free and whole size where a folder is (statvfs).
+fn disk_space(p: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| (s.f_bavail as u64 * s.f_frsize as u64, s.f_blocks as u64 * s.f_frsize as u64))
+}
+
 /// The free space where a folder is (statvfs).
+#[allow(dead_code)]
 fn disk_free(p: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
