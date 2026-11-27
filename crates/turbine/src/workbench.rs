@@ -18,6 +18,7 @@ pub use extensions::extension_dirs;
 mod find;
 mod inline_ai;
 mod lsp_more;
+mod preview;
 mod settings;
 mod shell;
 use find::FindBar;
@@ -232,6 +233,7 @@ pub struct Workbench {
     lspx: lsp_more::LspExtra,
     dbx: debug_more::DebugExtra,
     build: build::BuildState,
+    preview: preview::PreviewState,
     lsp_spawn: LspSpawner,
     lsp_requests: HashMap<(LspKey, i64), (LspReq, u32)>,
     completion: Option<Completion>,
@@ -398,6 +400,7 @@ fn menus() -> Vec<Menu> {
                 it("Editor Ta~b~s", "", "view.editor_tabs"),
                 it("Brea~d~crumbs", "", "view.breadcrumbs"),
                 it("~M~inimap", "", "view.minimap"),
+                it("Markdown Pre~v~iew", "Ctrl+Shift+V", "view.preview"),
                 it("Reset La~y~out", "", "view.reset_layout"),
                 sep(),
                 it("~L~ine Numbers", "", "view.line_numbers"),
@@ -571,6 +574,7 @@ impl Workbench {
             lspx: Default::default(),
             dbx: Default::default(),
             build: Default::default(),
+            preview: Default::default(),
             lsp_spawn: default_lsp_spawner(),
             lsp_requests: HashMap::new(),
             completion: None,
@@ -1055,7 +1059,13 @@ impl Workbench {
     }
 
     /// Show Markdown in a read-only Help window (one per title).
+    /// A read-only window of Markdown, rendered.
     fn show_help(&mut self, title: &str, md: &str) {
+        self.show_rendered(title, md, None);
+    }
+
+    /// A read-only window of plain text.
+    fn show_plain(&mut self, title: &str, md: &str) {
         let name = format!("Help: {title}");
         let i = match self.windows.iter().position(|w| w.special == Some("help") && w.win.title == name) {
             Some(i) => i,
@@ -1072,7 +1082,7 @@ impl Workbench {
                     vim: None,
                     term: None,
                     term_text: String::new(),
-                    lang: Some("markdown".into()),
+                    lang: None,
                     lang_for: Some(None),
                     lang_fixed: None,
                     hl_sent: None,
@@ -1093,9 +1103,12 @@ impl Workbench {
         self.renumber();
         let w = self.windows.last_mut().unwrap();
         w.ed.doc = Document::from_str(md);
+        w.ed.highlights.clear();
         w.ed.cursor = 0;
         w.ed.scroll_y = 0;
         w.hl_sent = None;
+        let id = w.win.id;
+        self.preview.previews.remove(&id);
     }
 
     fn guides_index(&mut self) {
@@ -1975,7 +1988,7 @@ impl Workbench {
             let path = w.ed.doc.path.clone();
             // Untitled documents are checked again as they're typed (a #! line).
             // (Help windows say their language themselves.)
-            let fixed = matches!(w.special, Some("help" | "chat"));
+            let fixed = matches!(w.special, Some("help" | "chat" | "preview"));
             let stale = !fixed && (w.lang_for.as_ref() != Some(&path) || (path.is_none() && w.hl_sent != Some(w.ed.doc.version)));
             if stale {
                 // (Untitled: a guess from what's typed, as Tessera's input does.)
@@ -2276,6 +2289,7 @@ impl Workbench {
             "lsp.hover" => self.lsp_request(LspReq::Hover),
             "go.definition" => self.lsp_request(LspReq::Definition),
             "build.make" | "build.all" | "build.compile" | "build.stop" | "terminal.task" | "terminal.build" | "run.without_debug" => self.build_command(cmd),
+            "view.preview" => self.open_preview(),
             "run.watch" => self.add_watch_dialog(),
             "edit.comment" | "selection.expand" | "selection.shrink" | "selection.copy_up" | "selection.copy_down" | "selection.move_up" | "selection.move_down" | "go.bracket"
             | "go.next_def" | "go.prev_def" | "view.fold" | "view.unfold" | "view.fold_all" | "view.unfold_all" => {
@@ -2809,12 +2823,7 @@ impl Workbench {
                 }
                 "hex" => {
                     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    self.show_help(&format!("{name} (hex)"), &crate::filekind::hex_dump(&p));
-                    if let Some(w) = self.windows.last_mut() {
-                        w.lang = None;
-                        w.lang_for = Some(Some(p.clone()));
-                        w.ed.highlights.clear();
-                    }
+                    self.show_plain(&format!("{name} (hex)"), &crate::filekind::hex_dump(&p));
                 }
                 "text" => self.open_text(&p),
                 _ => {}
@@ -2864,17 +2873,11 @@ impl Workbench {
                 self.guides_index();
                 return;
             }
-            let topic = d.value("topic").unwrap_or_default();
-            let topic = topic.trim();
+            let topic = d.value("topic").unwrap_or_default().trim().to_string();
             self.show_help("Turbine", MANUAL);
-            if let Some(w) = self.windows.last_mut() {
-                if let Some(line) = (0..w.ed.doc.len_lines()).find(|&i| {
-                    let l = w.ed.doc.line(i);
-                    l.trim_start_matches('#').trim() == topic && l.starts_with('#')
-                }) {
-                    w.ed.cursor = w.ed.doc.rope.line_to_char(line);
-                    w.ed.anchor = None;
-                    w.ed.scroll_y = line;
+            if let Some(id) = self.windows.last().map(|w| w.win.id) {
+                if let Some(p) = self.preview.previews.get_mut(&id) {
+                    p.jump = Some(topic);
                 }
             }
             return;
@@ -3202,7 +3205,9 @@ impl Workbench {
                 VimOut::NotMine => {}
             }
         }
-        let shortcut = if (k.mods.ctrl && k.mods.shift && !k.mods.alt && matches!(k.key, Key::Char('i' | 'I'))) || (k.mods.shift && k.mods.alt && !k.mods.ctrl && matches!(k.key, Key::Char('f' | 'F'))) {
+        let shortcut = if k.mods.ctrl && k.mods.shift && !k.mods.alt && matches!(k.key, Key::Char('v' | 'V')) {
+            Some("view.preview")
+        } else if (k.mods.ctrl && k.mods.shift && !k.mods.alt && matches!(k.key, Key::Char('i' | 'I'))) || (k.mods.shift && k.mods.alt && !k.mods.ctrl && matches!(k.key, Key::Char('f' | 'F'))) {
             Some("edit.format")
         } else if k.is_ctrl('i') && k.key != Key::Tab {
             Some("ai.agent")
@@ -3305,6 +3310,10 @@ impl Workbench {
         }
         // The Immediate window runs its lines.
         if self.immediate_key(&k) {
+            return;
+        }
+        // Enter on a rendered page's link follows it.
+        if k.key == Key::Enter && k.mods == Mods::NONE && self.windows.last().is_some_and(|w| matches!(w.special, Some("help" | "preview"))) && self.follow_link() {
             return;
         }
         // Help, Debug and Output windows are read-only: only moving around.
@@ -3541,6 +3550,15 @@ impl Workbench {
     }
 
     fn mouse(&mut self, m: MouseEvent) {
+        let click = matches!(m.kind, MouseKind::Up(Button::Left)) && self.dialog.is_none();
+        self.mouse_inner(m);
+        // A click on a rendered page's link follows it.
+        if click && self.windows.last().is_some_and(|w| matches!(w.special, Some("help" | "preview")) && w.ed.selection().is_none()) {
+            self.follow_link();
+        }
+    }
+
+    fn mouse_inner(&mut self, m: MouseEvent) {
         let screen = self.screen();
         let desk = self.desktop();
         if self.dialog.is_none() && self.lspx.menu.is_some() && self.lsp_menu_mouse(&m) {
@@ -4051,6 +4069,7 @@ impl App for Workbench {
         self.update_lsp();
         self.lsp_more_tick(now);
         self.build_tick();
+        self.preview_tick(now);
         self.update_debug();
         self.update_guides();
         self.update_ai(now);
@@ -4101,7 +4120,8 @@ impl App for Workbench {
             || self.agent.is_some()
             || self.pending_task.is_some()
             || self.last_edit.is_some()
-            || self.build_busy();
+            || self.build_busy()
+            || self.preview_busy();
         let term_tick = (any_term || self.hl_pending > 0 || lsp_waiting).then(|| now + Duration::from_millis(16));
         // Servers send diagnostics unasked: look a few times a second.
         let lsp_tick = (!self.lsp.is_empty()).then(|| now + Duration::from_millis(100));
@@ -5380,9 +5400,9 @@ mod tests {
         wb.driver.cps = 0.0;
         wb.dispatch(Event::Resize(100, 30));
         keys(&mut wb, &["F1"]);
-        let w = wb.windows.last().unwrap();
-        assert_eq!(w.win.title, "Help: Turbine");
-        assert!(w.ed.doc.line(0).starts_with("# Turbine"));
+        assert_eq!(wb.windows.last().unwrap().win.title, "Help: Turbine");
+        wait_until(&mut wb, "rendered", |wb| wb.windows.last().unwrap().ed.doc.line(0) == "Turbine");
+        assert!(wb.windows.last().unwrap().ed.doc.line(1).starts_with("═══"));
         keys(&mut wb, &["Shift+F1"]);
         let d = wb.dialog.as_mut().expect("the index");
         let items = match d.controls.iter().find_map(|c| match &c.control {
@@ -5398,8 +5418,10 @@ mod tests {
             keys(&mut wb, &["Down"]);
         }
         keys(&mut wb, &["Enter"]);
-        let w = wb.windows.last().unwrap();
-        assert_eq!(w.ed.doc.line(w.ed.cursor_line_col().0), "## Debugging");
+        wait_until(&mut wb, "the heading", |wb| {
+            let w = wb.windows.last().unwrap();
+            w.ed.doc.line(w.ed.cursor_line_col().0) == "Debugging"
+        });
     }
 
     #[test]
@@ -5470,6 +5492,31 @@ mod tests {
     }
 
     #[test]
+    fn markdown_preview_follows_its_file() {
+        let dir = std::env::temp_dir().join(format!("turbine-md-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("r.md"), "# Read me\n\n- one\n").unwrap();
+        let mut wb = Workbench::new(&[dir.join("r.md")]);
+        wb.set_lsp_spawner(Box::new(|_, _| None));
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(120, 30));
+        wait_until(&mut wb, "markdown", |wb| wb.windows[0].lang.as_deref() == Some("markdown"));
+        keys(&mut wb, &["Ctrl+Shift+V"]);
+        let pv = wb.windows.last().unwrap().win.id;
+        assert_eq!(wb.windows.last().unwrap().special, Some("preview"));
+        let text = |wb: &Workbench| wb.windows.iter().find(|w| w.win.id == pv).unwrap().ed.doc.rope.to_string();
+        wait_until(&mut wb, "rendered", |wb| text(wb).starts_with("Read me\n═══") && text(wb).contains("• one"));
+        // Typing in the file changes the preview a moment later.
+        let src = wb.windows.iter().position(|w| w.special.is_none()).unwrap();
+        let w = wb.windows.remove(src);
+        wb.windows.push(w);
+        keys(&mut wb, &["Ctrl+End"]);
+        run(&mut wb, json!({"cmd": "type", "text": "- two\n"}));
+        wait_until(&mut wb, "followed", |wb| text(wb).contains("• two"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn debugger_breakpoint_step_continue_output() {
         let dir = std::env::temp_dir().join(format!("turbine-dbg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -5514,12 +5561,17 @@ mod tests {
     #[test]
     fn help_windows_are_read_only_markdown_and_the_index_lists_guides() {
         let mut wb = bench();
-        wb.show_help("Test Guide", "# Title\n\nSome `code` here.\n");
+        wb.show_help("Test Guide", "# Title\n\nSome `code` here, [a link](#title).\n");
         assert_eq!(wb.windows.last().unwrap().win.title, "Help: Test Guide");
-        wait_until(&mut wb, "markdown highlighting", |wb| !wb.windows.last().unwrap().ed.highlights.is_empty());
-        assert_eq!(wb.windows.last().unwrap().lang.as_deref(), Some("markdown"));
+        wait_until(&mut wb, "rendered", |wb| wb.windows.last().unwrap().ed.doc.line(0) == "Title" && !wb.windows.last().unwrap().ed.highlights.is_empty());
+        assert_eq!(wb.windows.last().unwrap().ed.doc.line(3), "Some code here, a link.");
         run(&mut wb, json!({"cmd": "type", "text": "xyz"}));
-        assert!(wb.windows.last().unwrap().ed.doc.line(0) == "# Title", "typing doesn't change help");
+        assert!(wb.windows.last().unwrap().ed.doc.line(0) == "Title", "typing doesn't change help");
+        // Enter on the link goes to its heading.
+        let w = wb.windows.last_mut().unwrap();
+        w.ed.cursor = w.ed.doc.rope.line_to_char(3) + "Some code here, a l".len();
+        keys(&mut wb, &["Enter"]);
+        assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, 0);
         wb.run_command("help.guides");
         let d = wb.dialog.as_ref().expect("guide index");
         assert!(d.kind.starts_with("guides:"));
