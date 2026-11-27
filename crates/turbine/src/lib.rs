@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod dock;
 pub mod file_dialog;
+pub mod filekind;
 pub mod mcp;
 pub mod palette;
 pub mod server;

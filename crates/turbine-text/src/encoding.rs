@@ -15,14 +15,53 @@ pub enum TextEncoding {
     /// Any encoding `encoding_rs` supports (Windows-125x, ISO-8859-x,
     /// Shift_JIS, GBK, Big5, EUC-KR, KOI8, IBM866, ...).
     Web(&'static Encoding),
-    /// A DOS OEM code page that `encoding_rs` doesn't cover.
+    /// An 8-bit code page `encoding_rs` doesn't cover (DOS OEM, EBCDIC,
+    /// HP Roman-8, classic Mac): an index into `codepages::PAGES`.
     Dos(CodePage),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CodePage {
-    Cp437,
-    Cp850,
+pub struct CodePage(pub u8);
+
+#[allow(non_upper_case_globals)]
+impl CodePage {
+    pub const Cp437: CodePage = CodePage(0);
+    pub const Cp850: CodePage = CodePage(3);
+
+    pub fn page(&self) -> &'static crate::codepages::Page {
+        &crate::codepages::PAGES[self.0 as usize]
+    }
+    pub fn by_label(label: &str) -> Option<CodePage> {
+        let l = label.trim().to_ascii_lowercase().replace('_', "-");
+        let l = l.strip_prefix("ibm").map(|n| format!("cp{n}")).unwrap_or(l);
+        let l = if l.chars().all(|c| c.is_ascii_digit()) { format!("cp{l}") } else { l };
+        crate::codepages::PAGES.iter().position(|p| p.label == l).map(|i| CodePage(i as u8))
+    }
+}
+
+/// Every encoding Turbine reads and writes, for menus: (label, name).
+pub fn all_encodings() -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = [
+        ("utf-8", "UTF-8"), ("utf-16le", "UTF-16 LE"), ("utf-16be", "UTF-16 BE"),
+        ("windows-1252", "Windows-1252 (Western)"), ("windows-1250", "Windows-1250 (Central European)"), ("windows-1251", "Windows-1251 (Cyrillic)"),
+        ("windows-1253", "Windows-1253 (Greek)"), ("windows-1254", "Windows-1254 (Turkish)"), ("windows-1255", "Windows-1255 (Hebrew)"),
+        ("windows-1256", "Windows-1256 (Arabic)"), ("windows-1257", "Windows-1257 (Baltic)"), ("windows-1258", "Windows-1258 (Vietnamese)"),
+        ("windows-874", "Windows-874 (Thai)"), ("iso-8859-1", "ISO-8859-1 (Latin-1)"), ("iso-8859-2", "ISO-8859-2 (Latin-2)"),
+        ("iso-8859-3", "ISO-8859-3 (Latin-3)"), ("iso-8859-4", "ISO-8859-4 (Baltic)"), ("iso-8859-5", "ISO-8859-5 (Cyrillic)"),
+        ("iso-8859-6", "ISO-8859-6 (Arabic)"), ("iso-8859-7", "ISO-8859-7 (Greek)"), ("iso-8859-8", "ISO-8859-8 (Hebrew)"),
+        ("iso-8859-10", "ISO-8859-10 (Nordic)"), ("iso-8859-13", "ISO-8859-13 (Baltic)"), ("iso-8859-14", "ISO-8859-14 (Celtic)"),
+        ("iso-8859-15", "ISO-8859-15 (Latin-9)"), ("iso-8859-16", "ISO-8859-16 (Latin-10)"), ("koi8-r", "KOI8-R (Russian)"),
+        ("koi8-u", "KOI8-U (Ukrainian)"), ("ibm866", "CP866 (DOS Cyrillic)"), ("macintosh", "Mac Roman"), ("x-mac-cyrillic", "Mac Cyrillic"),
+        ("shift_jis", "Shift_JIS"), ("euc-jp", "EUC-JP"), ("iso-2022-jp", "ISO-2022-JP"), ("gbk", "GBK"), ("gb18030", "GB18030"),
+        ("big5", "Big5"), ("euc-kr", "EUC-KR"),
+    ]
+    .iter()
+    .map(|(l, n)| (l.to_string(), n.to_string()))
+    .collect();
+    for p in crate::codepages::PAGES {
+        v.push((p.label.to_string(), p.name.to_string()));
+    }
+    v
 }
 
 impl TextEncoding {
@@ -32,8 +71,7 @@ impl TextEncoding {
             TextEncoding::Utf16Le => "UTF-16LE",
             TextEncoding::Utf16Be => "UTF-16BE",
             TextEncoding::Web(e) => e.name(),
-            TextEncoding::Dos(CodePage::Cp437) => "CP437",
-            TextEncoding::Dos(CodePage::Cp850) => "CP850",
+            TextEncoding::Dos(cp) => cp.page().name.split(' ').next().unwrap_or(""),
         }
     }
 
@@ -44,9 +82,9 @@ impl TextEncoding {
             "utf-8" | "utf8" => Some(TextEncoding::Utf8),
             "utf-16le" | "utf16le" | "utf-16" => Some(TextEncoding::Utf16Le),
             "utf-16be" | "utf16be" => Some(TextEncoding::Utf16Be),
-            "cp437" | "ibm437" | "437" | "dos" => Some(TextEncoding::Dos(CodePage::Cp437)),
-            "cp850" | "ibm850" | "850" => Some(TextEncoding::Dos(CodePage::Cp850)),
-            _ => Encoding::for_label(l.as_bytes()).map(TextEncoding::Web),
+            "dos" => Some(TextEncoding::Dos(CodePage::Cp437)),
+            "cp866" | "866" => Some(TextEncoding::Web(encoding_rs::IBM866)),
+            _ => CodePage::by_label(&l).map(TextEncoding::Dos).or_else(|| Encoding::for_label(l.as_bytes()).map(TextEncoding::Web)),
         }
     }
 }
@@ -242,25 +280,20 @@ fn normalize_newlines(s: &str) -> String {
 }
 
 fn dos_char(cp: CodePage, b: u8) -> char {
-    if b < 0x80 {
+    let p = cp.page();
+    // (Control bytes stay what they are: tabs and newlines in DOS text.)
+    if p.ascii_low && b < 0x80 {
         return b as char;
     }
-    let table = match cp {
-        CodePage::Cp437 => &CP437_HIGH,
-        CodePage::Cp850 => &CP850_HIGH,
-    };
-    table[(b - 0x80) as usize]
+    p.chars[b as usize]
 }
 
 fn dos_byte(cp: CodePage, c: char) -> u8 {
-    if (c as u32) < 0x80 {
+    let p = cp.page();
+    if p.ascii_low && (c as u32) < 0x80 {
         return c as u8;
     }
-    let table = match cp {
-        CodePage::Cp437 => &CP437_HIGH,
-        CodePage::Cp850 => &CP850_HIGH,
-    };
-    table.iter().position(|&t| t == c).map(|i| i as u8 + 0x80).unwrap_or(b'?')
+    p.chars.iter().position(|&t| t == c).map(|i| i as u8).unwrap_or(if p.ascii_low { b'?' } else { 0x6F })
 }
 
 /// CP437 bytes 0x80..=0xFF.
@@ -300,6 +333,21 @@ mod tests {
         let d = decode(b"\xEF\xBB\xBFhi");
         assert!(d.bom);
         assert_eq!(d.text, "hi");
+    }
+
+    #[test]
+    fn old_code_pages_round_trip() {
+        // EBCDIC 037: "HELLO" is C8 C5 D3 D3 D6.
+        let e = TextEncoding::for_label("cp037").unwrap();
+        assert_eq!(decode_as(&[0xC8, 0xC5, 0xD3, 0xD3, 0xD6], e, false).text, "HELLO");
+        assert_eq!(encode("HELLO", e, false, LineEnding::Lf), vec![0xC8, 0xC5, 0xD3, 0xD3, 0xD6]);
+        // CP852 (Central European DOS): "Łódź".
+        let e = TextEncoding::for_label("ibm852").unwrap();
+        let b = encode("Łódź", e, false, LineEnding::Lf);
+        assert_eq!(decode_as(&b, e, false).text, "Łódź");
+        assert_eq!(e.name(), "CP852");
+        assert!(TextEncoding::for_label("mac-greek").is_some() && TextEncoding::for_label("866").is_some());
+        assert!(all_encodings().len() > 60);
     }
 
     #[test]

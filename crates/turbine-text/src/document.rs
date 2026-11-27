@@ -73,6 +73,32 @@ impl Document {
         Ok(d)
     }
 
+    /// Read the file again in a chosen encoding (None: detect it).
+    pub fn reopen_as(&mut self, enc: Option<encoding::TextEncoding>) -> std::io::Result<()> {
+        let Some(path) = self.path.clone() else { return Err(std::io::Error::other("no file name")) };
+        let bytes = std::fs::read(&path)?;
+        let dec = match enc {
+            Some(e) => {
+                let bom = match e {
+                    encoding::TextEncoding::Utf8 => bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
+                    encoding::TextEncoding::Utf16Le => bytes.starts_with(&[0xFF, 0xFE]),
+                    encoding::TextEncoding::Utf16Be => bytes.starts_with(&[0xFE, 0xFF]),
+                    _ => false,
+                };
+                encoding::decode_as(&bytes, e, bom)
+            }
+            None => encoding::decode(&bytes),
+        };
+        let text = dec.text.clone();
+        self.replace_all_minimal(&text, 0);
+        self.encoding = dec.encoding;
+        self.bom = dec.bom;
+        self.line_ending = dec.line_ending;
+        self.lossy = dec.lossy;
+        self.dirty = false;
+        Ok(())
+    }
+
     pub fn save(&mut self) -> std::io::Result<()> {
         let Some(path) = self.path.clone() else {
             return Err(std::io::Error::other("no file name"));

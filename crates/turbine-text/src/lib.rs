@@ -2,6 +2,7 @@
 //! modern and DOS-era files, grapheme-aware widths and bidi layout.
 
 pub mod document;
+pub mod codepages;
 pub mod encoding;
 pub mod unicode;
 

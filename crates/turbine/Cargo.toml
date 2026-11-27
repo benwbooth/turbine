@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+libc = "0.2"
 turbine-text.workspace = true
 turbine-ui.workspace = true
 turbine-tui.workspace = true

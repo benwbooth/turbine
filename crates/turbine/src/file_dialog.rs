@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use turbine_text::encoding::{CodePage, LineEnding, TextEncoding};
+use turbine_text::encoding::{LineEnding, TextEncoding};
 use turbine_ui::dialog::{self as ui, Dialog};
 
 pub struct Entry {
@@ -45,22 +45,27 @@ pub const TYPES: &[(&str, &[&str])] = &[
     ("Python (*.py)", &["py", "pyi"]),
 ];
 
-pub const ENCODINGS: &[(&str, &str, bool)] = &[
-    ("UTF-8", "utf-8", false),
-    ("UTF-8 with BOM", "utf-8", true),
-    ("UTF-16 LE", "utf-16le", true),
-    ("UTF-16 BE", "utf-16be", true),
-    ("CP437 (DOS)", "cp437", false),
-    ("CP850 (DOS)", "cp850", false),
-    ("Windows-1252", "windows-1252", false),
-    ("ISO-8859-1", "iso-8859-1", false),
-    ("ISO-8859-15", "iso-8859-15", false),
-    ("KOI8-R", "koi8-r", false),
-    ("Shift_JIS", "shift_jis", false),
-    ("GBK", "gbk", false),
-    ("Big5", "big5", false),
-    ("EUC-KR", "euc-kr", false),
-];
+/// The encodings to choose from: (shown, label, BOM). The Unicode ones
+/// and the two common DOS pages first, then every other.
+pub fn encodings() -> Vec<(String, String, bool)> {
+    let mut v: Vec<(String, String, bool)> = [
+        ("UTF-8", "utf-8", false),
+        ("UTF-8 with BOM", "utf-8", true),
+        ("UTF-16 LE", "utf-16le", true),
+        ("UTF-16 BE", "utf-16be", true),
+        ("CP437 (DOS US)", "cp437", false),
+        ("CP850 (DOS Western)", "cp850", false),
+    ]
+    .iter()
+    .map(|(a, b, c)| (a.to_string(), b.to_string(), *c))
+    .collect();
+    for (label, name) in turbine_text::encoding::all_encodings() {
+        if !v.iter().any(|(_, l, _)| *l == label) {
+            v.push((name, label, false));
+        }
+    }
+    v
+}
 
 pub const LINE_ENDINGS: &[(&str, LineEnding)] =
     &[("LF (Unix)", LineEnding::Lf), ("CRLF (DOS)", LineEnding::CrLf), ("CR (classic Mac)", LineEnding::Cr)];
@@ -159,12 +164,13 @@ impl FileDialog {
             let enc = encoding
                 .and_then(|(e, bom)| {
                     let is = |label: &str| TextEncoding::for_label(label) == Some(e);
-                    ENCODINGS.iter().position(|(_, l, b)| is(l) && *b == bom).or_else(|| ENCODINGS.iter().position(|(_, l, _)| is(l)))
+                    let all = encodings();
+                    all.iter().position(|(_, l, b)| is(l) && *b == bom).or_else(|| all.iter().position(|(_, l, _)| is(l)))
                 })
                 .unwrap_or(0);
             let le = LINE_ENDINGS.iter().position(|(_, l)| *l == line_ending).unwrap_or(0);
             rows.push(ui::row(vec![
-                ui::combo("encoding", "~E~ncoding:", ENCODINGS.iter().map(|(l, _, _)| l.to_string()).collect(), enc),
+                ui::combo("encoding", "~E~ncoding:", encodings().into_iter().map(|(l, _, _)| l).collect(), enc),
                 ui::combo("eol", "~L~ine endings:", LINE_ENDINGS.iter().map(|(l, _)| l.to_string()).collect(), le),
             ]));
         }
@@ -364,21 +370,17 @@ impl FileDialog {
 
     /// The encoding and line endings chosen (Save As).
     pub fn format(&self, d: &Dialog) -> Option<(TextEncoding, bool, LineEnding)> {
-        let (_, label, bom) = ENCODINGS.get(d.selected_index("encoding")?)?;
-        let enc = TextEncoding::for_label(label).unwrap_or(TextEncoding::Utf8);
-        let enc = match (enc, *label) {
-            (_, "cp437") => TextEncoding::Dos(CodePage::Cp437),
-            (_, "cp850") => TextEncoding::Dos(CodePage::Cp850),
-            (e, _) => e,
-        };
+        let (_, label, bom) = encodings().get(d.selected_index("encoding")?)?.clone();
+        let enc = TextEncoding::for_label(&label).unwrap_or(TextEncoding::Utf8);
         let (_, le) = LINE_ENDINGS.get(d.selected_index("eol")?)?;
-        Some((enc, *bom, *le))
+        Some((enc, bom, *le))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use turbine_text::encoding::CodePage;
 
     #[test]
     fn lists_filters_and_targets() {

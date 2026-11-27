@@ -311,6 +311,8 @@ fn menus() -> Vec<Menu> {
                 it("Save A~l~l", "", "file.save_all"),
                 sep(),
                 it("Re~v~ert File", "", "file.revert"),
+                it("Reopen with ~E~ncoding...", "", "file.reopen_encoding"),
+                it("Save with Enco~d~ing...", "", "file.save_encoding"),
                 it("~C~lose Editor", "Alt+F3", "window.close"),
                 sep(),
                 it("~D~OS Shell", "", "view.terminal"),
@@ -2037,6 +2039,29 @@ impl Workbench {
             self.say(format!("New file {}", p.display()));
             return;
         }
+        // Pictures, PDFs, media, archives: the desktop's app for them.
+        match crate::filekind::classify(p) {
+            crate::filekind::Kind::Text => {}
+            crate::filekind::Kind::Binary => {
+                let d = Dialog::new(&format!("binary:{}", p.display()), "Not a Text File")
+                    .body(ui::label(&format!("{} isn't text.", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())))
+                    .buttons(vec![ui::button("app", "Open in Its ~A~pp", true), ui::button("hex", "~H~ex View", false), ui::button("text", "As ~T~ext", false), ui::button("cancel", "Cancel", false)]);
+                self.dialog = Some(d);
+                return;
+            }
+            _ => {
+                match crate::filekind::open_outside(p) {
+                    Ok(()) => self.say(format!("Opened {} in its app", p.display())),
+                    Err(e) => self.say(format!("Can't open {}: {e}", p.display())),
+                }
+                return;
+            }
+        }
+        self.open_text(p);
+    }
+
+    /// Open a file as text, whatever it is.
+    fn open_text(&mut self, p: &Path) {
         match Document::open(p) {
             Ok(d) => {
                 let note = if d.lossy { " (some bytes could not be decoded)" } else { "" };
@@ -2163,6 +2188,30 @@ impl Workbench {
                 self.say(if self.tab_complete { "AI tab completion on" } else { "AI tab completion off" });
             }
             "help.contents" => self.show_help("Turbine", MANUAL),
+            "file.reopen_encoding" | "file.save_encoding" => {
+                let save = cmd == "file.save_encoding";
+                let Some(w) = self.windows.iter().rev().find(|w| w.term.is_none() && w.special.is_none()) else { return };
+                if w.ed.doc.path.is_none() {
+                    self.say("Save the file first");
+                    return;
+                }
+                if !save && w.ed.doc.dirty {
+                    self.say("Save or undo the changes first: reopening reads the file again");
+                    return;
+                }
+                let cur = w.ed.doc.encoding;
+                let mut items: Vec<String> = crate::file_dialog::encodings().into_iter().map(|(n, _, _)| n).collect();
+                let mut sel = crate::file_dialog::encodings().iter().position(|(_, l, b)| TextEncoding::for_label(l) == Some(cur) && *b == w.ed.doc.bom).unwrap_or(0);
+                if !save {
+                    items.insert(0, "Detect it".into());
+                    sel += 1;
+                }
+                let title = if save { "Save with Encoding" } else { "Reopen with Encoding" };
+                let d = Dialog::new(if save { "encoding:save" } else { "encoding:reopen" }, title)
+                    .body(ui::list("enc", items, sel).activates().lines(16).chars(40))
+                    .buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
+                self.dialog = Some(d);
+            }
             "help.index" => {
                 // The manual's headings, to go to one.
                 let items: Vec<String> = MANUAL
@@ -2719,6 +2768,58 @@ impl Workbench {
         if let Some(root) = kind.strip_prefix("task:") {
             let root = root.to_string();
             self.task_chosen(&d, &root);
+            return;
+        }
+        if let Some(path) = kind.strip_prefix("binary:") {
+            let p = PathBuf::from(path);
+            match b.as_str() {
+                "app" => {
+                    if let Err(e) = crate::filekind::open_outside(&p) {
+                        self.say(format!("Can't open {}: {e}", p.display()));
+                    }
+                }
+                "hex" => {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.show_help(&format!("{name} (hex)"), &crate::filekind::hex_dump(&p));
+                    if let Some(w) = self.windows.last_mut() {
+                        w.lang = None;
+                        w.lang_for = Some(Some(p.clone()));
+                        w.ed.highlights.clear();
+                    }
+                }
+                "text" => self.open_text(&p),
+                _ => {}
+            }
+            return;
+        }
+        if let Some(rest) = kind.strip_prefix("encoding:") {
+            let save = rest == "save";
+            let i = d.selected_index("enc").unwrap_or(0);
+            let list = crate::file_dialog::encodings();
+            let Some(w) = self.windows.iter_mut().rev().find(|w| w.term.is_none() && w.special.is_none()) else { return };
+            if save {
+                if let Some((_, label, bom)) = list.get(i) {
+                    w.ed.doc.encoding = TextEncoding::for_label(label).unwrap_or(TextEncoding::Utf8);
+                    w.ed.doc.bom = *bom;
+                    let r = w.ed.doc.save();
+                    let name = w.ed.doc.encoding.name();
+                    self.say(match r {
+                        Ok(()) => format!("Saved as {name}"),
+                        Err(e) => format!("Can't save: {e}"),
+                    });
+                }
+            } else {
+                // (The first choice is to detect it.)
+                let enc = if i == 0 { None } else { list.get(i - 1).and_then(|(_, l, _)| TextEncoding::for_label(l)) };
+                let r = w.ed.doc.reopen_as(enc);
+                w.ed.cursor = w.ed.cursor.min(w.ed.doc.rope.len_chars());
+                w.hl_sent = None;
+                let name = w.ed.doc.encoding.name();
+                self.say(match r {
+                    Ok(()) => format!("Reopened as {name}"),
+                    Err(e) => format!("Can't reopen: {e}"),
+                });
+            }
             return;
         }
         if kind == "help_index" {
@@ -5262,6 +5363,45 @@ mod tests {
         keys(&mut wb, &["Enter"]);
         let w = wb.windows.last().unwrap();
         assert_eq!(w.ed.doc.line(w.ed.cursor_line_col().0), "## Debugging");
+    }
+
+    #[test]
+    fn reopen_with_encoding_and_binary_files() {
+        let dir = std::env::temp_dir().join(format!("turbine-enc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Latin-1 bytes chardetng may call something else: reopen as CP850.
+        std::fs::write(dir.join("a.txt"), b"caf\x82 na\x8bve\n").unwrap();
+        std::fs::write(dir.join("b.bin"), [0u8, 1, 2, 3, 0, 9]).unwrap();
+        let mut wb = Workbench::new(&[dir.join("a.txt")]);
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+        wb.run_command("file.reopen_encoding");
+        let d = wb.dialog.as_ref().unwrap();
+        assert_eq!(d.title, "Reopen with Encoding");
+        let items = match d.controls.iter().find_map(|c| match &c.control {
+            turbine_ui::dialog::Control::List { items, .. } => Some(items.clone()),
+            _ => None,
+        }) {
+            Some(v) => v,
+            None => panic!("no list"),
+        };
+        let i = items.iter().position(|t| t.starts_with("CP850")).unwrap();
+        let mut d = wb.dialog.take().unwrap();
+        for p in &mut d.controls {
+            if let turbine_ui::dialog::Control::List { selected, .. } = &mut p.control {
+                *selected = i;
+            }
+        }
+        wb.finish_dialog(d, Some("ok".into()));
+        assert_eq!(wb.windows[0].ed.doc.line(0), "café naïve");
+        assert_eq!(wb.windows[0].ed.doc.encoding.name(), "CP850");
+        // A binary file asks; Hex View shows it.
+        wb.open_path(&dir.join("b.bin"));
+        assert!(wb.dialog.as_ref().unwrap().kind.starts_with("binary:"));
+        let d = wb.dialog.take().unwrap();
+        wb.finish_dialog(d, Some("hex".into()));
+        assert!(wb.windows.last().unwrap().ed.doc.line(0).starts_with("00000000  00 01 02 03"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
