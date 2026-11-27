@@ -5439,6 +5439,13 @@ mod tests {
         wait_until(&mut wb, "the tree", |wb| wb.docviews[&id].tree.as_ref().is_some_and(|t| t.rows() >= 2));
         let mut surf = Surface::new(120, 36);
         wb.render(&mut surf);
+        // Expand All and Collapse All: one toggle.
+        assert!(wb.tree().find_target("docview.expand").is_some() && wb.tree().find_target("docview.collapse").is_none());
+        run(&mut wb, json!({"cmd": "click", "target": "docview.expand"}));
+        assert!(wb.tree().find_target("docview.collapse").is_some() && wb.tree().find_target("docview.expand").is_none());
+        run(&mut wb, json!({"cmd": "click", "target": "docview.collapse"}));
+        assert!(wb.tree().find_target("docview.expand").is_some());
+        wb.render(&mut surf);
         // Right-click "name": the menu; Copy Path.
         let a = wb.docviews[&id].tree.as_ref().unwrap().area;
         wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Right), pos: Point::new(a.x + 4, a.y + 1), mods: Mods::NONE }));

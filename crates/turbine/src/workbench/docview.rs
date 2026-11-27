@@ -53,7 +53,8 @@ impl Workbench {
     /// The toolbar's controls in a window: (place, action, label, on, tip).
     pub(super) fn doc_buttons(&self, w: &EdWin) -> Vec<(Rect, &'static str, String, &'static str)> {
         let dv = self.docviews.get(&w.win.id);
-        buttons(w, self.doc_mode(w.win.id), dv.is_none_or(|d| d.preview_wrap), dv.is_some_and(|d| d.light))
+        let all_open = dv.and_then(|d| d.tree.as_ref()).is_some_and(|t| t.all_open);
+        buttons(w, self.doc_mode(w.win.id), dv.is_none_or(|d| d.preview_wrap), dv.is_some_and(|d| d.light), all_open)
     }
 
     /// Where a window's text goes: under the toolbar when it has one.
@@ -406,7 +407,7 @@ impl Workbench {
 }
 
 /// The toolbar's controls: (place, action, label, tooltip).
-fn buttons(w: &EdWin, mode: Mode, preview_wrap: bool, light: bool) -> Vec<(Rect, &'static str, String, &'static str)> {
+fn buttons(w: &EdWin, mode: Mode, preview_wrap: bool, light: bool, all_open: bool) -> Vec<(Rect, &'static str, String, &'static str)> {
     let Some(kind) = Workbench::doc_kind(w) else { return Vec::new() };
     let inner = w.win.inner();
         let other = if kind == "markdown" { ("preview", "Preview", Mode::Preview, "Show it rendered (Ctrl+Shift+V beside it)") } else { ("tree", "Tree", Mode::Tree, "Show it as a tree to fold and search") };
@@ -421,10 +422,9 @@ fn buttons(w: &EdWin, mode: Mode, preview_wrap: bool, light: bool) -> Vec<(Rect,
                 items.push(("wrap", format!("[{}] Word Wrap", if preview_wrap { "X" } else { " " }), "Wrap the page at the window's edge, or let lines run on (Alt+Z)"));
                 items.push(("light", format!("[{}] White Page", if light { "X" } else { " " }), "Black text on white, or the guide's black page"));
             }
-            Mode::Tree => {
-                items.push(("expand", "[+] Expand All".into(), "Open every branch (*)"));
-                items.push(("collapse", "[-] Collapse All".into(), "Close every branch (-)"));
-            }
+            // (One toggle: Expand All, then Collapse All.)
+            Mode::Tree if all_open => items.push(("collapse", "[-] Collapse All".into(), "Close every branch (-)")),
+            Mode::Tree => items.push(("expand", "[+] Expand All".into(), "Open every branch (*)")),
         }
         let mut x = inner.x + 1;
         let mut out = Vec::new();
@@ -456,7 +456,8 @@ pub(super) fn draw(w: &mut EdWin, dv: Option<&mut DocView>, c: &mut Canvas, them
     let mode = dv.as_ref().map_or(Mode::Source, |d| d.mode);
     let pw = dv.as_ref().is_none_or(|d| d.preview_wrap);
     let light = dv.as_ref().is_some_and(|d| d.light);
-    for (r, _, label, _) in buttons(w, mode, pw, light) {
+    let all_open = dv.as_ref().and_then(|d| d.tree.as_ref()).is_some_and(|t| t.all_open);
+    for (r, _, label, _) in buttons(w, mode, pw, light, all_open) {
         let on = label.starts_with("(•)") || label.starts_with("[X]");
         let st = if on { Style { fg: s.frame_active.fg, ..bs } } else { bs };
         c.print(r.x, r.y, &label, st);

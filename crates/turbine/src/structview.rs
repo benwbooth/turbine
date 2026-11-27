@@ -349,11 +349,13 @@ pub struct StructView {
     last_click: Option<(usize, std::time::Instant)>,
     /// The scroll bar's thumb held: where in it.
     bar_grab: Option<usize>,
+    /// Everything opened by Expand All (the toolbar's toggle shows Collapse).
+    pub all_open: bool,
 }
 
 impl StructView {
     pub fn new(root: Result<Node, String>) -> StructView {
-        let mut v = StructView { root, open: HashSet::new(), rows: Vec::new(), selected: 0, scroll: 0, query: String::new(), in_search: false, matches: 0, area: Rect::default(), last_click: None, bar_grab: None };
+        let mut v = StructView { root, open: HashSet::new(), rows: Vec::new(), selected: 0, scroll: 0, query: String::new(), in_search: false, matches: 0, area: Rect::default(), last_click: None, bar_grab: None, all_open: false };
         // The top two levels open to start with.
         v.open.insert(Vec::new());
         if let Ok(r) = &v.root {
@@ -490,6 +492,7 @@ impl StructView {
     /// Open everything under the selected row (or all, from the top).
     /// Everything open (Expand All), or only the top (Collapse All).
     pub fn expand_all(&mut self, open: bool) {
+        self.all_open = open;
         if open {
             self.open_all(None);
         } else {
@@ -594,6 +597,7 @@ impl StructView {
                 self.open_all(p);
             }
             Key::Char('-') => {
+                self.all_open = false;
                 self.open.retain(|p| p.is_empty());
                 self.rebuild();
                 self.selected = 0;
