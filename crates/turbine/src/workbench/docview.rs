@@ -166,6 +166,15 @@ impl Workbench {
                 self.tree_action(id, "edit");
                 return true;
             }
+            if k.is(Key::Delete, Mods::NONE) {
+                self.tree_action(id, "delete");
+                return true;
+            }
+            if k.is(Key::Insert, Mods::NONE) {
+                let branch = self.docviews.get(&id).and_then(|d| d.tree.as_ref()).and_then(|t| t.selected_node()).is_some_and(|n| matches!(n.kind, structview::Kind::Object | structview::Kind::Array));
+                self.tree_action(id, if branch { "add_child" } else { "add_after" });
+                return true;
+            }
             if k.is(Key::F(10), Mods::SHIFT) {
                 let at = self.docviews.get(&id).and_then(|d| d.tree.as_ref()).map(|t| Point::new(t.area.x + 4, t.area.y + 1 + (t.selected.saturating_sub(t.scroll)) as i32)).unwrap_or_default();
                 self.open_tree_menu(id, at);
@@ -218,8 +227,19 @@ impl Workbench {
         let Some(t) = self.docviews.get(&id).and_then(|d| d.tree.as_ref()) else { return };
         let Some(n) = t.selected_node() else { return };
         let mut items: Vec<(&str, &str, &'static str)> = Vec::new();
-        if n.span.is_some() {
+        let json = self.windows.iter().find(|w| w.win.id == id).and_then(|w| w.lang.as_deref()).and_then(structview::format_of) == Some("json");
+        if n.span.is_some() && n.value.is_some() {
             items.push(("Edit Value...", "F2", "edit"));
+        }
+        if json {
+            if n.key_span.is_some() {
+                items.push(("Rename Key...", "", "rename_key"));
+            }
+            if matches!(n.kind, structview::Kind::Object | structview::Kind::Array) {
+                items.push(("Add Inside...", "Ins", "add_child"));
+            }
+            items.push(("Add After...", "", "add_after"));
+            items.push(("Delete", "Del", "delete"));
         }
         if n.value.is_some() {
             items.push(("Copy Value", "", "copy_value"));
@@ -265,6 +285,7 @@ impl Workbench {
                 }
             }
             "expand" | "collapse" => self.doc_action(id, action),
+            "delete" | "rename_key" | "add_child" | "add_after" => self.tree_struct_action(id, action),
             "edit" => {
                 let Some((a, b)) = n.span else {
                     self.say("This value can be changed in Source (the format doesn't say where it is)");
@@ -279,6 +300,91 @@ impl Workbench {
             }
             _ => {}
         }
+    }
+
+    /// JSON's structural edits: Delete (the entry and its comma), Rename Key,
+    /// Add Inside (a member or an item at the end) and Add After.
+    fn tree_struct_action(&mut self, id: u32, action: &str) {
+        let Some(t) = self.docviews.get(&id).and_then(|d| d.tree.as_ref()) else { return };
+        let (Some(n), Some(path)) = (t.selected_node().cloned(), t.selected_index_path()) else { return };
+        // The container the selected entry is in (for Add After: what kind).
+        let parent = t.node(&path[..path.len().saturating_sub(1)]).cloned();
+        let Some(w) = self.windows.iter().find(|w| w.win.id == id) else { return };
+        let text = w.ed.doc.rope.to_string();
+        let Some((vs, ve)) = n.span else {
+            self.say("Not something the tree can change (its place in the text isn't known)");
+            return;
+        };
+        let start = n.key_span.map_or(vs, |k| k.0);
+        match action {
+            "delete" => {
+                if path.is_empty() {
+                    return;
+                }
+                let (a, b) = json_entry_range(&text, start, ve);
+                self.tree_replace(id, a, b, "");
+            }
+            "rename_key" => {
+                let Some((ka, kb)) = n.key_span else { return };
+                let key = n.key.clone().unwrap_or_default();
+                let d = Dialog::new(&format!("tree_key:{id}:{ka}:{kb}"), "Rename Key").body(ui::input("key", "~K~ey:", &key).chars(40)).buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
+                self.dialog = Some(d);
+            }
+            "add_child" | "add_after" => {
+                let into_object = if action == "add_child" { n.kind == structview::Kind::Object } else { parent.as_ref().is_some_and(|p| p.kind == structview::Kind::Object) };
+                if action == "add_after" && path.is_empty() {
+                    return;
+                }
+                let kind = if action == "add_child" { "in" } else { "after" };
+                let mut items = Vec::new();
+                if into_object {
+                    items.push(ui::input("key", "~K~ey:", "").chars(40));
+                }
+                items.push(ui::input("value", "~V~alue (JSON):", "null").chars(40));
+                let d = Dialog::new(&format!("tree_add:{id}:{kind}:{}:{}:{}", start, ve, if into_object { 1 } else { 0 }), if action == "add_child" { "Add Inside" } else { "Add After" })
+                    .body(ui::col(items))
+                    .buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
+                self.dialog = Some(d);
+            }
+            _ => {}
+        }
+    }
+
+    /// Replace bytes a..b of a window's text (one undoable edit).
+    fn tree_replace(&mut self, id: u32, a: usize, b: usize, new: &str) {
+        if let Some(w) = self.windows.iter_mut().find(|w| w.win.id == id) {
+            let r = &w.ed.doc.rope;
+            if b <= r.len_bytes() && a <= b {
+                let (ca, cb) = (r.byte_to_char(a), r.byte_to_char(b));
+                let cur = w.ed.cursor;
+                w.ed.doc.replace(ca, cb, new, cur);
+            }
+        }
+    }
+
+    /// The Rename Key and Add dialogs' answers. True when it was one of them.
+    pub(super) fn tree_struct_done(&mut self, kind: &str, d: &Dialog) -> bool {
+        if let Some(rest) = kind.strip_prefix("tree_key:") {
+            let mut it = rest.split(':').filter_map(|x| x.parse::<usize>().ok());
+            if let (Some(id), Some(a), Some(b)) = (it.next(), it.next(), it.next()) {
+                let key = d.value("key").unwrap_or_default();
+                self.tree_replace(id as u32, a, b, &serde_json::to_string(&key).unwrap_or_default());
+            }
+            return true;
+        }
+        let Some(rest) = kind.strip_prefix("tree_add:") else { return false };
+        let parts: Vec<&str> = rest.split(':').collect();
+        let (Some(id), Some(place), Some(start), Some(end), Some(obj)) = (parts.first().and_then(|x| x.parse::<u32>().ok()), parts.get(1), parts.get(2).and_then(|x| x.parse::<usize>().ok()), parts.get(3).and_then(|x| x.parse::<usize>().ok()), parts.get(4)) else { return true };
+        let value = d.value("value").unwrap_or_default();
+        let value = if value.trim().is_empty() { "null".to_string() } else { value.trim().to_string() };
+        // (A value that isn't JSON goes in as a string.)
+        let value = if serde_json::from_str::<serde_json::Value>(&value).is_ok() { value } else { serde_json::to_string(&value).unwrap_or_default() };
+        let entry = if *obj == "1" { format!("{}: {value}", serde_json::to_string(&d.value("key").unwrap_or_default()).unwrap_or_default()) } else { value };
+        let Some(w) = self.windows.iter().find(|w| w.win.id == id) else { return true };
+        let text = w.ed.doc.rope.to_string();
+        let (at, insert) = if *place == "after" { json_insert_after(&text, start, end, &entry) } else { json_insert_inside(&text, start, end, &entry) };
+        self.tree_replace(id, at, at, &insert);
+        true
     }
 
     /// The Edit Value dialog's answer: the value replaced in the text (one
@@ -496,5 +602,109 @@ pub(super) fn draw(w: &mut EdWin, dv: Option<&mut DocView>, c: &mut Canvas, them
             dv.alt.draw_scrollbars(c, w.win.rect, theme);
             true
         }
+    }
+}
+
+/// An entry's bytes to delete: the entry (key and value) and one comma
+/// (after it, else before it), whole lines when it's alone on its line.
+fn json_entry_range(text: &str, start: usize, end: usize) -> (usize, usize) {
+    let b = text.as_bytes();
+    let mut j = end;
+    while j < b.len() && matches!(b[j], b' ' | b'\t') {
+        j += 1;
+    }
+    let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+    let alone_before = text[line_start..start].trim().is_empty();
+    if j < b.len() && b[j] == b',' {
+        let mut k = j + 1;
+        while k < b.len() && matches!(b[k], b' ' | b'\t') {
+            k += 1;
+        }
+        if alone_before && k < b.len() && b[k] == b'\n' {
+            return (line_start, k + 1);
+        }
+        return (start, k);
+    }
+    // The last one: the comma before it goes.
+    let mut i = start;
+    while i > 0 && b[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i > 0 && b[i - 1] == b',' {
+        return (i - 1, end);
+    }
+    (start, end)
+}
+
+/// The indentation of the line a byte is on.
+fn indent_at(text: &str, at: usize) -> String {
+    let ls = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    text[ls..].chars().take_while(|c| *c == ' ' || *c == '\t').collect()
+}
+
+/// Where and what to insert for a new entry after the one at start..end.
+fn json_insert_after(text: &str, start: usize, end: usize, entry: &str) -> (usize, String) {
+    let one_line = !text[start..end].contains('\n') && text[..start].rfind('\n').is_some_and(|i| text[i + 1..start].trim().is_empty());
+    if one_line {
+        (end, format!(",\n{}{entry}", indent_at(text, start)))
+    } else {
+        (end, format!(", {entry}"))
+    }
+}
+
+/// Where and what to insert for a new last entry inside the container at
+/// start..end ({...} or [...]).
+fn json_insert_inside(text: &str, start: usize, end: usize, entry: &str) -> (usize, String) {
+    let close = end - 1;
+    let inner = &text[start + 1..close];
+    let outer_indent = indent_at(text, start);
+    if inner.trim().is_empty() {
+        // (Empty: on a line of its own, indented one step more.)
+        return (start + 1, format!("\n{outer_indent}  {entry}\n{outer_indent}"));
+    }
+    // After the last thing in it (skipping trailing space and a trailing comma).
+    let b = text.as_bytes();
+    let mut i = close;
+    while i > start + 1 && b[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    let had_comma = i > start + 1 && b[i - 1] == b',';
+    let multi = inner.contains('\n');
+    let child_indent = if multi {
+        inner.lines().skip(1).find(|l| !l.trim().is_empty()).map(|l| l.chars().take_while(|c| *c == ' ' || *c == '\t').collect::<String>()).unwrap_or(format!("{outer_indent}  "))
+    } else {
+        String::new()
+    };
+    let sep = if had_comma { "" } else { "," };
+    if multi { (i, format!("{sep}\n{child_indent}{entry}")) } else { (i, format!("{sep} {entry}")) }
+}
+
+#[cfg(test)]
+mod json_edit_tests {
+    use super::*;
+
+    #[test]
+    fn json_edits_keep_commas_and_indentation() {
+        let t = "{\n  \"a\": 1,\n  \"b\": 2\n}\n";
+        // Delete "a": its line goes with its comma.
+        let (a, b) = json_entry_range(t, 4, 10);
+        assert_eq!(format!("{}{}", &t[..a], &t[b..]), "{\n  \"b\": 2\n}\n");
+        // Delete "b" (the last): the comma before it goes.
+        let s = t.find("\"b\"").unwrap();
+        let (a, b) = json_entry_range(t, s, s + 6);
+        assert_eq!(format!("{}{}", &t[..a], &t[b..]), "{\n  \"a\": 1\n}\n");
+        // Add inside: a new last member, indented as the others.
+        let (at, ins) = json_insert_inside(t, 0, t.len() - 1, "\"c\": 3");
+        assert_eq!(format!("{}{ins}{}", &t[..at], &t[at..]), "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3\n}\n");
+        // Add after "a".
+        let (at, ins) = json_insert_after(t, 4, 10, "\"x\": 0");
+        assert_eq!(format!("{}{ins}{}", &t[..at], &t[at..]), "{\n  \"a\": 1,\n  \"x\": 0,\n  \"b\": 2\n}\n");
+        // Into an empty array; and a one-line one.
+        let e = "[]";
+        let (at, ins) = json_insert_inside(e, 0, 2, "1");
+        assert_eq!(format!("{}{ins}{}", &e[..at], &e[at..]), "[\n  1\n]");
+        let o = "[1, 2]";
+        let (at, ins) = json_insert_inside(o, 0, 6, "3");
+        assert_eq!(format!("{}{ins}{}", &o[..at], &o[at..]), "[1, 2, 3]");
     }
 }

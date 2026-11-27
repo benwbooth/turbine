@@ -35,15 +35,17 @@ pub struct Node {
     /// A value's bytes in the source (JSON's literals, XML's attribute
     /// values and text), so it can be edited in place.
     pub span: Option<(usize, usize)>,
+    /// An object member's key in the source, quotes included (JSON).
+    pub key_span: Option<(usize, usize)>,
     pub children: Vec<Node>,
 }
 
 impl Node {
     fn leaf(key: Option<String>, kind: Kind, value: String, line: Option<usize>) -> Node {
-        Node { key, value: Some(value), kind, line, span: None, children: Vec::new() }
+        Node { key, value: Some(value), kind, line, span: None, key_span: None, children: Vec::new() }
     }
     fn branch(key: Option<String>, kind: Kind, line: Option<usize>, children: Vec<Node>) -> Node {
-        Node { key, value: None, kind, line, span: None, children }
+        Node { key, value: None, kind, line, span: None, key_span: None, children }
     }
     fn at(mut self, span: (usize, usize)) -> Node {
         self.span = Some(span);
@@ -145,7 +147,7 @@ fn from_xml(doc: &roxmltree::Document, n: roxmltree::Node) -> Node {
     // (An element with only text: the text as its value, as one row.)
     if kids.len() == 1 && kids[0].kind == Kind::Text {
         let t = kids.pop().unwrap();
-        return Node { key: Some(n.tag_name().name().to_string()), value: t.value, kind: Kind::Element, line, span: t.span, children: Vec::new() };
+        return Node { key: Some(n.tag_name().name().to_string()), value: t.value, kind: Kind::Element, line, span: t.span, key_span: None, children: Vec::new() };
     }
     Node::branch(Some(n.tag_name().name().to_string()), Kind::Element, line, kids)
 }
@@ -205,6 +207,7 @@ mod json {
         }
         fn value(&mut self, key: Option<String>) -> Result<Node, String> {
             let line = Some(self.line);
+            let start = self.i;
             match self.b.get(self.i) {
                 Some(b'{') => {
                     self.i += 1;
@@ -218,14 +221,18 @@ mod json {
                         if self.b.get(self.i) != Some(&b'"') {
                             return Err(self.err("a key (in quotes) expected"));
                         }
+                        let ks = self.i;
                         let k = self.string()?;
+                        let ke = self.i;
                         self.ws();
                         if self.b.get(self.i) != Some(&b':') {
                             return Err(self.err(": expected"));
                         }
                         self.i += 1;
                         self.ws();
-                        kids.push(self.value(Some(k))?);
+                        let mut v = self.value(Some(k))?;
+                        v.key_span = Some((ks, ke));
+                        kids.push(v);
                         self.ws();
                         match self.b.get(self.i) {
                             Some(b',') => self.i += 1,
@@ -233,7 +240,7 @@ mod json {
                             _ => return Err(self.err(", or } expected")),
                         }
                     }
-                    Ok(Node::branch(key, Kind::Object, line, kids))
+                    Ok(Node::branch(key, Kind::Object, line, kids).at((start, self.i)))
                 }
                 Some(b'[') => {
                     self.i += 1;
@@ -253,15 +260,13 @@ mod json {
                             _ => return Err(self.err(", or ] expected")),
                         }
                     }
-                    Ok(Node::branch(key, Kind::Array, line, kids))
+                    Ok(Node::branch(key, Kind::Array, line, kids).at((start, self.i)))
                 }
                 Some(b'"') => {
-                    let start = self.i;
                     let s = self.string()?;
                     Ok(Node::leaf(key, Kind::Str, s, line).at((start, self.i)))
                 }
                 Some(_) => {
-                    let start = self.i;
                     while self.i < self.b.len() && !matches!(self.b[self.i], b',' | b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n' | b'/') {
                         self.i += 1;
                     }
@@ -426,6 +431,11 @@ impl StructView {
         self.rows = rows;
         self.matches = matches;
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
+    }
+
+    /// The selected row's path (child indexes from the root).
+    pub fn selected_index_path(&self) -> Option<Vec<usize>> {
+        self.rows.get(self.selected).cloned()
     }
 
     /// The selected row's node.

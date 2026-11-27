@@ -3012,7 +3012,7 @@ impl Workbench {
             return;
         }
         let kind = d.kind.clone();
-        if self.ex_dialog_done(&kind, &d) || self.tree_edit_done(&kind, &d) {
+        if self.ex_dialog_done(&kind, &d) || self.tree_edit_done(&kind, &d) || self.tree_struct_done(&kind, &d) {
             return;
         }
         if let Some(rest) = kind.strip_prefix("install:") {
@@ -5759,6 +5759,17 @@ mod tests {
         let text = wb.windows.iter().find(|w| w.win.id == id).unwrap().ed.doc.rope.to_string();
         assert!(text.contains("\"name\": \"new\""), "{text}");
         wait_until(&mut wb, "the tree again", |wb| wb.docviews[&id].tree.as_ref().and_then(|t| t.node(&[0]).and_then(|n| n.value.clone())).as_deref() == Some("new"));
+        let text_of = |wb: &Workbench| wb.windows.iter().find(|w| w.win.id == id).unwrap().ed.doc.rope.to_string();
+        // Ins on "name": an entry after it (key, then a value; null by default).
+        keys(&mut wb, &["Insert"]);
+        assert_eq!(wb.dialog.as_ref().map(|d| d.title.as_str()), Some("Add After"));
+        run(&mut wb, json!({"cmd": "type", "text": "k"}));
+        keys(&mut wb, &["Enter"]);
+        assert!(text_of(&wb).contains("\"name\": \"new\",\n  \"k\": null,\n  \"n\""), "{}", text_of(&wb));
+        // Del on it: gone again, commas and all.
+        wait_until(&mut wb, "k listed", |wb| wb.docviews[&id].tree.as_ref().is_some_and(|t| t.node(&[1]).and_then(|n| n.key.clone()).as_deref() == Some("k")));
+        keys(&mut wb, &["Down", "Delete"]);
+        assert_eq!(text_of(&wb), "{\n  \"name\": \"new\",\n  \"n\": [1, 2]\n}\n");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
