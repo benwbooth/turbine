@@ -29,6 +29,7 @@ pub enum Tab {
     Search,
     Scm,
     Debug,
+    Extensions,
     Problems,
     Pane(u32),
 }
@@ -41,6 +42,7 @@ impl Tab {
             Tab::Search => "Search",
             Tab::Scm => "Source Control",
             Tab::Debug => "Run and Debug",
+            Tab::Extensions => "Extensions",
             Tab::Problems => "Problems",
             Tab::Pane(_) => "",
         }
@@ -53,6 +55,7 @@ impl Tab {
             Tab::Search => "S",
             Tab::Scm => "G",
             Tab::Debug => "D",
+            Tab::Extensions => "X",
             Tab::Problems => "P",
             Tab::Pane(_) => return None,
         })
@@ -138,7 +141,7 @@ pub struct Dock {
 impl Default for Dock {
     fn default() -> Self {
         Dock {
-            left: Part { visible: true, size: 30, tabs: vec![Tab::Explorer, Tab::Outline, Tab::Search, Tab::Scm, Tab::Debug], active: 0 },
+            left: Part { visible: true, size: 30, tabs: vec![Tab::Explorer, Tab::Outline, Tab::Search, Tab::Scm, Tab::Debug, Tab::Extensions], active: 0 },
             bottom: Part { visible: false, size: 12, tabs: vec![Tab::Problems], active: 0 },
             right: Part { visible: false, size: 46, tabs: Vec::new(), active: 0 },
             editor_tabs: true,

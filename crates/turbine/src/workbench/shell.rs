@@ -36,6 +36,7 @@ pub(super) struct Shell {
     pub problem_at: Vec<Option<(PathBuf, usize, usize)>>,
     pub problem_count: (usize, usize),
     pub debug_view: ListView,
+    pub extensions: Extensions,
     pub chat_input: LineInput,
     /// The editor whose file the Explorer last showed.
     pub revealed: Option<(u32, Option<PathBuf>)>,
@@ -82,6 +83,7 @@ impl Shell {
             problem_at: Vec::new(),
             problem_count: (0, 0),
             debug_view: ListView::new(),
+            extensions: Extensions::default(),
             chat_input: LineInput::default(),
             revealed: None,
             editor_tab_rects: Vec::new(),
@@ -355,6 +357,7 @@ impl Workbench {
             Tab::Search => "🔍",
             Tab::Scm => "🌿",
             Tab::Debug => "🐞",
+            Tab::Extensions => "🧩",
             Tab::Problems => "❗",
             Tab::Pane(id) => match self.windows.iter().find(|w| w.win.id == id) {
                 Some(w) if w.term.is_some() => "💻",
@@ -374,6 +377,8 @@ impl Workbench {
         self.shell.explorer.poll(explorer_shown);
         let root = self.shell.explorer.root.clone();
         self.shell.search.poll(&root);
+        let ext_shown = shown(self, Tab::Extensions);
+        self.shell.extensions.poll(ext_shown);
         let scm_shown = shown(self, Tab::Scm);
         self.shell.scm.poll(&root, scm_shown);
         // The Explorer follows the editor in front.
@@ -823,6 +828,10 @@ impl Workbench {
             "view.search" | "search.files" => self.show_tab(Tab::Search),
             "view.scm" => self.show_tab(Tab::Scm),
             "view.debug" => self.show_tab(Tab::Debug),
+            "view.extensions" => {
+                self.shell.extensions.load();
+                self.show_tab(Tab::Extensions);
+            }
             "view.problems" => {
                 self.shell.dock.add(Side::Bottom, Tab::Problems);
                 self.show_tab(Tab::Problems);
@@ -929,6 +938,8 @@ impl Workbench {
             Some("view.scm")
         } else if cs && ch('d') {
             Some("view.debug")
+        } else if cs && ch('x') {
+            Some("view.extensions")
         } else if cs && ch('m') {
             Some("view.problems")
         } else if cs && ch('u') {
@@ -1100,6 +1111,14 @@ impl Workbench {
             Tab::Debug => {
                 self.shell.debug_view.key(k);
             }
+            Tab::Extensions => match self.shell.extensions.list.key(k) {
+                ListOut::Selected(i) | ListOut::Activated(i) => {
+                    if let Some(d) = self.shell.extensions.describe(i) {
+                        self.say(d);
+                    }
+                }
+                _ => {}
+            },
             Tab::Pane(_) => {}
         }
     }
@@ -1275,6 +1294,7 @@ impl Workbench {
             Tab::Scm => &mut self.shell.scm.list,
             Tab::Problems => &mut self.shell.problems,
             Tab::Debug => &mut self.shell.debug_view,
+            Tab::Extensions => &mut self.shell.extensions.list,
             Tab::Pane(_) => return None,
         })
     }
@@ -1306,6 +1326,11 @@ impl Workbench {
             (Tab::Explorer, ListOut::Activated(i)) => {
                 if let Some(p) = self.shell.explorer.activate(i) {
                     self.goto_file(&p, None, 0);
+                }
+            }
+            (Tab::Extensions, ListOut::Selected(i) | ListOut::Activated(i)) => {
+                if let Some(d) = self.shell.extensions.describe(i) {
+                    self.say(d);
                 }
             }
             (Tab::Outline, ListOut::Selected(i)) => self.outline_goto(i, false),
@@ -1544,6 +1569,7 @@ impl Workbench {
                         Tab::Explorer => &self.shell.explorer.list,
                         Tab::Outline => &self.shell.outline.list,
                         Tab::Problems => &self.shell.problems,
+                        Tab::Extensions => &self.shell.extensions.list,
                         _ => &self.shell.debug_view,
                     };
                     pn = pn.child(list.node(&format!("view.{}", t.key()), t.name(), self.shell.focus == Focus::View(t)));

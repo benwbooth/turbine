@@ -9,6 +9,15 @@ use std::path::{Path, PathBuf};
 
 /// Which server to run for a language: the first one installed.
 pub fn server_for(lang: &str) -> Option<Vec<String>> {
+    candidates(lang).iter().find(|c| on_path(c[0])).map(|c| c.iter().map(|s| s.to_string()).collect())
+}
+
+/// The language servers Turbine knows for a language (their programs).
+pub fn server_names(lang: &str) -> Vec<&'static str> {
+    candidates(lang).iter().map(|c| c[0]).collect()
+}
+
+fn candidates(lang: &str) -> &'static [&'static [&'static str]] {
     let candidates: &[&[&str]] = match lang {
         "bash" => &[&["bash-language-server", "start"]],
         "python" => &[&["basedpyright-langserver", "--stdio"], &["pyright-langserver", "--stdio"], &["pylsp"]],
@@ -38,7 +47,7 @@ pub fn server_for(lang: &str) -> Option<Vec<String>> {
         "qml" => &[&["qmlls"]],
         _ => &[],
     };
-    candidates.iter().find(|c| on_path(c[0])).map(|c| c.iter().map(|s| s.to_string()).collect())
+    candidates
 }
 
 /// The LSP language id for one of Turbine's language names.

@@ -3,7 +3,7 @@
 
 use crate::agent::{Driver, Output, Step};
 use crate::dock::Side;
-use crate::views::{Explorer, LineInput, Outline, Scm, Search};
+use crate::views::{Explorer, Extensions, LineInput, Outline, Scm, Search};
 use crate::vim::{self, Keymap};
 use turbine_text::unicode::str_width;
 use turbine_ui::list::ListView;
@@ -362,7 +362,7 @@ fn menus() -> Vec<Menu> {
                 it("Searc~h~", "Ctrl+Shift+F", "view.search"),
                 it("~S~ource Control", "Ctrl+Shift+G", "view.scm"),
                 it("~R~un and Debug", "Ctrl+Shift+D", "view.debug"),
-                soon("E~x~tensions", "Ctrl+Shift+X", "view.extensions"),
+                it("E~x~tensions", "Ctrl+Shift+X", "view.extensions"),
                 sep(),
                 it("~P~roblems", "Ctrl+Shift+M", "view.problems"),
                 it("~O~utput", "Ctrl+Shift+U", "view.output"),
@@ -4531,6 +4531,20 @@ mod tests {
         wb.run_command("view.minimap");
         wb.render(&mut surf);
         assert!(wb.windows[wb.editor_index().unwrap()].ed.minimap_rect().is_none());
+    }
+
+    #[test]
+    fn extensions_list_each_languages_support() {
+        let mut wb = bench();
+        keys(&mut wb, &["Ctrl+Shift+X"]);
+        assert_eq!(wb.shell.focus, Focus::View(crate::dock::Tab::Extensions));
+        wait_until(&mut wb, "the list", |wb| wb.shell.extensions.list.rows.iter().any(|r| r.text == "Rust"));
+        let rows = &wb.shell.extensions.list.rows;
+        assert!(rows[0].heading && rows.last().unwrap().text.contains("WASI"));
+        let i = rows.iter().position(|r| r.text == "Rust").unwrap();
+        wb.shell.extensions.list.select(i);
+        keys(&mut wb, &["Enter"]);
+        assert!(wb.message.as_ref().is_some_and(|(m, _)| m.starts_with("Rust:")), "{:?}", wb.message);
     }
 
     #[test]

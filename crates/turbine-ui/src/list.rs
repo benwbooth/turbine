@@ -262,8 +262,24 @@ impl ListView {
                 lc.print(x, y, &row.icon, stl);
                 x += str_width(&row.icon) as i32 + 1;
             }
-            let dw = str_width(&row.detail) as i32;
-            let room = (r.x + text_w - 1 - x - if dw > 0 { dw + 1 } else { 0 }).max(0);
+            // The name comes first: the detail gets what's left (cut at its
+            // start, or dropped), never the name.
+            let avail = (r.x + text_w - 1 - x).max(0);
+            let name_w = str_width(&row.text) as i32;
+            let mut detail = row.detail.clone();
+            let room_d = avail - name_w - 2;
+            if str_width(&detail) as i32 > room_d {
+                if room_d >= 6 {
+                    while !detail.is_empty() && str_width(&detail) as i32 > room_d - 1 {
+                        detail.remove(0);
+                    }
+                    detail.insert(0, '…');
+                } else {
+                    detail.clear();
+                }
+            }
+            let dw = str_width(&detail) as i32;
+            let room = (avail - if dw > 0 { dw + 1 } else { 0 }).max(0);
             let mut t = row.text.clone();
             if str_width(&t) as i32 > room {
                 while !t.is_empty() && str_width(&t) as i32 > (room - 1).max(0) {
@@ -272,9 +288,9 @@ impl ListView {
                 t.push('…');
             }
             lc.print(x, y, &t, stl);
-            if dw > 0 && room > 0 {
+            if dw > 0 {
                 let ds = if sel { stl } else { dim };
-                lc.print(r.x + text_w - 1 - dw, y, &row.detail, ds);
+                lc.print(r.x + text_w - 1 - dw, y, &detail, ds);
             }
         }
         if bar {

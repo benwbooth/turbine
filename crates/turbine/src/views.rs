@@ -737,6 +737,103 @@ impl Scm {
     }
 }
 
+// ---- Extensions -----------------------------------------------------------------------
+
+/// What each language has: its language server and debugger (found on
+/// PATH), and its highlighting (built in, or a grammar fetched on demand).
+/// Turbine's WASI extensions will list here too.
+pub struct Extensions {
+    pub list: ListView,
+    /// Each row's language (None for headings).
+    pub langs: Vec<Option<String>>,
+    rx: Option<Receiver<(Vec<Row>, Vec<Option<String>>)>>,
+    loaded: bool,
+}
+
+impl Default for Extensions {
+    fn default() -> Self {
+        Extensions { list: ListView::new(), langs: Vec::new(), rx: None, loaded: false }
+    }
+}
+
+const LANGS: &[&str] = &[
+    "bash", "c", "cpp", "c-sharp", "css", "dart", "elixir", "go", "haskell", "html", "java", "javascript", "json", "kotlin",
+    "lua", "markdown", "nix", "ocaml", "php", "python", "qml", "ruby", "rust", "swift", "toml", "tsx", "typescript", "yaml",
+    "zig",
+];
+
+impl Extensions {
+    /// Look (again) in the background.
+    pub fn load(&mut self) {
+        self.loaded = true;
+        let (tx, rx) = channel();
+        self.rx = Some(rx);
+        std::thread::spawn(move || {
+            let mut found = Vec::new();
+            let mut missing = Vec::new();
+            for &lang in LANGS {
+                let label = turbine_syntax::BUILTIN.iter().find(|(n, _)| *n == lang).map(|(_, l)| l.to_string()).unwrap_or_else(|| {
+                    let mut c = lang.chars();
+                    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+                });
+                let server = turbine_services::lsp::server_for(lang).map(|a| a[0].clone());
+                let debugger = turbine_services::dap::adapter_for(lang).map(|a| a[0].clone());
+                let grammar = if turbine_syntax::BUILTIN.iter().any(|(n, _)| *n == lang) { "built-in" } else { "on demand" };
+                let detail = match (&server, &debugger) {
+                    (Some(s), Some(d)) => format!("{s} · {d}"),
+                    (Some(s), None) => s.clone(),
+                    (None, _) => grammar.to_string(),
+                };
+                let row = Row::new(label).detail(detail);
+                if server.is_some() {
+                    found.push((row.icon("✓").fg(vga::LIGHT_GREEN), lang.to_string()));
+                } else {
+                    missing.push((row.icon("·"), lang.to_string()));
+                }
+            }
+            let mut rows = vec![Row::new(format!("Language servers found ({})", found.len())).heading()];
+            let mut langs = vec![None];
+            for (r, l) in found {
+                rows.push(r.indent(1));
+                langs.push(Some(l));
+            }
+            rows.push(Row::new(format!("Not installed ({})", missing.len())).heading());
+            langs.push(None);
+            for (r, l) in missing {
+                rows.push(r.indent(1));
+                langs.push(Some(l));
+            }
+            rows.push(Row::new("WASI extensions: coming").heading());
+            langs.push(None);
+            let _ = tx.send((rows, langs));
+        });
+    }
+
+    pub fn poll(&mut self, shown: bool) -> bool {
+        if shown && !self.loaded {
+            self.load();
+        }
+        let Some(rx) = &self.rx else { return false };
+        let Ok((rows, langs)) = rx.try_recv() else { return false };
+        self.rx = None;
+        self.list.set_rows(rows);
+        self.langs = langs;
+        true
+    }
+
+    /// What a row says about its language, for the status line.
+    pub fn describe(&self, i: usize) -> Option<String> {
+        let lang = self.langs.get(i)?.as_ref()?;
+        let row = self.list.rows.get(i)?;
+        Some(if row.icon == "✓" {
+            format!("{}: completions, diagnostics, go to definition via {}", row.text, row.detail)
+        } else {
+            let hint = turbine_services::lsp::server_names(lang).join(" or ");
+            format!("{}: install {hint} (on PATH) for completions and diagnostics", row.text)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
