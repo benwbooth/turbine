@@ -108,14 +108,58 @@ impl Workbench {
         let anchor = *anchor;
         self.tip.hover = None;
         // (Still resting there: the server's words, without its code fences.)
-        if self.tip.at.is_some_and(|(p, _)| anchor.contains(p)) && self.tip.shown.is_none() {
-            let lines: Vec<&str> = text.lines().filter(|l| !l.trim_start().starts_with("```")).collect();
-            let t = lines.join("\n").trim().to_string();
-            if !t.is_empty() {
-                self.tip.shown = Some((anchor, t));
-            }
+        if self.tip.at.is_some_and(|(p, _)| anchor.contains(p)) && self.tip.shown.is_none() && !text.trim().is_empty() {
+            // (The server's Markdown rendered, its code in its colours.)
+            let rich = self.markdown_rich(text, 70);
+            let plain: String = rich.iter().map(|l| l.iter().map(|(t, _)| t.as_str()).collect::<String>()).collect::<Vec<_>>().join("\n");
+            self.tip.shown = Some((anchor, plain));
+            self.tip.rich = Some(rich);
         }
         true
+    }
+
+    /// Markdown as a tooltip's coloured lines: rendered as the guide is,
+    /// each kind of text in the code colours (on the tip's black).
+    pub(super) fn markdown_rich(&self, md: &str, width: usize) -> Vec<Vec<(String, Style)>> {
+        let r = crate::markdown::render(md, width);
+        let base = self.theme.scheme.tooltip;
+        let syn = &self.theme.scheme.syntax;
+        let mut out = Vec::new();
+        for (i, line) in r.text.lines().enumerate() {
+            let spans = r.spans.get(i);
+            let mut pieces: Vec<(String, Style)> = Vec::new();
+            let mut cur = String::new();
+            let mut cur_st = base;
+            for (b, ch) in line.char_indices() {
+                let kind = spans.and_then(|sp| sp.iter().rev().find(|(a, e, _)| (*a as usize) <= b && b < *e as usize)).map(|x| x.2 as usize);
+                let st = match kind.and_then(|k| turbine_ui::theme::SYNTAX_KINDS.get(k).copied()) {
+                    // (Headings bright and bold; key combinations as caps.)
+                    Some("keyword" | "type") if spans.is_some_and(|sp| sp.iter().any(|x| x.0 == 0 && x.1 as usize >= line.len())) => Style { fg: vga::WHITE, attrs: turbine_ui::theme::Attrs { bold: true, ..base.attrs }, ..base },
+                    Some("escape") => Style::new(vga::BLACK, vga::LIGHT_GRAY),
+                    _ => {
+                        let fg = kind.and_then(|k| syn.get(k).copied().flatten()).map(|c| turbine_ui::list::readable(c, base.bg)).unwrap_or(base.fg);
+                        Style { fg, ..base }
+                    }
+                };
+                if st != cur_st && !cur.is_empty() {
+                    pieces.push((std::mem::take(&mut cur), cur_st));
+                }
+                cur_st = st;
+                cur.push(ch);
+            }
+            if !cur.is_empty() {
+                pieces.push((cur, cur_st));
+            }
+            out.push(pieces);
+        }
+        // (No blank lines at the ends.)
+        while out.last().is_some_and(|l| l.iter().all(|(t, _)| t.trim().is_empty())) {
+            out.pop();
+        }
+        while out.first().is_some_and(|l| l.iter().all(|(t, _)| t.trim().is_empty())) {
+            out.remove(0);
+        }
+        out
     }
 
     /// What hovering here shows, and the place it belongs to.
@@ -191,11 +235,11 @@ impl Workbench {
                 }
             }
             lines.push(cur);
-            if lines.len() >= 10 {
+            if lines.len() >= 16 {
                 break;
             }
         }
-        lines.truncate(10);
+        lines.truncate(16);
         let w = lines.iter().map(|l| l.iter().map(|(t, _)| str_width(t)).sum::<usize>()).max().unwrap_or(0) as i32 + 2;
         let h = lines.len() as i32;
         let x = p.x.min(screen.right() - w).max(0);

@@ -5823,6 +5823,18 @@ mod tests {
     }
 
     #[test]
+    fn tooltips_render_markdown_in_colour() {
+        let wb = bench();
+        let rich = wb.markdown_rich("```rust\nfn area(w: u32) -> u32\n```\n---\nThe **area** of `w`.", 70);
+        let text: Vec<String> = rich.iter().map(|l| l.iter().map(|(t, _)| t.as_str()).collect()).collect();
+        assert!(text.iter().any(|l| l.contains("fn area")) && !text.iter().any(|l| l.contains("```")), "{text:?}");
+        // The code's type in a colour of its own.
+        let code = rich.iter().find(|l| l.iter().any(|(t, _)| t.contains("fn"))).unwrap();
+        let ty = code.iter().find(|(t, _)| t == "u32").unwrap().1;
+        assert_ne!(ty.fg, wb.theme.scheme.tooltip.fg, "{code:?}");
+    }
+
+    #[test]
     fn scrolling_sideways() {
         let (dir, mut wb) = project("hscroll");
         std::fs::write(dir.join("wide.txt"), format!("{}\n", "x".repeat(400))).unwrap();
