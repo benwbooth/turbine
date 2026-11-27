@@ -580,20 +580,22 @@ void CellView::paintVga(QPainter* p)
     struct Done { QElapsedTimer& c; ~Done() { if (timing) fprintf(stderr, "paint %.2f ms\n", c.nsecsElapsed() / 1e6); } } done { clock };
     const turbine::Frame& f = *m_frame;
     const int cols = f.cols, rows = f.rows;
-    const int gw = m_dots * m_k, gh = 16 * m_k;
-    // Paint text mode's own pixels into an image, then stretch that over
-    // the item (smoothly: from whole dots, so they stay even and sharp).
-    if (m_vgaImage.size() != m_vgaSize) m_vgaImage = QImage(m_vgaSize, QImage::Format_RGB32);
+    // Text mode's dots, drawn straight onto the screen under a scale (a
+    // dot is m_cw / 9 by m_ch / 16 of it): Qt rasterizes each glyph at its
+    // true size, anti-aliased, so letters come out even at any zoom, with
+    // no picture of the screen to shrink each frame.
+    const int k = 1;
+    const int gw = m_dots * k, gh = 16 * k;
     QPainter* screen = p;
-    QPainter ip(&m_vgaImage);
-    p = &ip;
+    p->save();
+    p->scale(m_cw / qreal(m_dots), m_ch / 16.0);
     p->setRenderHint(QPainter::Antialiasing, false);
     p->setRenderHint(QPainter::TextAntialiasing, true);
     QFont font = m_dots == 8 ? m_vga8 : m_vga9;
-    font.setPixelSize(16 * m_k);
+    font.setPixelSize(16 * k);
     p->setFont(font);
-    const int ascent = 12 * m_k;
-    if (!f.cells.empty()) p->fillRect(m_vgaImage.rect(), rgb(f.cells[0].bg));
+    const int ascent = 12 * k;
+    if (!f.cells.empty()) p->fillRect(QRectF(0, 0, width() / m_cw * m_dots + 1, height() / m_ch * 16 + 1), rgb(f.cells[0].bg));
     for (int y = 0; y < rows; ++y) {
         int x = 0;
         while (x < cols) {
@@ -642,10 +644,10 @@ void CellView::paintVga(QPainter* p)
                     // from a thin outline font: drawn again a dot over, so
                     // their strokes are as heavy as the VGA font's.
                     if ((ch >= 0xE000 && ch <= 0xF8FF) || (run.size() == 2 && run.at(0).isHighSurrogate()))
-                        p->drawText(QPoint(x * gw + std::max(1, m_k / 2), y * gh + ascent), run);
+                        p->drawText(QPointF(x * gw + 0.5, y * gh + ascent), run);
                 }
             }
-            if (c.flags & 4) p->fillRect(QRect(x * gw, y * gh + 15 * m_k, (x1 - x) * gw, m_k), fg);
+            if (c.flags & 4) p->fillRect(QRect(x * gw, y * gh + 15 * k, (x1 - x) * gw, k), fg);
             x = x1;
         }
     }
@@ -654,28 +656,15 @@ void CellView::paintVga(QPainter* p)
         const auto& c = f.cells[size_t(f.cursor_y * cols + f.cursor_x)];
         const QRect r(f.cursor_x * gw, f.cursor_y * gh, ((c.flags & 16) ? 2 : 1) * gw, gh);
         const QColor fg = rgb(c.fg);
-        if (f.cursor_shape == 0) p->fillRect(QRect(r.x(), r.y() + 14 * m_k, r.width(), 2 * m_k), fg);
-        else if (f.cursor_shape == 2) p->fillRect(QRect(r.x(), r.y(), 2 * m_k, r.height()), fg);
+        if (f.cursor_shape == 0) p->fillRect(QRect(r.x(), r.y() + 14 * k, r.width(), 2 * k), fg);
+        else if (f.cursor_shape == 2) p->fillRect(QRect(r.x(), r.y(), 2 * k, r.height()), fg);
         else {
             p->fillRect(r, fg);
             p->setPen(rgb(c.bg));
             p->drawText(QPoint(r.x(), r.y() + ascent), QString::fromUtf8(c.text.data(), int(c.text.size())));
         }
     }
-    ip.end();
-    // Shrunk to the screen's own pixels with an averaging filter (not a
-    // bilinear stretch): every dot gets the same share of the pixels it
-    // covers, so letters stay even at any zoom.
-    const QRectF target(0, 0, m_vgaSize.width() / qreal(m_dots * m_k) * m_cw, m_vgaSize.height() / 16.0 / m_k * m_ch);
-    const qreal dpr = window() ? window()->effectiveDevicePixelRatio() : 1;
-    const QSize px(int(std::lround(target.width() * dpr)), int(std::lround(target.height() * dpr)));
-    if (px == m_vgaImage.size() || px.isEmpty()) {
-        screen->drawImage(target, m_vgaImage);
-    } else {
-        QImage shrunk = m_vgaImage.scaled(px, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-        shrunk.setDevicePixelRatio(dpr);
-        screen->drawImage(target.topLeft(), shrunk);
-    }
+    p->restore();
     drawPictures(screen);
 }
 
