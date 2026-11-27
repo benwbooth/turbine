@@ -222,7 +222,7 @@ pub struct Workbench {
     /// Window index being moved/resized with the mouse.
     dragging: Option<usize>,
     /// A window whose scroll bar thumb is being dragged.
-    scroll_drag: Option<usize>,
+    scroll_drag: Option<(usize, bool, usize)>,
     /// Editor (window index) selecting with the mouse.
     selecting: Option<usize>,
     last_click: Option<(Point, Instant)>,
@@ -703,6 +703,18 @@ impl Workbench {
         if !text.is_empty() {
             self.clipboard = text;
         }
+    }
+
+    /// The Borland line:column cells before the sideways bar in a window's bottom edge.
+    fn hbar_skip(&self) -> i32 {
+        if self.theme.style.window_numbers { 13 } else { 2 }
+    }
+
+    /// Whether window `i`'s sideways bar is over its last row (its bottom
+    /// edge being the panel's top).
+    fn hbar_inside(&self, i: usize) -> bool {
+        let w = &self.windows[i];
+        self.layout().bottom.is_some_and(|b| b.y == w.win.rect.bottom() - 1) && w.ed.hbar_inside_shown()
     }
 
     /// The menu model, for native menu bars (the desktop's global menu).
@@ -3805,9 +3817,13 @@ impl Workbench {
             self.xtree_out(id, out);
             return;
         }
-        if let Some(i) = self.scroll_drag {
+        if let Some((i, horizontal, grab)) = self.scroll_drag {
             match m.kind {
-                MouseKind::Drag(Button::Left) if i < self.windows.len() => vbar_to(&mut self.windows[i], m.pos.y),
+                MouseKind::Drag(Button::Left) if i < self.windows.len() => {
+                    let skip = self.hbar_skip();
+                    let inside = self.hbar_inside(i);
+                    bar_drag(&mut self.windows[i], horizontal, inside, skip, m.pos, grab);
+                }
                 MouseKind::Drag(_) => {}
                 _ => self.scroll_drag = None,
             }
@@ -3880,6 +3896,8 @@ impl Workbench {
                 let i = self.windows.len() - 1;
                 let double = self.last_click.is_some_and(|(p, t)| p == m.pos && t.elapsed() < Duration::from_millis(400));
                 self.last_click = Some((m.pos, Instant::now()));
+                let on_inside_bar = self.windows[i].term.is_none() && self.hbar_inside(i) && m.pos.y == self.windows[i].ed.area().bottom() - 1;
+                let skip = if self.theme.style.window_numbers && self.windows[i].win.rect.w > 20 { 13 } else { 2 };
                 let w = &mut self.windows[i];
                 // (A docked window's frame belongs to its part: no moving,
                 // resizing, closing or zooming it from there.)
@@ -3897,18 +3915,16 @@ impl Workbench {
                             self.dragging = Some(i);
                         }
                     }
-                    Hit::VScroll => {
-                        let r = w.win.rect;
-                        if m.pos.y == r.y + 1 || m.pos.y == r.bottom() - 2 {
-                            // The arrows: a line at a time.
-                            let up = m.pos.y == r.y + 1;
-                            let (pos, max) = vbar(w);
-                            let to = if up { pos.saturating_sub(1) } else { (pos + 1).min(max) };
-                            set_vbar(w, to);
-                        } else {
-                            // The track: the thumb jumps there, and drags.
-                            vbar_to(w, m.pos.y);
-                            self.scroll_drag = Some(i);
+                    Hit::VScroll | Hit::HScroll if w.term.is_none() || hit == Hit::VScroll => {
+                        let horizontal = hit == Hit::HScroll;
+                        if let Some(grab) = bar_press(w, horizontal, false, skip, m.pos) {
+                            self.scroll_drag = Some((i, horizontal, grab));
+                        }
+                    }
+                    // The sideways bar over the last row (the panel under it).
+                    Hit::Inside if on_inside_bar => {
+                        if let Some(grab) = bar_press(w, true, true, skip, m.pos) {
+                            self.scroll_drag = Some((i, true, grab));
                         }
                     }
                     Hit::Inside if w.term.is_some() => {
@@ -4617,39 +4633,89 @@ impl App for Workbench {
     }
 }
 
-/// A window's vertical scroll bar: (position, last position). Editors
-/// track the cursor's line; terminals their scrollback.
-fn vbar(w: &mut EdWin) -> (usize, usize) {
+/// A window's view along a bar: (first shown, how many shown, of how
+/// many). Editors: lines, or columns sideways; terminals: the scrollback.
+fn bar_view(w: &mut EdWin, horizontal: bool) -> (usize, usize, usize) {
     if let Some(t) = &mut w.term {
         return match t.terminal().and_then(|t| t.scrollbar()) {
-            Some((total, offset, len)) => (offset, total.saturating_sub(len)),
-            None => (0, 0),
+            Some((total, offset, len)) => (offset, len, total),
+            None => (0, 1, 1),
         };
     }
-    (w.ed.cursor_line_col().0, w.ed.doc.len_lines().saturating_sub(1))
+    let e = &w.ed;
+    if horizontal {
+        let shown = e.text_width();
+        (e.scroll_x, shown, e.longest_in_view().max(e.scroll_x + shown))
+    } else {
+        let shown = e.area().h.max(1) as usize;
+        (e.scroll_y, shown, e.doc.len_lines().max(e.scroll_y + 1))
+    }
 }
 
-fn set_vbar(w: &mut EdWin, pos: usize) {
+/// Scroll the view (never the cursor, as VS Code's bars do).
+fn set_bar_first(w: &mut EdWin, horizontal: bool, first: usize) {
     if let Some(t) = &mut w.term {
         if let Some(t) = t.terminal() {
-            t.scroll_to_row(pos);
+            t.scroll_to_row(first);
         }
         return;
     }
-    let line = pos.min(w.ed.doc.len_lines().saturating_sub(1));
-    w.ed.cursor = w.ed.doc.rope.line_to_char(line);
-    w.ed.anchor = None;
+    if horizontal {
+        w.ed.scroll_x = first;
+    } else {
+        w.ed.scroll_y = first.min(w.ed.doc.len_lines().saturating_sub(1));
+    }
 }
 
-/// Put the thumb at screen row `y` (the inverse of `draw_vscroll`): the
-/// track's first row is the top, its last row the very bottom.
-fn vbar_to(w: &mut EdWin, y: i32) {
+/// A bar's track: (its first cell along the bar, its length), past the
+/// arrows. `inside`: the sideways bar drawn over the last row.
+fn bar_track(w: &EdWin, horizontal: bool, inside: bool, skip: i32) -> (i32, i32) {
     let r = w.win.rect;
-    let track = (r.h - 5).max(0);
-    let (_, max) = vbar(w);
-    let at = (y - r.y - 2).clamp(0, track) as usize;
-    let pos = if track == 0 { 0 } else { (at * max + track as usize / 2) / track as usize };
-    set_vbar(w, pos.min(max));
+    if !horizontal {
+        return (r.y + 2, (r.h - 4).max(0));
+    }
+    if inside {
+        let x = w.ed.area().x + (w.ed.area().w - w.ed.text_width() as i32);
+        return (x + 1, (r.right() - 1 - x - 2).max(0));
+    }
+    (r.x + skip + 1, (r.w - skip - 4).max(0))
+}
+
+/// A press on a bar: an arrow scrolls a step; the track scrolls there at
+/// once (the thumb centred on the press) and drags on; the thumb drags
+/// from where it was taken. The grab point (within the thumb) to drag
+/// with, unless it was an arrow.
+fn bar_press(w: &mut EdWin, horizontal: bool, inside: bool, skip: i32, p: Point) -> Option<usize> {
+    let (start, track) = bar_track(w, horizontal, inside, skip);
+    let at = if horizontal { p.x } else { p.y };
+    let (first, shown, total) = bar_view(w, horizontal);
+    if at < start || at >= start + track {
+        // The arrows: a step.
+        let step = if horizontal { 4 } else { 1 };
+        let to = if at < start { first.saturating_sub(step) } else { (first + step).min(total.saturating_sub(shown)) };
+        set_bar_first(w, horizontal, to);
+        return None;
+    }
+    let (t_at, t_len) = turbine_ui::frame::thumb(track as usize, first, shown, total);
+    let off = (at - start) as usize;
+    let grab = if t_len > 0 && off >= t_at && off < t_at + t_len { off - t_at } else { t_len / 2 };
+    bar_drag(w, horizontal, inside, skip, p, grab);
+    Some(grab)
+}
+
+/// Dragging a thumb: its start follows the pointer, less where it was held.
+fn bar_drag(w: &mut EdWin, horizontal: bool, inside: bool, skip: i32, p: Point, grab: usize) {
+    let (start, track) = bar_track(w, horizontal, inside, skip);
+    let (_, shown, total) = bar_view(w, horizontal);
+    let (_, t_len) = turbine_ui::frame::thumb(track as usize, 0, shown, total);
+    let room = (track as usize).saturating_sub(t_len);
+    let span = total.saturating_sub(shown);
+    if room == 0 || span == 0 {
+        return;
+    }
+    let at = (if horizontal { p.x } else { p.y }) - start - grab as i32;
+    let at = at.clamp(0, room as i32) as usize;
+    set_bar_first(w, horizontal, (at * span + room / 2) / room);
 }
 
 #[cfg(test)]
@@ -4755,7 +4821,8 @@ mod tests {
         keys(&mut wb, &["Ctrl+Home"]);
         let r = wb.windows.last().unwrap().win.rect;
         let m = |kind, y| Event::Mouse(MouseEvent { kind, pos: Point::new(r.right() - 1, y), mods: Mods::NONE });
-        let line = |wb: &Workbench| wb.windows.last().unwrap().ed.cursor_line_col().0;
+        // (The bar scrolls the view; the cursor stays.)
+        let line = |wb: &Workbench| wb.windows.last().unwrap().ed.scroll_y;
         // Grab the thumb at the top and drag it past the bottom.
         wb.dispatch(m(MouseKind::Down(Button::Left), r.y + 2));
         assert_eq!(line(&wb), 0);
@@ -4764,11 +4831,14 @@ mod tests {
         assert!(mid > 100 && mid < 200, "{mid}");
         wb.dispatch(m(MouseKind::Drag(Button::Left), r.bottom() + 3));
         wb.dispatch(m(MouseKind::Up(Button::Left), r.bottom() + 3));
-        assert_eq!(line(&wb), 300);
+        let shown = (wb.windows.last().unwrap().ed.area().h.max(1)) as usize;
+        let end = line(&wb);
+        assert_eq!(end, 301 - shown);
+        assert_eq!(wb.windows.last().unwrap().ed.cursor, 0);
         // The up arrow steps back a line.
         wb.dispatch(m(MouseKind::Down(Button::Left), r.y + 1));
         wb.dispatch(m(MouseKind::Up(Button::Left), r.y + 1));
-        assert_eq!(line(&wb), 299);
+        assert_eq!(line(&wb), end - 1);
     }
 
     #[test]
@@ -5280,6 +5350,39 @@ mod tests {
             wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: Point::new(b.x + 3, b.y), mods: Mods::NONE }));
         }
         wait_until(&mut wb, "the diff", |wb| wb.windows.last().is_some_and(|w| w.win.title.contains("main.rs @")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scroll_bars_scroll_the_view_not_the_cursor() {
+        let (dir, mut wb) = project("bars");
+        let text: String = (0..300).map(|i| format!("line {i} {}\n", "x".repeat(i % 7 * 40))).collect();
+        std::fs::write(dir.join("long.txt"), text).unwrap();
+        wb.goto_file(&dir.join("long.txt"), Some(0), 0);
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let r = wb.windows.last().unwrap().win.rect;
+        let press = |wb: &mut Workbench, kind: MouseKind, p: Point| wb.event(Event::Mouse(MouseEvent { kind, pos: p, mods: Mods::NONE }));
+        // A press halfway down the track: there at once; the cursor stays.
+        let mid = Point::new(r.right() - 1, r.y + r.h / 2);
+        press(&mut wb, MouseKind::Down(Button::Left), mid);
+        let y1 = wb.windows.last().unwrap().ed.scroll_y;
+        assert!(y1 > 100 && y1 < 200, "{y1}");
+        assert_eq!(wb.windows.last().unwrap().ed.cursor, 0);
+        // Dragging on from there.
+        press(&mut wb, MouseKind::Drag(Button::Left), Point::new(mid.x, mid.y + 5));
+        press(&mut wb, MouseKind::Up(Button::Left), Point::new(mid.x, mid.y + 5));
+        let y2 = wb.windows.last().unwrap().ed.scroll_y;
+        assert!(y2 > y1, "{y1} {y2}");
+        // Drawing keeps the view where the bar put it.
+        wb.render(&mut surf);
+        assert_eq!(wb.windows.last().unwrap().ed.scroll_y, y2);
+        // Sideways: the bottom edge's track.
+        let skip = wb.hbar_skip();
+        let at = Point::new(r.x + skip + 1 + (r.w - skip - 4) / 2, r.bottom() - 1);
+        press(&mut wb, MouseKind::Down(Button::Left), at);
+        press(&mut wb, MouseKind::Up(Button::Left), at);
+        assert!(wb.windows.last().unwrap().ed.scroll_x > 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

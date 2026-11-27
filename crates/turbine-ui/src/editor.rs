@@ -717,7 +717,29 @@ impl EditorView {
         self.minimap_rect
     }
 
-    fn gutter_width(&self) -> i32 {
+    /// Where the text was drawn last (scroll bars and clicks use it).
+    pub fn area(&self) -> Rect {
+        self.area
+    }
+
+    /// The widest line in view (tabs as four), for the sideways bar.
+    pub fn longest_in_view(&self) -> usize {
+        let lines = self.doc.len_lines();
+        (self.scroll_y..(self.scroll_y + self.area.h.max(1) as usize).min(lines)).map(|l| turbine_text::unicode::str_width(&self.doc.line(l).replace('\t', "    "))).max().unwrap_or(0)
+    }
+
+    /// The text's width in columns (without the line numbers).
+    pub fn text_width(&self) -> usize {
+        (self.area.w - self.gutter_width()).max(1) as usize
+    }
+
+    /// Whether the sideways bar shows over the last row (lines wider than
+    /// the window, or scrolled sideways; no wrapping).
+    pub fn hbar_inside_shown(&self) -> bool {
+        self.wrap_width() == 0 && (self.longest_in_view() > self.text_width() || self.scroll_x > 0)
+    }
+
+    pub fn gutter_width(&self) -> i32 {
         if self.line_numbers { self.doc.len_lines().to_string().len().max(3) as i32 + 1 } else { 0 }
     }
 
