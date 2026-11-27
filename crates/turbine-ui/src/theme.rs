@@ -475,8 +475,99 @@ impl Scheme {
         }
     }
 
+    /// QuickBASIC 2.0 and 3.0 on EGA: a cyan menu bar, black menus in
+    /// green double lines, green window frames, grey dialogs with red
+    /// frames and labels. Its editor took View > Options' colours; black
+    /// here, as it was set on the family PC this look remembers.
+    pub fn quickbasic3() -> Scheme {
+        let mut s = Scheme::qbasic();
+        s.name = "QuickBASIC 3";
+        s.desktop = s!(GREEN on BLACK);
+        s.desktop_char = " ";
+        s.menu = s!(BLACK on CYAN);
+        s.menu_hotkey = s!(BLACK on CYAN);
+        s.menu_selected = s!(CYAN on BLACK);
+        s.menu_selected_hotkey = s!(CYAN on BLACK);
+        s.menu_disabled = s!(DARK_GRAY on BLACK);
+        s.frame = s!(GREEN on BLACK);
+        s.frame_active = s!(LIGHT_GREEN on BLACK);
+        s.frame_icons = s!(BLACK on GREEN);
+        s.editor = s!(LIGHT_GRAY on BLACK);
+        s.editor_selection = s!(BLACK on LIGHT_GRAY);
+        s.editor_gutter = s!(GREEN on BLACK);
+        s.editor_ghost = s!(DARK_GRAY on BLACK);
+        s.scrollbar = s!(GREEN on BLACK);
+        s.dialog = s!(RED on LIGHT_GRAY);
+        s.dialog_frame = s!(RED on LIGHT_GRAY);
+        s.dialog_title = s!(RED on LIGHT_GRAY);
+        s.label_hotkey = s!(WHITE on LIGHT_GRAY);
+        s.label_focused = s!(RED on LIGHT_GRAY);
+        s.input = s!(BLUE on LIGHT_GRAY);
+        s.button = s!(RED on LIGHT_GRAY);
+        s.button_focused = s!(BLUE on LIGHT_GRAY);
+        s.button_default = s!(BLUE on LIGHT_GRAY);
+        s.button_hotkey = s!(WHITE on LIGHT_GRAY);
+        s.list = s!(BLUE on LIGHT_GRAY);
+        s.list_selected = s!(LIGHT_GRAY on BLUE);
+        s.status = s!(BLACK on CYAN);
+        s.status_key = s!(BLACK on CYAN);
+        s.shadow = s!(DARK_GRAY on BLACK);
+        s.title_active = s!(BLACK on GREEN);
+        s.title_inactive = s!(BLACK on GREEN);
+        s.panel = s!(LIGHT_GRAY on BLACK);
+        s.panel_frame = s!(GREEN on BLACK);
+        s.panel_selected = s!(BLACK on GREEN);
+        s.tab_bar = s!(GREEN on BLACK);
+        s.tab_active = s!(BLACK on GREEN);
+        s.tab_inactive = s!(GREEN on BLACK);
+        s.crumbs = s!(BLACK on CYAN);
+        s.crumbs_sep = s!(BLUE on CYAN);
+        s.crumbs_last = s!(WHITE on CYAN);
+        s.find_match = s!(BLACK on GREEN);
+        s.find_current = s!(BLACK on LIGHT_GREEN);
+        s
+    }
+
+    /// QuickBASIC 4.0: a black editor, cyan menus with red hotkeys, the
+    /// chosen item white on red.
+    pub fn quickbasic4() -> Scheme {
+        let mut s = Scheme::qbasic();
+        s.name = "QuickBASIC 4";
+        s.menu = s!(BLACK on CYAN);
+        s.menu_hotkey = s!(RED on CYAN);
+        s.menu_selected = s!(WHITE on RED);
+        s.menu_selected_hotkey = s!(WHITE on RED);
+        s.menu_disabled = s!(DARK_GRAY on CYAN);
+        s.frame = s!(LIGHT_GRAY on BLACK);
+        s.frame_active = s!(WHITE on BLACK);
+        s.frame_icons = s!(BLACK on LIGHT_GRAY);
+        s.editor = s!(LIGHT_GRAY on BLACK);
+        s.editor_selection = s!(BLACK on LIGHT_GRAY);
+        s.editor_ghost = s!(DARK_GRAY on BLACK);
+        s.scrollbar = s!(LIGHT_GRAY on BLACK);
+        s.dialog = s!(BLACK on CYAN);
+        s.dialog_frame = s!(WHITE on CYAN);
+        s.dialog_title = s!(BLACK on CYAN);
+        s.label_hotkey = s!(RED on CYAN);
+        s.label_focused = s!(WHITE on CYAN);
+        s.input = s!(BLACK on CYAN);
+        s.button = s!(BLACK on CYAN);
+        s.button_focused = s!(WHITE on CYAN);
+        s.button_default = s!(WHITE on CYAN);
+        s.button_hotkey = s!(RED on CYAN);
+        s.list = s!(BLACK on CYAN);
+        s.list_selected = s!(WHITE on RED);
+        s.status = s!(BLACK on CYAN);
+        s.status_key = s!(BLACK on CYAN);
+        s.panel = s!(BLACK on CYAN);
+        s.panel_frame = s!(WHITE on CYAN);
+        s.panel_selected = s!(WHITE on RED);
+        s.tab_active = s!(WHITE on RED);
+        s
+    }
+
     pub fn all() -> Vec<Scheme> {
-        vec![Scheme::turbo(), Scheme::qbasic(), Scheme::vbdos(), Scheme::borland_cyan(), Scheme::amber()]
+        vec![Scheme::turbo(), Scheme::qbasic(), Scheme::vbdos(), Scheme::borland_cyan(), Scheme::quickbasic3(), Scheme::quickbasic4(), Scheme::amber()]
     }
 }
 
@@ -764,8 +855,37 @@ impl ControlStyle {
             status_rules: false,
         }
     }
+    /// QuickBASIC 2.0 and 3.0: double green lines, ≡ at the left of the bar,
+    /// no status line hints, dialogs in red double lines with boxed
+    /// buttons.
+    pub fn quickbasic3() -> ControlStyle {
+        let mut st = ControlStyle::qbasic();
+        st.name = "QuickBASIC 3";
+        st.active_frame = DOUBLE;
+        st.inactive_frame = DOUBLE;
+        st.menu_frame = DOUBLE;
+        st.dialog_frame = DOUBLE;
+        st.shadows = false;
+        st.help_right = false;
+        st.hide_system_menu = false;
+        st.hotkeys_when_active = true;
+        st.scroll = ["↑", "↓", "←", "→", "░", "█"];
+        st.controls.button = ButtonLook::Box3d;
+        st.scheme = Some("QuickBASIC 3");
+        st
+    }
+
+    /// QuickBASIC 4.0: QBasic's windows (it is QBasic's parent) with its
+    /// own colours.
+    pub fn quickbasic4() -> ControlStyle {
+        let mut st = ControlStyle::qbasic();
+        st.name = "QuickBASIC 4";
+        st.scheme = Some("QuickBASIC 4");
+        st
+    }
+
     pub fn all() -> Vec<ControlStyle> {
-        vec![ControlStyle::turbo_vision(), ControlStyle::qbasic(), ControlStyle::vbdos(), ControlStyle::ascii()]
+        vec![ControlStyle::turbo_vision(), ControlStyle::qbasic(), ControlStyle::vbdos(), ControlStyle::quickbasic3(), ControlStyle::quickbasic4(), ControlStyle::ascii()]
     }
 }
 
