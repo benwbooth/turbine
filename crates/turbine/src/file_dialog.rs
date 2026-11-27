@@ -68,6 +68,8 @@ pub const LINE_ENDINGS: &[(&str, LineEnding)] =
 /// The file dialog's state beside its `Dialog` (kind "files").
 pub struct FileDialog {
     pub save: bool,
+    /// Open Folder: only folders listed; OK picks the folder shown.
+    pub folder: bool,
     pub dir: PathBuf,
     pub entries: Vec<Entry>,
     /// Indexes into `entries` of the rows shown (the first may be "..").
@@ -170,7 +172,7 @@ impl FileDialog {
             .body(ui::col(rows))
             .buttons(vec![ui::button("ok", if save { "~S~ave" } else { "~O~pen" }, true), ui::button("cancel", "Cancel", false)]);
         d.focus_id("fname");
-        let mut f = FileDialog { save, dir, entries: Vec::new(), shown: Vec::new(), places, width: 62 };
+        let mut f = FileDialog { save, folder: false, dir, entries: Vec::new(), shown: Vec::new(), places, width: 62 };
         f.read_dir();
         f.refresh(&mut d);
         (f, d)
@@ -211,6 +213,9 @@ impl FileDialog {
         }
         for (i, e) in self.entries.iter().enumerate() {
             if !hidden && e.name.starts_with('.') {
+                continue;
+            }
+            if self.folder && !e.dir {
                 continue;
             }
             if !e.dir && !types.is_empty() {
@@ -309,9 +314,32 @@ impl FileDialog {
     }
 
     /// What OK should do: a folder to enter, or a file chosen.
+    /// Open Folder: the same dialog listing only folders.
+    pub fn folder(dir: PathBuf, project: Option<PathBuf>, recent: &[PathBuf]) -> (FileDialog, Dialog) {
+        let (mut f, mut d) = FileDialog::new(false, dir, "", project, recent, None, LineEnding::Lf);
+        f.folder = true;
+        d.title = "Open Folder".into();
+        d.set_caption("ok", "~S~elect Folder");
+        d.set_caption("fname", "~F~older:");
+        f.refresh(&mut d);
+        (f, d)
+    }
+
     pub fn target(&self, d: &Dialog) -> Option<PathBuf> {
         let typed = d.value("fname").unwrap_or_default();
         let typed = typed.trim();
+        if self.folder {
+            // The folder shown, or one typed.
+            return Some(if typed.is_empty() {
+                self.dir.clone()
+            } else if let Some(rest) = typed.strip_prefix("~/") {
+                home().map(|h| h.join(rest)).unwrap_or_else(|| PathBuf::from(typed))
+            } else if Path::new(typed).is_absolute() {
+                PathBuf::from(typed)
+            } else {
+                self.dir.join(typed)
+            });
+        }
         if typed.is_empty() {
             return match self.selected(d)? {
                 None => self.dir.parent().map(Path::to_path_buf),

@@ -278,7 +278,7 @@ fn menus() -> Vec<Menu> {
                 soon("New ~W~indow", "Ctrl+Shift+N", "file.new_window"),
                 sep(),
                 it("~O~pen File...", "F3", "file.open"),
-                soon("Open ~F~older...", "", "file.open_folder"),
+                it("Open ~F~older...", "", "file.open_folder"),
                 soon("Open ~R~ecent", "", "file.recent"),
                 sep(),
                 it("~S~ave", "F2", "file.save"),
@@ -538,7 +538,7 @@ impl Workbench {
             pending_task: None,
             socket_path: None,
             look_path: None,
-            shell: Shell::new(shell::project_of(files)),
+            shell: Shell::new(shell::project_of(files), !files.is_empty()),
             find: FindBar::default(),
         };
         for f in files {
@@ -642,6 +642,12 @@ impl Workbench {
                     self.theme.scheme = sc;
                 }
                 self.apply_layout_json(&v["layout"]);
+                // Started without a file or folder: the last project again.
+                if !self.shell.explicit_project {
+                    if let Some(p) = v["project"].as_str().map(PathBuf::from).filter(|p| p.is_dir()) {
+                        self.shell.explorer.set_root(p);
+                    }
+                }
             }
         }
         self.look_path = Some(p);
@@ -650,7 +656,12 @@ impl Workbench {
     /// Keep the look and layout for next time (written off the UI thread).
     fn save_look(&self) {
         if let Some(p) = self.look_path.clone() {
-            let v = json!({"style": self.theme.style.name, "scheme": self.theme.scheme.name, "layout": self.layout_json()});
+            let v = json!({
+                "style": self.theme.style.name,
+                "scheme": self.theme.scheme.name,
+                "layout": self.layout_json(),
+                "project": self.shell.explorer.root.display().to_string(),
+            });
             std::thread::spawn(move || {
                 if let Some(d) = p.parent() {
                     let _ = std::fs::create_dir_all(d);
@@ -1881,6 +1892,13 @@ impl Workbench {
                 }
             }
             "file.open" => self.open_dialog(std::env::current_dir().unwrap_or_default()),
+            "file.open_folder" => {
+                let root = self.shell.explorer.root.clone();
+                let start = root.parent().map(Path::to_path_buf).unwrap_or(root.clone());
+                let (f, d) = FileDialog::folder(start, Some(root), &self.recent_dirs);
+                self.file_dlg = Some(f);
+                self.dialog = Some(d);
+            }
             "file.save" => self.save(false),
             "file.save_as" => self.save(true),
             "app.quit" => {
@@ -2242,9 +2260,10 @@ impl Workbench {
                 None => {}
             },
             DialogResult::Button(b) if b == "ok" => {
-                // A folder typed or selected is entered, not returned.
+                // A folder typed or selected is entered, not returned
+                // (Open Folder returns it).
                 if let Some(t) = f.target(d) {
-                    if t.is_dir() {
+                    if t.is_dir() && !f.folder {
                         f.go(t, d);
                         return false;
                     }
@@ -2260,6 +2279,16 @@ impl Workbench {
     fn finish_file_dialog(&mut self, overwrite_ok: bool) {
         let (Some(f), Some(d)) = (self.file_dlg.as_ref(), self.dialog.as_ref()) else { return };
         let Some(p) = f.target(d) else { return };
+        if f.folder {
+            self.dialog = None;
+            self.file_dlg = None;
+            if p.is_dir() {
+                self.open_folder(&p);
+            } else {
+                self.say(format!("{} isn't a folder", p.display()));
+            }
+            return;
+        }
         if !f.save {
             self.dialog = None;
             self.file_dlg = None;
@@ -4183,6 +4212,31 @@ mod tests {
         keys(&mut wb, &["End"]);
         run(&mut wb, json!({"cmd": "type", "text": "("}));
         assert!(wb.find.error.is_some());
+    }
+
+    #[test]
+    fn open_folder_switches_the_project_and_it_comes_back_next_time() {
+        let (dir, mut wb) = project("folder");
+        let other = dir.join("src");
+        let look = dir.join("look.json");
+        wb.set_look_path(look.clone());
+        wb.run_command("file.open_folder");
+        assert_eq!(wb.dialog.as_ref().map(|d| d.title.as_str()), Some("Open Folder"));
+        // Type the folder, Select: the Explorer shows it.
+        run(&mut wb, json!({"cmd": "type", "text": other.display().to_string()}));
+        keys(&mut wb, &["Enter"]);
+        assert!(wb.dialog.is_none());
+        assert_eq!(wb.shell.explorer.root, other);
+        // Saved off the UI thread; a new start without a folder reopens it.
+        wait_until(&mut wb, "look.json", |_| std::fs::read_to_string(&look).is_ok_and(|t| t.contains("\"project\"") && t.contains("/src\"")));
+        let mut wb2 = Workbench::new(&[]);
+        wb2.set_look_path(look.clone());
+        assert_eq!(wb2.shell.explorer.root, other);
+        // Started on a folder: that one wins.
+        let mut wb3 = Workbench::new(&[dir.clone()]);
+        wb3.set_look_path(look);
+        assert_eq!(wb3.shell.explorer.root, dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

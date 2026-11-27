@@ -40,10 +40,12 @@ pub(super) struct Shell {
     pub editor_tab_rects: Vec<(u32, Rect, Rect)>,
     /// The command palette / quick open, while it's up.
     pub palette: Option<Palette>,
+    /// The project came from the command line (else the last one returns).
+    pub explicit_project: bool,
 }
 
 impl Shell {
-    pub fn new(root: PathBuf) -> Shell {
+    pub fn new(root: PathBuf, explicit_project: bool) -> Shell {
         Shell {
             dock: Dock::default(),
             focus: Focus::Editors,
@@ -59,6 +61,7 @@ impl Shell {
             revealed: None,
             editor_tab_rects: Vec::new(),
             palette: None,
+            explicit_project,
         }
     }
 }
@@ -462,6 +465,19 @@ impl Workbench {
             w.ed.anchor = None;
         }
         self.shell.focus = Focus::Editors;
+    }
+
+    /// Make a folder the project: the Explorer shows it, the Search and
+    /// Source Control views work in it, and it's remembered.
+    pub(super) fn open_folder(&mut self, p: &Path) {
+        let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        self.shell.explorer.set_root(p.clone());
+        self.shell.revealed = None;
+        self.shell.scm = Scm::default();
+        self.shell.search = Search::default();
+        self.show_tab(Tab::Explorer);
+        self.say(format!("Opened folder {}", p.display()));
+        self.save_look();
     }
 
     /// Bring a docked window to the front (it gets the keys).

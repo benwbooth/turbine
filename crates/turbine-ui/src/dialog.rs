@@ -738,6 +738,23 @@ impl Dialog {
         }
     }
 
+    /// Change the label of a button, field, check box or drop-down.
+    pub fn set_caption(&mut self, id: &str, v: &str) {
+        for p in &mut self.controls {
+            match &mut p.control {
+                Control::Button { id: i, label, .. }
+                | Control::Input { id: i, label, .. }
+                | Control::Check { id: i, label, .. }
+                | Control::Combo { id: i, label, .. }
+                    if i == id =>
+                {
+                    *label = v.to_string()
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Change a label's text (one made with `.id()`).
     pub fn set_label(&mut self, id: &str, v: &str) {
         for p in &mut self.controls {
