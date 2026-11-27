@@ -59,6 +59,47 @@ impl Workbench {
         self.extras.back = back;
     }
 
+    /// A file clicked once in the Explorer: shown in the preview tab,
+    /// replacing the file there (unless that one was kept or changed).
+    pub(super) fn preview_file(&mut self, p: &Path) {
+        let want = Self::canon(p);
+        // (Open already: just to the front.)
+        if self.windows.iter().any(|w| w.dock.is_none() && w.ed.doc.path.as_ref().is_some_and(|q| Self::canon(q) == want)) {
+            self.goto_file(p, None, 0);
+            return;
+        }
+        if let Some(id) = self.shell.preview_tab {
+            if let Some(i) = self.windows.iter().position(|w| w.win.id == id && !w.ed.doc.dirty) {
+                self.windows.remove(i);
+                self.renumber();
+            }
+        }
+        let before: Vec<u32> = self.windows.iter().map(|w| w.win.id).collect();
+        self.goto_file(p, None, 0);
+        self.shell.preview_tab = self.windows.iter().map(|w| w.win.id).find(|id| !before.contains(id));
+        // (The Explorer keeps the keys, as in VS Code.)
+        self.shell.focus = shell::Focus::View(crate::dock::Tab::Explorer);
+    }
+
+    /// The preview tab becomes an ordinary one.
+    pub(super) fn keep_preview(&mut self) {
+        let front = self.windows.iter().rev().find(|w| w.dock.is_none()).map(|w| w.win.id);
+        if self.shell.preview_tab.is_some() && self.shell.preview_tab == front {
+            self.shell.preview_tab = None;
+        }
+    }
+
+    /// Each tick: a preview that's been edited is kept.
+    pub(super) fn preview_tab_tick(&mut self) {
+        if let Some(id) = self.shell.preview_tab {
+            match self.windows.iter().find(|w| w.win.id == id) {
+                Some(w) if w.ed.doc.dirty => self.shell.preview_tab = None,
+                None => self.shell.preview_tab = None,
+                _ => {}
+            }
+        }
+    }
+
     pub(super) fn extras_command(&mut self, cmd: &str) -> bool {
         match cmd {
             "file.recent" => {

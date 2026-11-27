@@ -55,6 +55,12 @@ pub(super) struct Shell {
     pub split_pending: Option<u32>,
     /// Long lines wrap (new editors too).
     pub word_wrap: bool,
+    /// The preview tab (VS Code's): a file clicked once in the Explorer
+    /// opens here and the next one replaces it, until it's kept (edited,
+    /// double-clicked, or its tab double-clicked).
+    pub preview_tab: Option<u32>,
+    /// The last click on an editor tab (a double click keeps a preview).
+    pub tab_click: Option<(u32, Instant)>,
     /// The cursor: "Block", "Underline" or "Bar", and whether it blinks.
     pub cursor_style: String,
     pub cursor_blink: bool,
@@ -100,6 +106,8 @@ impl Shell {
             split: None,
             split_pending: None,
             word_wrap: false,
+            preview_tab: None,
+            tab_click: None,
             cursor_style: "Block".into(),
             cursor_blink: true,
             mirrored: HashMap::new(),
@@ -1318,9 +1326,14 @@ impl Workbench {
                 if press {
                     let hit = self.shell.editor_tab_rects.iter().find(|(_, r, _)| r.contains(m.pos)).copied();
                     if let Some((id, _, x)) = hit {
+                        // (A second click on the preview tab keeps it.)
+                        let again = self.shell.tab_click.is_some_and(|(i, t)| i == id && t.elapsed() < Duration::from_millis(500));
+                        self.shell.tab_click = Some((id, Instant::now()));
                         self.activate_pane(id);
                         if x.contains(m.pos) {
                             self.run_command("window.close");
+                        } else if again {
+                            self.keep_preview();
                         }
                     }
                 }
@@ -1425,6 +1438,13 @@ impl Workbench {
             (Tab::Explorer, ListOut::Activated(i)) => {
                 if let Some(p) = self.shell.explorer.activate(i) {
                     self.goto_file(&p, None, 0);
+                    self.keep_preview();
+                }
+            }
+            // One click on a file: a look at it, in the preview tab.
+            (Tab::Explorer, ListOut::Selected(i)) if matches!(m.kind, MouseKind::Down(Button::Left)) => {
+                if let Some(p) = self.shell.explorer.file_at(i) {
+                    self.preview_file(&p);
                 }
             }
             (Tab::Extensions, ListOut::Selected(i) | ListOut::Activated(i)) => {
@@ -1491,6 +1511,8 @@ impl Workbench {
                 let Some(w) = self.windows.iter().find(|w| w.win.id == *id) else { continue };
                 let on = Some(*id) == front;
                 let stl = if on { s.tab_active } else { s.tab_inactive };
+                // (The preview tab in italics, as VS Code shows it.)
+                let stl = if self.shell.preview_tab == Some(*id) { Style { attrs: turbine_ui::theme::Attrs { italic: true, ..stl.attrs }, ..stl } } else { stl };
                 tc.print(r.x, r.y, &editor_tab_name(w, icons), stl);
                 tc.print(x.x, x.y, "×", stl);
                 if icons && on {

@@ -259,6 +259,11 @@ impl Explorer {
 
     /// Enter / double-click on row `i`: a folder opens or closes; a file is
     /// returned to be opened.
+    /// The file on a row (None for a folder).
+    pub fn file_at(&self, i: usize) -> Option<PathBuf> {
+        self.paths.get(i).filter(|(_, dir)| !dir).map(|(p, _)| p.clone())
+    }
+
     pub fn activate(&mut self, i: usize) -> Option<PathBuf> {
         let (p, dir) = self.paths.get(i)?.clone();
         if dir {

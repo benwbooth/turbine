@@ -927,7 +927,7 @@ impl Workbench {
         }
         let program = match lang.as_str() {
             "rust" => {
-                let name = std::fs::read_to_string(root.join("Cargo.toml"))
+                let name = std::fs::read_to_string(root.join("main.rs"))
                     .ok()
                     .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("name").map(|r| r.trim_start_matches([' ', '=']).trim().trim_matches('"').to_string())))
                     .unwrap_or_else(|| "main".into());
@@ -4151,6 +4151,7 @@ impl App for Workbench {
         self.build_tick();
         self.preview_tick(now);
         self.git_tick();
+        self.preview_tab_tick();
         self.update_debug();
         self.update_guides();
         self.update_ai(now);
@@ -5139,7 +5140,7 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../extensions/hello");
         let st = std::process::Command::new(env!("CARGO"))
             .args(["build", "--quiet", "--release", "--target", "wasm32-unknown-unknown", "--manifest-path"])
-            .arg(root.join("Cargo.toml"))
+            .arg(root.join("main.rs"))
             .status()
             .unwrap();
         assert!(st.success());
@@ -5745,6 +5746,50 @@ mod tests {
         keys(&mut wb, &["Enter"]);
         assert_eq!(wb.dialog.as_ref().unwrap().value("result").as_deref(), Some("42  0x2A  0b101010"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explorer_clicks_preview_files_like_vscode() {
+        let dir = std::env::temp_dir().join(format!("turbine-preview-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.md"), "# Notes\n").unwrap();
+        std::fs::write(dir.join("other.txt"), "other\n").unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut wb = Workbench::new(&[dir.clone()]);
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(120, 36));
+        let rows = |wb: &Workbench, name: &str| wb.shell.explorer.list.rows.iter().position(|r| r.text.ends_with(name)).unwrap();
+        wb.tick(Instant::now());
+        let click = |wb: &mut Workbench, i: usize| {
+            let a = wb.shell.explorer.list.area;
+            let y = a.y + (i - wb.shell.explorer.list.scroll) as i32;
+            let p = Point::new(a.x + 3, y);
+            wb.dispatch(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: p, mods: Mods::NONE }));
+            wb.dispatch(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: p, mods: Mods::NONE }));
+        };
+        wait_until(&mut wb, "files listed", |wb| wb.shell.explorer.list.rows.iter().any(|r| r.text.ends_with("notes.md")));
+        let i = rows(&wb, "notes.md");
+        click(&mut wb, i);
+        let pv = wb.shell.preview_tab.expect("a preview tab");
+        // (The untouched empty window gives way to it.)
+        let n0 = wb.windows.len() - 1;
+        // Another file replaces it.
+        let j = rows(&wb, "other.txt");
+        std::thread::sleep(Duration::from_millis(600));
+        click(&mut wb, j);
+        assert_eq!(wb.windows.len(), n0 + 1, "the preview was replaced");
+        assert!(wb.windows.iter().all(|w| w.win.id != pv));
+        assert!(wb.windows.iter().any(|w| w.ed.doc.path.as_ref().is_some_and(|p| p.ends_with("other.txt"))));
+        // Editing keeps it; the next click opens a new tab.
+        wb.goto_file(&dir.join("other.txt"), Some(0), 0);
+        run(&mut wb, json!({"cmd": "type", "text": "x"}));
+        wb.tick(Instant::now());
+        assert!(wb.shell.preview_tab.is_none());
+        std::thread::sleep(Duration::from_millis(600));
+        let i = rows(&wb, "notes.md");
+        click(&mut wb, i);
+        assert_eq!(wb.windows.len(), n0 + 2);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
