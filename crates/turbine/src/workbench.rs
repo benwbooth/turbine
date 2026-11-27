@@ -169,6 +169,8 @@ struct EdWin {
     /// Syntax: the language, what it was detected for, the version sent.
     lang: Option<String>,
     lang_for: Option<Option<PathBuf>>,
+    /// A language chosen by hand (Change Language Mode): it wins.
+    lang_fixed: Option<String>,
     hl_sent: Option<u64>,
     /// Language server: which one, the version it has, dirty last tick.
     lsp_key: Option<LspKey>,
@@ -336,6 +338,7 @@ fn menus() -> Vec<Menu> {
                 it("~P~arameter Hints", "Ctrl+Shift+Space", "lsp.signature"),
                 it("~Q~uick Fix...", "Ctrl+.", "edit.quick_fix"),
                 it("Re~n~ame Symbol...", "Shift+F2", "edit.rename"),
+                it("Change ~L~anguage Mode...", "", "edit.language"),
                 it("~I~nstall Language Server...", "", "lsp.install"),
             ],
         ),
@@ -787,7 +790,7 @@ impl Workbench {
         self.next_id += 1;
         let mut ed = EditorView::new(doc);
         ed.line_numbers = self.shell.line_numbers.unwrap_or(self.theme.style.line_numbers);
-        let mut ew = EdWin { win, ed, vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: None, mirror: None };
+        let mut ew = EdWin { win, ed, vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, lang_fixed: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: None, mirror: None };
         if self.keymap == Keymap::Vim {
             ew.vim = Some(vim::attach(&mut ew.ed));
         }
@@ -828,6 +831,7 @@ impl Workbench {
             term_text: String::new(),
             lang: None,
             lang_for: Some(None),
+            lang_fixed: None,
             hl_sent: None,
             lsp_key: None,
             lsp_sent: None,
@@ -1070,6 +1074,7 @@ impl Workbench {
                     term_text: String::new(),
                     lang: Some("markdown".into()),
                     lang_for: Some(None),
+                    lang_fixed: None,
                     hl_sent: None,
                     lsp_key: None,
                     lsp_sent: None,
@@ -1211,6 +1216,7 @@ impl Workbench {
                     term_text: String::new(),
                     lang: Some("markdown".into()),
                     lang_for: Some(None),
+                    lang_fixed: None,
                     hl_sent: None,
                     lsp_key: None,
                     lsp_sent: None,
@@ -1972,7 +1978,14 @@ impl Workbench {
             let fixed = matches!(w.special, Some("help" | "chat"));
             let stale = !fixed && (w.lang_for.as_ref() != Some(&path) || (path.is_none() && w.hl_sent != Some(w.ed.doc.version)));
             if stale {
-                let lang = turbine_syntax::detect(path.as_deref(), &w.ed.doc.line(0));
+                // (Untitled: a guess from what's typed, as Tessera's input does.)
+                let lang = turbine_syntax::detect(path.as_deref(), &w.ed.doc.line(0)).or_else(|| {
+                    path.is_none().then(|| {
+                        let end = w.ed.doc.rope.len_chars().min(4096);
+                        turbine_syntax::guess(&w.ed.doc.rope.slice(..end).to_string()).map(str::to_string)
+                    })?
+                });
+                let lang = w.lang_fixed.clone().or(lang);
                 if lang != w.lang {
                     w.ed.line_comment = lang.as_deref().and_then(turbine_syntax::line_comment).map(str::to_string);
                     w.ed.colon_indents = matches!(lang.as_deref(), Some("python" | "yaml" | "nim" | "tessh"));
@@ -2027,7 +2040,7 @@ impl Workbench {
         if let Some(e) = view.error() {
             self.say(format!("Terminal: {e}"));
         }
-        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: Some(Side::Bottom), mirror: None });
+        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new(), lang: None, lang_for: None, lang_fixed: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: Some(Side::Bottom), mirror: None });
         self.renumber();
     }
 
@@ -2188,6 +2201,22 @@ impl Workbench {
                 self.say(if self.tab_complete { "AI tab completion on" } else { "AI tab completion off" });
             }
             "help.contents" => self.show_help("Turbine", MANUAL),
+            "edit.language" => {
+                let mut names: Vec<String> = turbine_syntax::BUILTIN.iter().map(|b| b.0.to_string()).collect();
+                for n in turbine_syntax::grammars::known() {
+                    if !names.contains(&n) {
+                        names.push(n);
+                    }
+                }
+                names.sort();
+                names.insert(0, "Detect it".into());
+                let cur = self.windows.last().and_then(|w| w.lang.clone()).unwrap_or_default();
+                let sel = names.iter().position(|n| *n == cur).unwrap_or(0);
+                let d = Dialog::new("language", "Change Language Mode")
+                    .body(ui::list("lang", names, sel).activates().lines(16).chars(32))
+                    .buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
+                self.dialog = Some(d);
+            }
             "file.reopen_encoding" | "file.save_encoding" => {
                 let save = cmd == "file.save_encoding";
                 let Some(w) = self.windows.iter().rev().find(|w| w.term.is_none() && w.special.is_none()) else { return };
@@ -2819,6 +2848,14 @@ impl Workbench {
                     Ok(()) => format!("Reopened as {name}"),
                     Err(e) => format!("Can't reopen: {e}"),
                 });
+            }
+            return;
+        }
+        if kind == "language" {
+            let pick = d.value("lang").unwrap_or_default();
+            if let Some(w) = self.windows.iter_mut().rev().find(|w| w.term.is_none() && w.special.is_none()) {
+                w.lang_fixed = (pick != "Detect it").then_some(pick);
+                w.lang_for = None;
             }
             return;
         }
@@ -5402,6 +5439,34 @@ mod tests {
         wb.finish_dialog(d, Some("hex".into()));
         assert!(wb.windows.last().unwrap().ed.doc.line(0).starts_with("00000000  00 01 02 03"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn untitled_text_guesses_its_language() {
+        let mut wb = bench();
+        run(&mut wb, json!({"cmd": "type", "text": "def f(x):\n    return x\nimport os\n"}));
+        wait_until(&mut wb, "python", |wb| wb.windows.last().unwrap().lang.as_deref() == Some("python"));
+        // Chosen by hand, it stays.
+        wb.run_command("edit.language");
+        let mut d = wb.dialog.take().unwrap();
+        let items = match d.controls.iter().find_map(|c| match &c.control {
+            turbine_ui::dialog::Control::List { items, .. } => Some(items.clone()),
+            _ => None,
+        }) {
+            Some(v) => v,
+            None => panic!(),
+        };
+        let i = items.iter().position(|t| t == "tessh").unwrap();
+        for p in &mut d.controls {
+            if let turbine_ui::dialog::Control::List { selected, .. } = &mut p.control {
+                *selected = i;
+            }
+        }
+        wb.finish_dialog(d, Some("ok".into()));
+        wait_until(&mut wb, "tessh", |wb| wb.windows.last().unwrap().lang.as_deref() == Some("tessh"));
+        run(&mut wb, json!({"cmd": "type", "text": "print(1)\n"}));
+        wb.tick(Instant::now());
+        assert_eq!(wb.windows.last().unwrap().lang.as_deref(), Some("tessh"));
     }
 
     #[test]

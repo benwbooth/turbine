@@ -772,6 +772,7 @@ impl Workbench {
                     term_text: String::new(),
                     lang,
                     lang_for: None,
+                    lang_fixed: None,
                     hl_sent: None,
                     lsp_key: None,
                     lsp_sent: None,

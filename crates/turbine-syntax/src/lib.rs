@@ -279,6 +279,68 @@ pub fn detect(path: Option<&Path>, first_line: &str) -> Option<String> {
     None
 }
 
+/// What an untitled text is written in, when it says so clearly (a
+/// shebang, JSON, a doctype, or lines with unmistakable marks): Tessera's
+/// input's guess, a few more languages added.
+pub fn guess(text: &str) -> Option<&'static str> {
+    let t = text.trim_start_matches('\u{feff}').trim_start();
+    if let Some(l) = t.lines().next().filter(|l| l.starts_with("#!")) {
+        return detect(None, l).and_then(|l| BUILTIN.iter().map(|b| b.0).chain(["fish", "nu", "perl", "php", "powershell", "r", "julia", "elixir", "erlang", "haskell", "awk", "make"]).find(|b| *b == l));
+    }
+    if (t.starts_with('{') || t.starts_with('[')) && serde_json::from_str::<serde_json::Value>(t.trim()).is_ok() {
+        return Some("json");
+    }
+    let low = t.get(..t.len().min(64)).unwrap_or("").to_ascii_lowercase();
+    if low.starts_with("<!doctype html") || low.starts_with("<html") {
+        return Some("html");
+    }
+    if low.starts_with("<?xml") {
+        return Some("xml");
+    }
+    let lines: Vec<&str> = t.lines().filter(|l| !l.trim().is_empty()).take(200).collect();
+    if lines.len() < 2 {
+        let l = t.trim();
+        for (marks, lang) in [
+            (&["print(", "import ", "from ", "def ", "lambda "][..], "python"),
+            (&["console.log(", "const ", "function "][..], "javascript"),
+            (&["println!(", "let mut ", "fn main", "use std::"][..], "rust"),
+            (&["fmt.Print", "package main"][..], "go"),
+            (&["System.out.print", "public class "][..], "java"),
+            (&["printf(\""][..], "c"),
+            (&["std::cout", "#include", "using namespace std", "auto main("][..], "cpp"),
+            (&["SELECT ", "select ", "CREATE TABLE ", "INSERT INTO "][..], "sql"),
+        ] {
+            if marks.iter().any(|m| l.starts_with(m)) {
+                return Some(lang);
+            }
+        }
+        return None;
+    }
+    let has = |pats: &[&str]| lines.iter().filter(|l| pats.iter().any(|p| l.trim_start().starts_with(p))).count();
+    let score = [
+        ("python", has(&["def ", "import ", "from ", "class ", "elif ", "print(", "if __name__"]) * 2 + lines.iter().filter(|l| l.trim_end().ends_with(':')).count()),
+        ("rust", has(&["fn ", "let mut ", "use ", "impl ", "pub fn ", "struct ", "#[derive", "mod ", "pub struct "]) * 2),
+        ("go", has(&["func ", "package ", "import (", "type "]) * 2 + lines.iter().filter(|l| l.contains(" := ")).count()),
+        ("javascript", has(&["const ", "function ", "console.log", "export ", "import {", "let "]) * 2 + lines.iter().filter(|l| l.contains("=> ")).count()),
+        ("typescript", has(&["interface ", "type ", "export interface ", "export type "]) * 2 + lines.iter().filter(|l| l.contains(": string") || l.contains(": number")).count() * 2),
+        ("sql", lines.iter().filter(|l| { let u = l.trim_start().to_uppercase(); ["SELECT ", "INSERT ", "UPDATE ", "DELETE ", "CREATE ", "FROM ", "WHERE ", "JOIN ", "ALTER "].iter().any(|k| u.starts_with(k)) }).count() * 2),
+        ("c", has(&["#include <stdio", "#include <stdlib", "int main", "printf(", "#define ", "typedef "]) * 2),
+        ("cpp", has(&["#include <iostream", "#include <vector", "std::", "namespace ", "template<", "template <", "class "]) * 2),
+        ("java", has(&["public class ", "import java.", "public static void", "private ", "package "]) * 2),
+        ("html", has(&["<!doctype", "<html", "<div", "<p>", "<body", "<head"]) * 2),
+        ("css", lines.iter().filter(|l| { let x = l.trim(); x.ends_with('{') && !x.contains('(') || (x.contains(": ") && x.ends_with(';') && !x.contains('(')) }).count()),
+        ("markdown", has(&["# ", "## ", "### ", "- [ ] ", "```"]) * 2 + lines.iter().filter(|l| l.trim_start().starts_with("* ") || l.contains("](")).count()),
+        ("bash", has(&["echo ", "if [", "fi", "then", "done", "export ", "for ", "while "]) + lines.iter().filter(|l| l.contains("$(") || l.contains("${")).count()),
+        ("yaml", lines.iter().filter(|l| { let x = l.trim_start(); (x.starts_with("- ") || x.contains(": ")) && !x.contains('=') && !x.contains('|') && !x.ends_with(';') && !x.ends_with('{') }).count()),
+        ("toml", lines.iter().filter(|l| { let x = l.trim(); (x.starts_with('[') && x.ends_with(']')) || x.contains(" = \"") }).count()),
+        ("lua", has(&["local ", "function ", "end", "require("]) + lines.iter().filter(|l| l.contains(" then")).count()),
+        ("ruby", has(&["def ", "end", "require '", "puts ", "class "]) + has(&["end"])),
+    ];
+    let best = score.iter().max_by_key(|(_, s)| *s).unwrap();
+    // Clear marks on at least half the lines.
+    if best.1 >= 3 && best.1 * 2 >= lines.len() { Some(best.0) } else { None }
+}
+
 struct Lang {
     language: Language,
     query: Query,
@@ -802,6 +864,19 @@ impl Highlighter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn guesses_untitled_text() {
+        use super::guess;
+        assert_eq!(guess("#!/usr/bin/env python3\nx = 1\n"), Some("python"));
+        assert_eq!(guess("{\"a\": [1, 2]}"), Some("json"));
+        assert_eq!(guess("def f(x):\n    return x\n\nimport os\n"), Some("python"));
+        assert_eq!(guess("fn main() {\n    let mut x = 1;\n}\nuse std::fmt;\n"), Some("rust"));
+        assert_eq!(guess("SELECT a\nFROM t\nWHERE b = 1\n"), Some("sql"));
+        assert_eq!(guess("# Title\n\nSome text with a [link](x).\n## More\n"), Some("markdown"));
+        assert_eq!(guess("hello there\nhow are you\n"), None);
+        assert_eq!(guess("#!/usr/bin/env tessh\nls\n"), Some("tessh"));
+    }
+
     #[test]
     fn tessh_highlights_folds_outline() {
         let src = "# tools\ndef greet name\n    print \"hi $name\"\n    if name\n        echo yes\n\nclass Box\n    def size self\n        return 1\nls -la | grep x\n";
