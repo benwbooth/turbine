@@ -869,10 +869,20 @@ pub fn symbols(lang: &str, text: &str, deadline: Duration) -> Option<Vec<Symbol>
         let node = cursor.node();
         let mut is_sym = false;
         if let Some(kind) = symbol_kind(node.kind()) {
+            // (C's and C++'s names are in the declarator, followed down
+            // through pointers and parameter lists to the name itself; the
+            // `type` field there is the return type. Rust's impl blocks go by
+            // their type.)
+            let declared = node.child_by_field_name("declarator").map(|mut d| {
+                while let Some(inner) = d.child_by_field_name("declarator") {
+                    d = inner;
+                }
+                d
+            });
             let name = node
                 .child_by_field_name("name")
+                .or(declared)
                 .or_else(|| node.child_by_field_name("type"))
-                .or_else(|| node.child_by_field_name("declarator").map(|d| d.child_by_field_name("declarator").unwrap_or(d)))
                 .and_then(|n| n.utf8_text(bytes).ok())
                 .map(|s| s.lines().next().unwrap_or("").trim().to_string())
                 .or_else(|| {
@@ -1018,6 +1028,18 @@ mod tests {
         assert_eq!(guess("# Title\n\nSome text with a [link](x).\n## More\n"), Some("markdown"));
         assert_eq!(guess("hello there\nhow are you\n"), None);
         assert_eq!(guess("#!/usr/bin/env tessh\nls\n"), Some("tessh"));
+    }
+
+    #[test]
+    fn c_functions_go_by_their_names() {
+        let src = "static const char *name_of(int x) { return 0; }\nbool ready(void) { return 1; }\nstruct point { int x; };\n";
+        let syms = super::symbols("c", src, std::time::Duration::from_secs(1)).unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"name_of") && names.contains(&"ready") && names.contains(&"point"), "{names:?}");
+        assert!(!names.contains(&"bool") && !names.contains(&"char"), "{names:?}");
+        // (Rust's impl blocks still go by their type.)
+        let r = super::symbols("rust", "struct S;\nimpl S { fn f() {} }\n", std::time::Duration::from_secs(1)).unwrap();
+        assert!(r.iter().any(|s| s.name == "S" && s.kind == "impl"), "{r:?}");
     }
 
     #[test]
