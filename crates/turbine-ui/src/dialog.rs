@@ -285,7 +285,19 @@ impl Dialog {
         let s = &theme.scheme;
         let r = self.rect;
         c.fill(r, " ", s.dialog);
-        draw_frame(c, r, theme.style.active_frame, s.dialog_frame);
+        draw_frame(c, r, theme.style.dialog_frame, s.dialog_frame);
+        // (QBasic: a line across the box above the buttons.)
+        if theme.style.dialog_rule {
+            if let Some(by) = self.controls.iter().filter(|p| matches!(p.control, Control::Button { .. })).map(|p| p.rect.y).max() {
+                let y = r.y + 1 + by - 1;
+                if y > r.y + 1 && !self.controls.iter().any(|p| !matches!(p.control, Control::Button { .. }) && p.rect.y + p.rect.h > by - 1 && p.rect.y <= by - 1) {
+                    let fc = theme.style.dialog_frame;
+                    c.print(r.x, y, if fc.v == "║" { "╟" } else { "├" }, s.dialog_frame);
+                    c.hline(r.x + 1, y, r.w - 2, "─", s.dialog_frame);
+                    c.print(r.right() - 1, y, if fc.v == "║" { "╢" } else { "┤" }, s.dialog_frame);
+                }
+            }
+        }
         draw_title(c, r, &self.title, s.dialog_frame);
         if theme.style.shadows {
             c.shadow(r, s.shadow);
@@ -316,7 +328,15 @@ impl Dialog {
                     let (l, rr) = if *default && l.trim().is_empty() { ("◄ ", " ►") } else { (l, rr) };
                     let text = format!("{l}{label}{rr}");
                     let w = str_width(&text.replace('~', "")) as i32;
-                    c.print_hot(cr.x, cr.y, &text, st, s.button_hotkey);
+                    if theme.style.dos_status {
+                        // QBasic: "< OK >", the focused button's brackets bright.
+                        let br = if focused { s.button_focused } else { s.button };
+                        let x = c.print(cr.x, cr.y, l, br);
+                        let x = c.print_hot(x, cr.y, label, s.button, s.button_hotkey);
+                        c.print(x, cr.y, rr, br);
+                    } else {
+                        c.print_hot(cr.x, cr.y, &text, st, s.button_hotkey);
+                    }
                     if theme.style.shadows && theme.style.button.0.trim().is_empty() {
                         c.print(cr.x + w, cr.y, "▄", s.dialog.fg(crate::theme::vga::BLACK));
                         c.hline(cr.x + 1, cr.y + 1, w, "▀", s.dialog.fg(crate::theme::vga::BLACK));

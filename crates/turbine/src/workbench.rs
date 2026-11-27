@@ -221,6 +221,8 @@ pub struct Workbench {
     pending_task: Option<String>,
     /// The automation socket, told to programs in terminals (TURBINE_SOCKET).
     socket_path: Option<PathBuf>,
+    /// Where the chosen colours and style are kept.
+    look_path: Option<PathBuf>,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -495,6 +497,7 @@ impl Workbench {
             agent: None,
             pending_task: None,
             socket_path: None,
+            look_path: None,
         };
         for f in files {
             wb.open_path(f);
@@ -539,6 +542,55 @@ impl Workbench {
     /// The active window's title (for a desktop window's title).
     pub fn title(&self) -> String {
         self.windows.last().map(|w| w.win.title.clone()).unwrap_or_default()
+    }
+
+    /// A control style, and the rest of its look when it has one (QBasic:
+    /// its colours, no line numbers, editors filling the screen).
+    pub fn apply_style(&mut self, style: ControlStyle) {
+        if let Some(name) = style.scheme {
+            if let Some(sc) = Scheme::all().into_iter().find(|s| s.name == name) {
+                self.theme.scheme = sc;
+            }
+        }
+        let numbers = style.line_numbers;
+        let full = style.dos_status;
+        self.theme.style = style;
+        let desk = self.desktop();
+        for w in &mut self.windows {
+            if w.special.is_none() && w.term.is_none() {
+                w.ed.line_numbers = numbers;
+            }
+            // QBasic's editors fill the screen (Window > Tile still splits them).
+            if full && w.special.is_none() && !w.win.zoomed {
+                w.win.toggle_zoom(desk);
+            }
+        }
+        self.sync_menu_checks();
+    }
+
+    /// Where the chosen look is kept (set by the front end; tests keep none).
+    pub fn set_look_path(&mut self, p: PathBuf) {
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                if let Some(st) = v["style"].as_str().and_then(|n| ControlStyle::all().into_iter().find(|s| s.name == n)) {
+                    self.apply_style(st);
+                }
+                if let Some(sc) = v["scheme"].as_str().and_then(|n| Scheme::all().into_iter().find(|s| s.name == n)) {
+                    self.theme.scheme = sc;
+                }
+            }
+        }
+        self.look_path = Some(p);
+    }
+
+    fn save_look(&self) {
+        if let Some(p) = &self.look_path {
+            let v = json!({"style": self.theme.style.name, "scheme": self.theme.scheme.name});
+            if let Some(d) = p.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = std::fs::write(p, serde_json::to_string_pretty(&v).unwrap_or_default());
+        }
     }
 
     /// An agent (or a question for it) is still at work.
@@ -591,7 +643,9 @@ impl Workbench {
             win.zoomed = false;
         }
         self.next_id += 1;
-        let mut ew = EdWin { win, ed: EditorView::new(doc), vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None };
+        let mut ed = EditorView::new(doc);
+        ed.line_numbers = self.theme.style.line_numbers;
+        let mut ew = EdWin { win, ed, vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None };
         if self.keymap == Keymap::Vim {
             ew.vim = Some(vim::attach(&mut ew.ed));
         }
@@ -2204,6 +2258,7 @@ impl Workbench {
                 if let Some(i) = d.selected_index("scheme") {
                     if let Some(s) = Scheme::all().into_iter().nth(i) {
                         self.theme.scheme = s;
+                        self.save_look();
                     }
                 }
             }
@@ -2225,7 +2280,8 @@ impl Workbench {
             "style" => {
                 if let Some(i) = d.selected_index("style") {
                     if let Some(s) = ControlStyle::all().into_iter().nth(i) {
-                        self.theme.style = s;
+                        self.apply_style(s);
+                        self.save_look();
                     }
                 }
             }
@@ -3293,6 +3349,11 @@ impl App for Workbench {
         }
         surf.cursor = None;
         let theme = self.theme.clone();
+        // (The style decides how the bar and status line are laid out.)
+        self.menubar.help_right = theme.style.help_right;
+        self.menubar.hotkeys_when_active = theme.style.hotkeys_when_active;
+        self.menubar.hide_system = theme.style.hide_system_menu;
+        self.status.dos = theme.style.dos_status;
         let screen = self.screen();
         let desk = self.desktop();
         let mut c = surf.canvas();
@@ -3336,6 +3397,10 @@ impl App for Workbench {
                     .as_deref()
                     .map(|l| turbine_syntax::BUILTIN.iter().find(|(n, _)| *n == l).map(|(_, label)| label.to_string()).unwrap_or_else(|| l.to_string()))
                     .unwrap_or_else(|| "Text".into());
+                // QBasic/Edit: just the position, as 00001:001.
+                if self.theme.style.dos_status {
+                    return format!("{:05}:{:03}", l + 1, col + 1);
+                }
                 format!(
                     "{lang}  {}:{}  {} {}  {}",
                     l + 1,
@@ -3931,6 +3996,28 @@ mod tests {
         let tool_msg = reqs[1]["messages"].as_array().unwrap().iter().find(|m| m["role"] == "tool").unwrap().clone();
         assert!(tool_msg["content"].as_str().unwrap().contains("said no"), "{tool_msg}");
         assert!(!wb.windows.last().unwrap().term_text.contains("nope\nnope"), "nothing ran");
+    }
+
+    #[test]
+    fn qbasic_style_looks_like_qbasic() {
+        let mut wb = bench();
+        wb.dispatch(Event::Resize(80, 25));
+        run(&mut wb, json!({"cmd": "menu", "path": "Options/Control Style..."}));
+        run(&mut wb, json!({"cmd": "click", "target": "listitem:QBasic / MS-DOS Edit"}));
+        run(&mut wb, json!({"cmd": "click", "target": "button:OK"}));
+        assert_eq!(wb.theme.scheme.name, "QBasic");
+        let mut surf = Surface::new(80, 25);
+        wb.render(&mut surf);
+        let text = surf.to_text();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].trim_end().ends_with("Help"), "Help at the right: {:?}", lines[0]);
+        assert!(lines[1].starts_with("┌") && lines[1].contains(" UNTITLED ") && lines[1].contains("┤↑├"), "{:?}", lines[1]);
+        assert!(lines[2].starts_with("│") && !lines[2].contains(" 1 "), "no line numbers: {:?}", lines[2]);
+        assert!(lines[24].contains("<F1=Help>") && lines[24].contains("│ 00001:001"), "{:?}", lines[24]);
+        assert!(text.contains('↓') && text.contains('→'), "arrow scroll bars");
+        // The title is in reverse video (blue on grey).
+        let x = lines[1].find(" UNTITLED ").map(|b| lines[1][..b].chars().count()).unwrap() as i32 + 1;
+        assert_eq!(surf.get(x, 1).unwrap().style.bg, turbine_ui::theme::vga::LIGHT_GRAY);
     }
 
     #[test]

@@ -23,7 +23,12 @@ pub fn draw_frame(c: &mut Canvas, r: Rect, fc: FrameChars, style: Style) {
 /// icon on the left and the window number and zoom icon on the right; a
 /// long one loses its start ("…ocument.rs").
 pub fn draw_title(c: &mut Canvas, r: Rect, title: &str, style: Style) {
-    let (left, right) = (r.x + 6, r.right() - 10);
+    draw_title_in(c, r, title, style, 10);
+}
+
+/// The same, leaving `right_room` cells free at the right (zoom box, number).
+pub fn draw_title_in(c: &mut Canvas, r: Rect, title: &str, style: Style, right_room: i32) {
+    let (left, right) = (r.x + 6, r.right() - right_room);
     let room = right - left;
     if room <= 3 {
         return;
@@ -41,28 +46,31 @@ pub fn draw_title(c: &mut Canvas, r: Rect, title: &str, style: Style) {
     c.print(x, r.y, &text, style);
 }
 
-/// Vertical scroll bar: ↑ track ■ ↓.
-pub fn draw_vscroll(c: &mut Canvas, x: i32, y: i32, h: i32, pos: usize, total: usize, style: Style) {
+/// The default scroll bar characters: up, down, left, right, track, thumb.
+pub const SCROLL: [&str; 6] = ["▲", "▼", "◄", "►", "▒", "■"];
+
+/// Vertical scroll bar: ↑ track ■ ↓ (characters from the control style).
+pub fn draw_vscroll(c: &mut Canvas, x: i32, y: i32, h: i32, pos: usize, total: usize, style: Style, ch: [&str; 6]) {
     if h < 3 {
         return;
     }
-    c.print(x, y, "▲", style);
-    c.print(x, y + h - 1, "▼", style);
-    c.vline(x, y + 1, h - 2, "▒", style);
+    c.print(x, y, ch[0], style);
+    c.print(x, y + h - 1, ch[1], style);
+    c.vline(x, y + 1, h - 2, ch[4], style);
     let track = (h - 3).max(0) as usize;
     let thumb = if total <= 1 { 0 } else { pos.min(total - 1) * track / (total - 1) };
-    c.print(x, y + 1 + thumb as i32, "■", style);
+    c.print(x, y + 1 + thumb as i32, ch[5], style);
 }
 
-/// Horizontal scroll bar: ◄ track ■ ►.
-pub fn draw_hscroll(c: &mut Canvas, x: i32, y: i32, w: i32, pos: usize, total: usize, style: Style) {
+/// Horizontal scroll bar: ← track ■ →.
+pub fn draw_hscroll(c: &mut Canvas, x: i32, y: i32, w: i32, pos: usize, total: usize, style: Style, ch: [&str; 6]) {
     if w < 3 {
         return;
     }
-    c.print(x, y, "◄", style);
-    c.print(x + w - 1, y, "►", style);
-    c.hline(x + 1, y, w - 2, "▒", style);
+    c.print(x, y, ch[2], style);
+    c.print(x + w - 1, y, ch[3], style);
+    c.hline(x + 1, y, w - 2, ch[4], style);
     let track = (w - 3).max(0) as usize;
     let thumb = if total <= 1 { 0 } else { pos.min(total - 1) * track / (total - 1) };
-    c.print(x + 1 + thumb as i32, y, "■", style);
+    c.print(x + 1 + thumb as i32, y, ch[5], style);
 }

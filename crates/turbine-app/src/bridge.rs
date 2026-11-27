@@ -109,6 +109,9 @@ pub fn init(files: &[PathBuf]) {
         wb.set_socket_path(p.clone());
     }
     wb.start_ai();
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))) {
+        wb.set_look_path(dir.join("turbine/look.json"));
+    }
     STATE.with(|s| {
         *s.borrow_mut() = Some(State { wb, surf: Surface::new(80, 25), shown: None, dirty: true, socket });
     });

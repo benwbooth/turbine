@@ -603,9 +603,10 @@ impl EditorView {
 
     pub fn draw_scrollbars(&self, c: &mut Canvas, frame: Rect, theme: &Theme) {
         let (line, col) = self.cursor_line_col();
-        draw_vscroll(c, frame.right() - 1, frame.y + 1, frame.h - 2, line, self.doc.len_lines(), theme.scheme.scrollbar);
+        let ch = theme.style.scroll;
+        draw_vscroll(c, frame.right() - 1, frame.y + 1, frame.h - 2, line, self.doc.len_lines(), theme.scheme.scrollbar, ch);
         let longest = 256.max(col + 1);
-        draw_hscroll(c, frame.x + 2, frame.bottom() - 1, frame.w - 4, self.scroll_x, longest, theme.scheme.scrollbar);
+        draw_hscroll(c, frame.x + 2, frame.bottom() - 1, frame.w - 4, self.scroll_x, longest, theme.scheme.scrollbar, ch);
     }
 }
 

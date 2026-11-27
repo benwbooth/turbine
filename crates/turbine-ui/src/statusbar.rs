@@ -25,6 +25,8 @@ pub struct StatusBar {
     pub info: String,
     /// When set, replaces the key hints (messages, agent activity).
     pub message: Option<String>,
+    /// QBasic/Edit form: hints as `<F1=Help>`, the info after a `│`.
+    pub dos: bool,
 }
 
 impl StatusBar {
@@ -33,9 +35,9 @@ impl StatusBar {
         self.items
             .iter()
             .map(|it| {
-                let w = str_width(&it.key) as i32 + 1 + str_width(&it.label) as i32;
+                let w = str_width(&it.key) as i32 + 1 + str_width(&it.label) as i32 + if self.dos { 2 } else { 0 };
                 let r = Rect::new(x, y, w, 1);
-                x += w + 2;
+                x += w + if self.dos { 1 } else { 2 };
                 r
             })
             .collect()
@@ -51,7 +53,7 @@ impl StatusBar {
     pub fn draw(&self, c: &mut Canvas, theme: &Theme, r: Rect) {
         let s = &theme.scheme;
         c.fill(r, " ", s.status);
-        let w = str_width(&self.info) as i32;
+        let w = str_width(&self.info) as i32 + if self.dos { 2 } else { 0 };
         let left = Rect::new(r.x, r.y, (r.w - w - 2).max(0), 1);
         let mut lc = c.sub(left);
         if let Some(m) = &self.message {
@@ -61,12 +63,23 @@ impl StatusBar {
                 if ir.right() > left.right() {
                     break;
                 }
-                let x = lc.print(ir.x, ir.y, &it.key, s.status_key);
-                lc.print(x + 1, ir.y, &it.label, s.status);
+                if self.dos {
+                    lc.print(ir.x, ir.y, &format!("<{}={}>", it.key, it.label), s.status);
+                } else {
+                    let x = lc.print(ir.x, ir.y, &it.key, s.status_key);
+                    lc.print(x + 1, ir.y, &it.label, s.status);
+                }
             }
         }
         if w > 0 {
-            c.print(r.right() - w - 1, r.y, &self.info, s.status);
+            if self.dos {
+                // "│ 00001:001", the bar black as in QBasic.
+                let x = r.right() - w - 1;
+                c.print(x, r.y, "│", s.status.fg(crate::theme::vga::BLACK));
+                c.print(x + 2, r.y, &self.info, s.status);
+            } else {
+                c.print(r.right() - w - 1, r.y, &self.info, s.status);
+            }
         }
     }
 }

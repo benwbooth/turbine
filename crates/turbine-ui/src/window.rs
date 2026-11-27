@@ -1,6 +1,6 @@
 //! Movable, resizable, zoomable windows.
 
-use crate::frame::{draw_frame, draw_title};
+use crate::frame::{draw_frame, draw_title_in};
 use crate::geom::{Point, Rect};
 use crate::surface::Canvas;
 use crate::theme::Theme;
@@ -176,15 +176,31 @@ impl Window {
         let st = &theme.style;
         let (fc, style) = if active { (st.active_frame, s.frame_active) } else { (st.inactive_frame, s.frame) };
         draw_frame(c, self.rect, fc, style);
-        draw_title(c, self.rect, &self.title, style);
-        if active {
-            if !st.close_icon.is_empty() {
+        // (QBasic: the title in reverse video, on every window.)
+        let title_style = if st.title_reverse { s.frame_icons } else { style };
+        // (QBasic shows the file's name, not its path.)
+        let title = if st.title_reverse { self.title.rsplit(['/', '\\']).next().unwrap_or(&self.title) } else { &self.title };
+        draw_title_in(c, self.rect, title, title_style, if st.window_numbers { 10 } else { 6 });
+        if active || st.title_reverse {
+            if !st.close_icon.is_empty() && active {
                 c.print(self.rect.x + 2, self.rect.y, st.close_icon, s.frame_icons);
             }
-            c.print(self.zoom_rect().x, self.rect.y, if self.zoomed { "[↕]" } else { st.zoom_icon }, s.frame_icons);
-            c.print(self.rect.right() - 1, self.rect.bottom() - 1, st.resize_grip, s.frame_icons);
+            let x = self.zoom_rect().x;
+            if st.zoom_icon.starts_with('┤') {
+                // QBasic's box: ┤↑├ with the arrow in reverse video.
+                // (QBasic's box shows ↑ whether or not the window fills the screen.)
+                let arrow = "↑";
+                c.print(x, self.rect.y, "┤", style);
+                c.print(x + 1, self.rect.y, arrow, s.frame_icons);
+                c.print(x + 2, self.rect.y, "├", style);
+            } else if active {
+                c.print(x, self.rect.y, if self.zoomed { "[↕]" } else { st.zoom_icon }, s.frame_icons);
+            }
+            if !st.resize_grip.is_empty() && active {
+                c.print(self.rect.right() - 1, self.rect.bottom() - 1, st.resize_grip, s.frame_icons);
+            }
         }
-        if let Some(n) = self.number {
+        if let (Some(n), true) = (self.number, st.window_numbers) {
             let t = n.to_string();
             c.print(self.rect.right() - 7 - t.len() as i32, self.rect.y, &t, style);
         }

@@ -202,7 +202,8 @@ impl Scheme {
             menu_selected_hotkey: s!(WHITE on BLACK),
             menu_disabled: s!(DARK_GRAY on LIGHT_GRAY),
             frame: s!(LIGHT_GRAY on BLUE),
-            frame_active: s!(WHITE on BLUE),
+            frame_active: s!(LIGHT_GRAY on BLUE),
+            // The title and the ↑ box: reverse video.
             frame_icons: s!(BLUE on LIGHT_GRAY),
             editor: s!(LIGHT_GRAY on BLUE),
             editor_selection: s!(BLUE on LIGHT_GRAY),
@@ -212,26 +213,17 @@ impl Scheme {
             dialog: s!(BLACK on LIGHT_GRAY),
             dialog_frame: s!(BLACK on LIGHT_GRAY),
             button: s!(BLACK on LIGHT_GRAY),
+            // The focused button's < > brackets are bright.
             button_focused: s!(WHITE on LIGHT_GRAY),
             button_hotkey: s!(WHITE on LIGHT_GRAY),
             input: s!(BLACK on LIGHT_GRAY),
             status: s!(WHITE on CYAN),
-            status_key: s!(BLACK on CYAN),
+            status_key: s!(WHITE on CYAN),
             shadow: s!(DARK_GRAY on BLACK),
             agent_pointer: s!(BLACK on YELLOW),
             terminal: s!(LIGHT_GRAY on BLACK),
-            syntax: {
-                use vga::*;
-                syntax_table(&[
-                    ("keyword", WHITE),
-                    ("comment", CYAN),
-                    ("string", LIGHT_CYAN),
-                    ("number", LIGHT_GREEN),
-                    ("constant", LIGHT_GREEN),
-                    ("attribute", LIGHT_GREEN),
-                    ("type", WHITE),
-                ])
-            },
+            // QBasic and Edit never coloured code.
+            syntax: [None; 19],
             bold_keywords: false,
             diag_error: vga::LIGHT_RED,
             diag_warning: vga::LIGHT_MAGENTA,
@@ -347,6 +339,27 @@ pub struct ControlStyle {
     pub close_icon: &'static str,
     pub zoom_icon: &'static str,
     pub resize_grip: &'static str,
+    /// The window title in reverse video (QBasic: " Untitled " black on grey).
+    pub title_reverse: bool,
+    /// Window numbers in the top border (Turbo Vision's Alt+n).
+    pub window_numbers: bool,
+    /// Scroll bar characters: up, down, left, right, track, thumb.
+    pub scroll: [&'static str; 6],
+    /// Help's menu sits alone at the right end of the bar (QBasic, Edit).
+    pub help_right: bool,
+    /// No ≡ system menu in the bar.
+    pub hide_system_menu: bool,
+    /// Menu hotkey letters light up only while the bar is active (Alt/F10).
+    pub hotkeys_when_active: bool,
+    /// Status line key hints as `<F1=Help>` and the position as `00001:001`.
+    pub dos_status: bool,
+    /// Dialogs: their frame, and a dividing line above the buttons.
+    pub dialog_frame: FrameChars,
+    pub dialog_rule: bool,
+    /// Editors show line numbers (QBasic and Edit never did).
+    pub line_numbers: bool,
+    /// The whole look comes with this colour scheme (by name).
+    pub scheme: Option<&'static str>,
 }
 
 impl ControlStyle {
@@ -361,19 +374,45 @@ impl ControlStyle {
             close_icon: "[■]",
             zoom_icon: "[↑]",
             resize_grip: "┘",
+            title_reverse: false,
+            window_numbers: true,
+            scroll: ["▲", "▼", "◄", "►", "▒", "■"],
+            help_right: false,
+            hide_system_menu: false,
+            hotkeys_when_active: false,
+            dos_status: false,
+            dialog_frame: DOUBLE,
+            dialog_rule: false,
+            line_numbers: true,
+            scheme: None,
         }
     }
+    /// QBasic 1.1 and MS-DOS Edit, as they looked: single frames, the title
+    /// in reverse video, a ┤↑├ maximize box, arrow scroll bars, Help at the
+    /// right of the menu bar, `<F1=Help>` on a cyan status line, no line
+    /// numbers, the QBasic colours.
     pub fn qbasic() -> ControlStyle {
         ControlStyle {
-            name: "QBasic",
+            name: "QBasic / MS-DOS Edit",
             active_frame: SINGLE,
             inactive_frame: SINGLE,
             menu_frame: SINGLE,
             shadows: true,
             button: ("< ", " >"),
             close_icon: "",
-            zoom_icon: "[↑]",
-            resize_grip: "┘",
+            zoom_icon: "┤↑├",
+            resize_grip: "",
+            title_reverse: true,
+            window_numbers: false,
+            scroll: ["↑", "↓", "←", "→", "▒", "■"],
+            help_right: true,
+            hide_system_menu: true,
+            hotkeys_when_active: true,
+            dos_status: true,
+            dialog_frame: SINGLE,
+            dialog_rule: true,
+            line_numbers: false,
+            scheme: Some("QBasic"),
         }
     }
     pub fn ascii() -> ControlStyle {
@@ -387,6 +426,17 @@ impl ControlStyle {
             close_icon: "[x]",
             zoom_icon: "[^]",
             resize_grip: "+",
+            title_reverse: false,
+            window_numbers: true,
+            scroll: ["^", "v", "<", ">", ":", "#"],
+            help_right: false,
+            hide_system_menu: false,
+            hotkeys_when_active: false,
+            dos_status: false,
+            dialog_frame: ASCII,
+            dialog_rule: false,
+            line_numbers: true,
+            scheme: None,
         }
     }
     pub fn all() -> Vec<ControlStyle> {

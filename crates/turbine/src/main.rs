@@ -102,6 +102,12 @@ fn main() {
         }
     };
     let mut wb = Workbench::new(&args.files);
+    // The chosen colours and style, kept between runs (not for headless tests).
+    if !args.headless {
+        if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))) {
+            wb.set_look_path(dir.join("turbine/look.json"));
+        }
+    }
     if let Some(k) = args.keymap {
         wb.set_keymap(k);
     }

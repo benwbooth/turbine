@@ -85,6 +85,12 @@ pub struct MenuBar {
     tracking: bool,
     /// Screen width, for laying the titles out (0 = unlimited).
     pub width: i32,
+    /// The last menu (Help) at the right end of the bar (QBasic, Edit).
+    pub help_right: bool,
+    /// Hotkey letters shown only while the bar is active.
+    pub hotkeys_when_active: bool,
+    /// No ≡ system menu (QBasic and Edit had none; Alt+Space still opens it).
+    pub hide_system: bool,
 }
 
 impl MenuBar {
@@ -111,7 +117,8 @@ impl MenuBar {
         let roomy: i32 = 2 + widths.iter().map(|w| w + 2).sum::<i32>();
         let tight = self.width > 0 && roomy > self.width;
         let (mut x, pad) = if tight { (0, 1) } else { (2, 2) };
-        widths
+        let n = widths.len();
+        let mut rects: Vec<Rect> = widths
             .iter()
             .map(|&tw| {
                 let w = tw + pad;
@@ -120,7 +127,28 @@ impl MenuBar {
                 x += w;
                 r
             })
-            .collect()
+            .collect();
+        if self.hide_system {
+            // Shift everything left over the ≡ menu's place.
+            if let Some(i) = self.menus.iter().position(|m| hotkey(&m.title).is_none()) {
+                let gone = rects[i].w;
+                rects[i] = Rect::new(rects[i].x, 0, 0, 1);
+                for r in rects.iter_mut().skip(i + 1) {
+                    if r.w > 0 {
+                        r.x -= gone;
+                    }
+                }
+            }
+        }
+        // Help alone at the right end, when there's room for it there.
+        if self.help_right && self.width > 0 && n > 1 {
+            let w = widths[n - 1] + pad;
+            let right = Rect::new(self.width - w - 1, 0, w, 1);
+            if rects[n - 2].right() <= right.x && rects[n - 2].w > 0 {
+                rects[n - 1] = right;
+            }
+        }
+        rects
     }
 
     /// Rectangle of the drop-down for menu `i` (frame included).
@@ -310,6 +338,8 @@ impl MenuBar {
         for (i, (m, r)) in self.menus.iter().zip(&titles).enumerate() {
             let sel = self.active && self.title_sel == i;
             let (st, hot) = if sel { (s.menu_selected, s.menu_selected_hotkey) } else { (s.menu, s.menu_hotkey) };
+            // (QBasic: the letters light up only once Alt or F10 is pressed.)
+            let hot = if self.hotkeys_when_active && !self.is_open() { st } else { hot };
             if r.w == 0 {
                 continue;
             }
