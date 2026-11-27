@@ -556,6 +556,18 @@ impl Terminal {
         self.write(&out);
     }
 
+    /// The scrollback: (total rows, first row shown, rows shown).
+    pub fn scrollbar(&self) -> Option<(usize, usize, usize)> {
+        let b = self.term.scrollbar().ok()?;
+        Some((b.total as usize, b.offset as usize, b.len as usize))
+    }
+
+    /// Show the scrollback from `row` (0 = the oldest line).
+    pub fn scroll_to_row(&mut self, row: usize) {
+        self.term.scroll_viewport(ScrollViewport::Row(row));
+        self.changed = true;
+    }
+
     pub fn scroll(&mut self, delta: isize) {
         self.term.scroll_viewport(ScrollViewport::Delta(delta));
         self.changed = true;

@@ -182,6 +182,8 @@ pub struct Workbench {
     requests: Option<Receiver<Request>>,
     /// Window index being moved/resized with the mouse.
     dragging: Option<usize>,
+    /// A window whose scroll bar thumb is being dragged.
+    scroll_drag: Option<usize>,
     /// Editor (window index) selecting with the mouse.
     selecting: Option<usize>,
     last_click: Option<(Point, Instant)>,
@@ -478,6 +480,7 @@ impl Workbench {
             driver: Driver::new(),
             requests: None,
             dragging: None,
+            scroll_drag: None,
             selecting: None,
             last_click: None,
             keymap: Keymap::Cua,
@@ -2934,6 +2937,14 @@ impl Workbench {
             MenuResult::Consumed => return,
             MenuResult::Ignored => {}
         }
+        if let Some(i) = self.scroll_drag {
+            match m.kind {
+                MouseKind::Drag(Button::Left) if i < self.windows.len() => vbar_to(&mut self.windows[i], m.pos.y),
+                MouseKind::Drag(_) => {}
+                _ => self.scroll_drag = None,
+            }
+            return;
+        }
         if let Some(i) = self.dragging {
             match m.kind {
                 MouseKind::Drag(Button::Left) => self.windows[i].win.drag_to(m.pos, desk),
@@ -3010,14 +3021,16 @@ impl Workbench {
                     }
                     Hit::VScroll => {
                         let r = w.win.rect;
-                        if m.pos.y == r.y + 1 {
-                            w.ed.scroll_y = w.ed.scroll_y.saturating_sub(1);
-                        } else if m.pos.y == r.bottom() - 2 {
-                            w.ed.scroll_y += 1;
+                        if m.pos.y == r.y + 1 || m.pos.y == r.bottom() - 2 {
+                            // The arrows: a line at a time.
+                            let up = m.pos.y == r.y + 1;
+                            let (pos, max) = vbar(w);
+                            let to = if up { pos.saturating_sub(1) } else { (pos + 1).min(max) };
+                            set_vbar(w, to);
                         } else {
-                            let frac = (m.pos.y - r.y - 2) as f64 / (r.h - 4).max(1) as f64;
-                            let line = (frac * w.ed.doc.len_lines() as f64) as usize;
-                            w.ed.cursor = w.ed.doc.rope.line_to_char(line.min(w.ed.doc.len_lines().saturating_sub(1)));
+                            // The track: the thumb jumps there, and drags.
+                            vbar_to(w, m.pos.y);
+                            self.scroll_drag = Some(i);
                         }
                     }
                     Hit::Inside if w.term.is_some() => {
@@ -3464,6 +3477,14 @@ impl App for Workbench {
             let inner = w.win.inner();
             if let Some(t) = &mut w.term {
                 t.draw(&mut wc, inner, &theme, active && !has_modal);
+                // (The scrollback's bar, once there is any.)
+                if let Some((total, offset, len)) = t.terminal().and_then(|t| t.scrollbar()) {
+                    if total > len {
+                        let r = w.win.rect;
+                        let max = total - len;
+                        turbine_ui::frame::draw_vscroll(&mut wc, r.right() - 1, r.y + 1, r.h - 2, offset.min(max), max + 1, theme.scheme.scrollbar, theme.style.scroll);
+                    }
+                }
                 continue;
             }
             w.ed.draw(&mut wc, inner, &theme, active && !has_modal, active);
@@ -3576,6 +3597,41 @@ impl App for Workbench {
     }
 }
 
+/// A window's vertical scroll bar: (position, last position). Editors
+/// track the cursor's line; terminals their scrollback.
+fn vbar(w: &mut EdWin) -> (usize, usize) {
+    if let Some(t) = &mut w.term {
+        return match t.terminal().and_then(|t| t.scrollbar()) {
+            Some((total, offset, len)) => (offset, total.saturating_sub(len)),
+            None => (0, 0),
+        };
+    }
+    (w.ed.cursor_line_col().0, w.ed.doc.len_lines().saturating_sub(1))
+}
+
+fn set_vbar(w: &mut EdWin, pos: usize) {
+    if let Some(t) = &mut w.term {
+        if let Some(t) = t.terminal() {
+            t.scroll_to_row(pos);
+        }
+        return;
+    }
+    let line = pos.min(w.ed.doc.len_lines().saturating_sub(1));
+    w.ed.cursor = w.ed.doc.rope.line_to_char(line);
+    w.ed.anchor = None;
+}
+
+/// Put the thumb at screen row `y` (the inverse of `draw_vscroll`): the
+/// track's first row is the top, its last row the very bottom.
+fn vbar_to(w: &mut EdWin, y: i32) {
+    let r = w.win.rect;
+    let track = (r.h - 5).max(0);
+    let (_, max) = vbar(w);
+    let at = (y - r.y - 2).clamp(0, track) as usize;
+    let pos = if track == 0 { 0 } else { (at * max + track as usize / 2) / track as usize };
+    set_vbar(w, pos.min(max));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3669,6 +3725,30 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("out.txt")).unwrap(), b"PRINT \"HI\"\r\n");
         assert_eq!(wb.recent_dirs.first(), Some(&std::fs::canonicalize(&dir).unwrap()));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn window_scroll_bar_drags_to_the_end() {
+        let mut wb = bench();
+        let text: String = (0..300).map(|i| format!("line {i}\n")).collect();
+        run(&mut wb, json!({"cmd": "type", "text": text}));
+        keys(&mut wb, &["Ctrl+Home"]);
+        let r = wb.windows.last().unwrap().win.rect;
+        let m = |kind, y| Event::Mouse(MouseEvent { kind, pos: Point::new(r.right() - 1, y), mods: Mods::NONE });
+        let line = |wb: &Workbench| wb.windows.last().unwrap().ed.cursor_line_col().0;
+        // Grab the thumb at the top and drag it past the bottom.
+        wb.dispatch(m(MouseKind::Down(Button::Left), r.y + 2));
+        assert_eq!(line(&wb), 0);
+        wb.dispatch(m(MouseKind::Drag(Button::Left), r.y + r.h / 2));
+        let mid = line(&wb);
+        assert!(mid > 100 && mid < 200, "{mid}");
+        wb.dispatch(m(MouseKind::Drag(Button::Left), r.bottom() + 3));
+        wb.dispatch(m(MouseKind::Up(Button::Left), r.bottom() + 3));
+        assert_eq!(line(&wb), 300);
+        // The up arrow steps back a line.
+        wb.dispatch(m(MouseKind::Down(Button::Left), r.y + 1));
+        wb.dispatch(m(MouseKind::Up(Button::Left), r.y + 1));
+        assert_eq!(line(&wb), 299);
     }
 
     #[test]

@@ -82,7 +82,8 @@ impl Window {
             return Hit::BottomLeft;
         }
         if p.x == rt {
-            return if p.y > t + 1 && p.y < b - 1 { Hit::VScroll } else { Hit::Right };
+            // (The scroll bar runs from its ↑ under the title to its ↓.)
+            return if p.y > t && p.y < b - 1 { Hit::VScroll } else { Hit::Right };
         }
         if p.y == b {
             return if p.x > l + 2 && p.x < rt - 2 { Hit::HScroll } else { Hit::Bottom };

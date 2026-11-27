@@ -122,6 +122,8 @@ pub enum DialogResult {
 enum Drag {
     Move { grab: Point },
     Resize { start: Point, size: (i32, i32), right: bool, bottom: bool },
+    /// Dragging list `i`'s scroll bar thumb.
+    Thumb { i: usize },
 }
 
 #[derive(Debug)]
@@ -632,6 +634,21 @@ impl Dialog {
         selected.saturating_sub((pr.h - 3).max(0) as usize)
     }
 
+    /// Scroll list `i` so its thumb is at screen row `y` (on the track
+    /// between the arrows); the selection stays in view.
+    fn thumb_to(&mut self, i: usize, y: i32) {
+        let cr = self.control_rect(i);
+        let rows = self.list_rows(i);
+        if let Control::List { items, selected, scroll, header, .. } = &mut self.controls[i].control {
+            let y0 = cr.y + header.is_some() as i32;
+            let track = (rows as i32 - 3).max(0);
+            let max = items.len().saturating_sub(rows);
+            let at = (y - y0 - 1).clamp(0, track);
+            *scroll = if track == 0 { 0 } else { ((at as usize * max) + track as usize / 2) / track as usize }.min(max);
+            *selected = (*selected).clamp(*scroll, (*scroll + rows).saturating_sub(1));
+        }
+    }
+
     pub fn handle_mouse(&mut self, ev: &MouseEvent) -> DialogResult {
         // Dragging the dialog (moving or resizing).
         if let Some(d) = self.drag {
@@ -644,6 +661,7 @@ impl Dialog {
                         self.size = (w.max(self.min.0), h.max(self.min.1));
                         self.pos = Some(Point::new(self.rect.x, self.rect.y));
                     }
+                    Drag::Thumb { i } => self.thumb_to(i, ev.pos.y),
                 },
                 _ => self.drag = None,
             }
@@ -719,7 +737,10 @@ impl Dialog {
                         } else if row as usize >= rows - 1 {
                             *scroll = (*scroll + 1).min(max);
                         } else {
-                            *scroll = (row as usize * items.len() / rows).min(max);
+                            // (On the track: the thumb jumps there and drags.)
+                            self.drag = Some(Drag::Thumb { i });
+                            self.thumb_to(i, ev.pos.y);
+                            return DialogResult::None;
                         }
                         *selected = (*selected).clamp(*scroll, *scroll + rows - 1);
                         return DialogResult::None;
@@ -961,7 +982,9 @@ impl Dialog {
                         sub.print(cr.x + 1, y, it, stl);
                     }
                     if bar {
-                        draw_vscroll(&mut c, cr.right() - 1, y0, rows as i32, *selected, items.len(), s.scrollbar, st.scroll);
+                        // (The thumb shows where the view is, so it can be dragged.)
+                        let max = items.len().saturating_sub(rows);
+                        draw_vscroll(&mut c, cr.right() - 1, y0, rows as i32, *scroll, max + 1, s.scrollbar, st.scroll);
                     }
                     if focused {
                         let y = y0 + (*selected as i32 - *scroll as i32).max(0);
@@ -1093,5 +1116,33 @@ mod tests {
         assert_eq!(d.handle_key(&KeyEvent::plain(Key::Char('a'))), DialogResult::Changed("name".into()));
         assert_eq!(d.handle_key(&KeyEvent::new(Key::Char('h'), Mods::ALT)), DialogResult::Changed("hidden".into()));
         assert!(d.checked("hidden"));
+    }
+    #[test]
+    fn list_scrolls_to_the_bottom_by_wheel_and_thumb_drag() {
+        let mut d = dlg();
+        d.layout(Rect::new(0, 0, 100, 40));
+        let i = d.controls.iter().position(|p| p.control.id() == Some("files")).unwrap();
+        let cr = d.control_rect(i);
+        let rows = d.list_rows(i);
+        let m = |kind, pos| MouseEvent { kind, pos, mods: Mods::NONE };
+        let scroll = |d: &Dialog| match &d.controls[i].control { Control::List { scroll, .. } => *scroll, _ => 0 };
+        for _ in 0..20 {
+            d.handle_mouse(&m(MouseKind::ScrollDown, Point::new(cr.x + 2, cr.y + 2)));
+        }
+        assert_eq!(scroll(&d), 20 - rows);
+        for _ in 0..20 {
+            d.handle_mouse(&m(MouseKind::ScrollUp, Point::new(cr.x + 2, cr.y + 2)));
+        }
+        assert_eq!(scroll(&d), 0);
+        // Grab the track, drag to its end: the last items show.
+        let x = cr.right() - 1;
+        let y0 = cr.y + 1; // (below the header)
+        d.handle_mouse(&m(MouseKind::Down(Button::Left), Point::new(x, y0 + 1)));
+        d.handle_mouse(&m(MouseKind::Drag(Button::Left), Point::new(x, y0 + rows as i32 + 5)));
+        d.handle_mouse(&m(MouseKind::Up(Button::Left), Point::new(x, y0 + rows as i32 + 5)));
+        assert_eq!(scroll(&d), 20 - rows);
+        let n = d.automation_node();
+        let names: Vec<_> = n.find_target("dialog.files").unwrap().children.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(names.last().map(String::as_str), Some("file19"));
     }
 }
