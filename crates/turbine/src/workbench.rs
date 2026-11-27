@@ -48,6 +48,7 @@ fn default_dap_spawner() -> DapSpawner {
             Ok(v) if v.trim() == "fake" => {
                 return Some(turbine_services::fake::fake_debug_adapter().map(|rpc| DapClient::with_rpc(rpc, launch, bps)));
             }
+            Ok(v) if matches!(v.trim(), "none" | "off" | "0") => return None,
             Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),
             _ => dap::adapter_for(lang)?,
         };
@@ -102,6 +103,7 @@ fn default_lsp_spawner() -> LspSpawner {
             Ok(v) if v.trim() == "fake" => {
                 return Some(turbine_services::fake::fake_server().map(|rpc| LspClient::with_rpc(rpc, root, lang)));
             }
+            Ok(v) if matches!(v.trim(), "none" | "off" | "0") => return None,
             Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),
             _ => lsp::server_for(lang)?,
         };
@@ -519,6 +521,24 @@ impl Workbench {
                 }
             }
         }
+    }
+
+    /// The system clipboard's text, from a front end that has one (the Qt
+    /// app), so pasting in Turbine pastes what the desktop copied.
+    pub fn set_clipboard(&mut self, text: String) {
+        if !text.is_empty() {
+            self.clipboard = text;
+        }
+    }
+
+    /// The menu model, for native menu bars (the desktop's global menu).
+    pub fn menus(&self) -> &[Menu] {
+        &self.menubar.menus
+    }
+
+    /// The active window's title (for a desktop window's title).
+    pub fn title(&self) -> String {
+        self.windows.last().map(|w| w.win.title.clone()).unwrap_or_default()
     }
 
     /// An agent (or a question for it) is still at work.
@@ -2268,11 +2288,21 @@ impl Workbench {
     fn dispatch(&mut self, ev: Event) {
         match ev {
             Event::Resize(w, h) => {
+                let old = self.desktop();
                 self.size = (w, h);
                 self.menubar.width = w;
                 let d = self.desktop();
-                for w in &mut self.windows {
-                    w.win.fit(d);
+                // Windows keep their place and share of the desktop as it
+                // grows or shrinks (zoomed ones fill it).
+                for win in &mut self.windows {
+                    let r = win.win.rect;
+                    if old.w > 0 && old.h > 0 && !win.win.zoomed {
+                        let sx = |v: i32| d.x + ((v - old.x) as i64 * d.w as i64 / old.w as i64) as i32;
+                        let sy = |v: i32| d.y + ((v - old.y) as i64 * d.h as i64 / old.h as i64) as i32;
+                        let (x0, y0, x1, y1) = (sx(r.x), sy(r.y), sx(r.right()), sy(r.bottom()));
+                        win.win.rect = Rect::new(x0, y0, (x1 - x0).max(win.win.min_w), (y1 - y0).max(win.win.min_h));
+                    }
+                    win.win.fit(d);
                 }
             }
             Event::Key(k) => self.key(k),

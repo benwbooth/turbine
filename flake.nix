@@ -8,6 +8,9 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      # Qt for the desktop app (turbine-app, cxx-qt): one merged tree with qmake.
+      qtFor = pkgs: with pkgs.qt6; [ qtbase qtdeclarative qtsvg qtwayland ];
+      qtEnvFor = pkgs: pkgs.qt6.env "qt-turbine-${pkgs.qt6.qtbase.version}" ((builtins.tail (qtFor pkgs)) ++ [ pkgs.libGL ]);
     in
     {
       packages = forAll (pkgs:
@@ -93,11 +96,21 @@
           default = turbine;
         });
 
-      devShells = forAll (pkgs: {
-        default = pkgs.mkShell {
-          # Zig 0.15 and git: libghostty-vt-sys builds Ghostty's terminal engine.
-          packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer zig_0_15 git ];
-        };
-      });
+      devShells = forAll (pkgs:
+        let qtEnv = qtEnvFor pkgs; in
+        {
+          default = pkgs.mkShell {
+            # Zig 0.15 and git: libghostty-vt-sys builds Ghostty's terminal engine.
+            # Qt (qmake) for turbine-app.
+            packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer zig_0_15 git pkg-config qtEnv libGL ];
+            QMAKE = "${qtEnv}/bin/qmake";
+            # Link with this shell's compiler: a system clang links against the
+            # system glibc and the binary can't load this nixpkgs' Qt.
+            "CARGO_TARGET_${pkgs.stdenv.hostPlatform.rust.cargoEnvVarTarget}_LINKER" = "cc";
+            shellHook = ''
+              export NIX_LDFLAGS="''${NIX_LDFLAGS//"-rpath $out/lib"/}"
+            '';
+          };
+        });
     };
 }

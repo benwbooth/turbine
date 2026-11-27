@@ -1,0 +1,21 @@
+[package]
+name = "turbine-app"
+description = "Turbine's desktop app: Qt Quick via cxx-qt, the cell grid painted with QPainter in native fonts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "turbine-app"
+path = "src/main.rs"
+
+[dependencies]
+turbine = { path = "../turbine" }
+turbine-ui.workspace = true
+serde_json.workspace = true
+cxx = "1.0"
+cxx-qt = "0.10"
+cxx-qt-lib = { version = "0.10", features = ["qt_full"] }
+
+[build-dependencies]
+cxx-qt-build = "0.10"

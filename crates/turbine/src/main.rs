@@ -1,11 +1,6 @@
 //! Turbine: a retro DOS-style, AI-first code editor and IDE.
 
-mod agent;
-mod mcp;
-mod server;
-mod tools;
-mod vim;
-mod workbench;
+use turbine::{mcp, server, vim, workbench};
 
 use std::path::PathBuf;
 use std::sync::mpsc;

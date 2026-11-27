@@ -19,19 +19,26 @@ pub fn draw_frame(c: &mut Canvas, r: Rect, fc: FrameChars, style: Style) {
     c.vline(r.right() - 1, r.y + 1, r.h - 2, fc.v, style);
 }
 
-/// Title centred in the top edge: "═ title ═".
+/// Title centred in the top edge: "═ title ═", kept clear of the close
+/// icon on the left and the window number and zoom icon on the right; a
+/// long one loses its start ("…ocument.rs").
 pub fn draw_title(c: &mut Canvas, r: Rect, title: &str, style: Style) {
-    let room = r.w - 12;
-    if room <= 2 {
+    let (left, right) = (r.x + 6, r.right() - 10);
+    let room = right - left;
+    if room <= 3 {
         return;
     }
     let mut t: String = title.to_string();
-    while str_width(&t) as i32 > room {
-        t.remove(0);
+    if str_width(&t) as i32 + 2 > room {
+        while str_width(&t) as i32 + 3 > room {
+            t.remove(0);
+        }
+        t.insert(0, '…');
     }
     let text = format!(" {t} ");
     let w = str_width(&text) as i32;
-    c.print(r.x + (r.w - w) / 2, r.y, &text, style);
+    let x = (r.x + (r.w - w) / 2).clamp(left, (right - w).max(left));
+    c.print(x, r.y, &text, style);
 }
 
 /// Vertical scroll bar: ↑ track ■ ↓.
