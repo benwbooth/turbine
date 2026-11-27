@@ -14,7 +14,7 @@ struct Edit {
     cursor_before: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Document {
     pub rope: Rope,
     pub path: Option<PathBuf>,

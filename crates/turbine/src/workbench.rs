@@ -169,6 +169,9 @@ struct EdWin {
     special: Option<&'static str>,
     /// Docked in a part (the panel, a side bar) instead of on the desktop.
     dock: Option<Side>,
+    /// Windows showing the same document share a group: an edit in one
+    /// shows in the others (a split of one file).
+    mirror: Option<u32>,
 }
 
 impl EdWin {
@@ -742,7 +745,7 @@ impl Workbench {
         self.next_id += 1;
         let mut ed = EditorView::new(doc);
         ed.line_numbers = self.theme.style.line_numbers;
-        let mut ew = EdWin { win, ed, vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: None };
+        let mut ew = EdWin { win, ed, vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: None, mirror: None };
         if self.keymap == Keymap::Vim {
             ew.vim = Some(vim::attach(&mut ew.ed));
         }
@@ -788,6 +791,7 @@ impl Workbench {
             was_dirty: false,
             special: Some(kind),
             dock: Some(Side::Bottom),
+            mirror: None,
         };
         w.win.number = None;
         // Below the active window, so the code stays in front.
@@ -1009,6 +1013,7 @@ impl Workbench {
                     was_dirty: false,
                     special: Some("help"),
                     dock: None,
+                    mirror: None,
                 });
                 self.renumber();
                 self.windows.len() - 1
@@ -1145,6 +1150,7 @@ impl Workbench {
                     was_dirty: false,
                     special: Some("chat"),
                     dock: Some(Side::Right),
+                    mirror: None,
                 });
                 // (Behind the active window: the log never takes focus.)
                 let n = self.windows.len();
@@ -1933,7 +1939,7 @@ impl Workbench {
         if let Some(e) = view.error() {
             self.say(format!("Terminal: {e}"));
         }
-        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: Some(Side::Bottom) });
+        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: Some(Side::Bottom), mirror: None });
         self.renumber();
     }
 
@@ -3614,6 +3620,7 @@ impl App for Workbench {
     fn tick(&mut self, now: Instant) -> Option<Instant> {
         // (Agents find controls by where they are: lay dialogs and parts out
         // now, not only when the screen is drawn.)
+        self.sync_mirrors();
         self.layout_dock();
         self.update_views();
         self.ex_poll();
@@ -3744,6 +3751,7 @@ impl App for Workbench {
                 }
             }
         }
+        self.sync_mirrors();
         self.layout_dock();
         self.draw_shell(&mut c, &theme);
         // Status bar.
@@ -4428,28 +4436,44 @@ mod tests {
     }
 
     #[test]
-    fn split_editor_puts_two_files_side_by_side() {
+    fn split_editor_shows_one_file_twice_or_two_side_by_side() {
         let (dir, mut wb) = project("split");
         wb.goto_file(&dir.join("src/main.rs"), None, 0);
-        // One editor: Ctrl+\ asks for the file to put beside it.
+        wb.windows.retain(|w| w.dock.is_some() || w.ed.doc.path.is_some());
+        // One editor: Ctrl+\ shows the same file beside it.
         wb.key(KeyEvent::new(Key::Char('\\'), Mods::CTRL));
-        assert!(wb.shell.palette.is_some());
-        wait_until(&mut wb, "the file list", |wb| wb.shell.palette.as_ref().is_some_and(|p| p.list.rows.iter().any(|r| r.text == "notes.md")));
-        run(&mut wb, json!({"cmd": "type", "text": "notes"}));
-        keys(&mut wb, &["Enter"]);
         wb.tick(Instant::now());
+        let views: Vec<usize> = (0..wb.windows.len()).filter(|&i| wb.windows[i].ed.doc.title() == "main.rs").collect();
+        assert_eq!(views.len(), 2);
         let e = wb.layout().editors;
-        let rect = |wb: &Workbench, name: &str| wb.windows.iter().find(|w| w.ed.doc.title() == name).unwrap().win.rect;
-        let (l, r) = (rect(&wb, "main.rs"), rect(&wb, "notes.md"));
+        let (l, r) = (wb.windows[views[0]].win.rect, wb.windows[views[1]].win.rect);
         assert_eq!((l.x, r.x, l.w + r.w, l.h), (e.x, e.x + e.w / 2, e.w, e.h), "{l:?} {r:?} {e:?}");
+        // Typing in one shows in the other; undo from the other takes it back.
+        run(&mut wb, json!({"cmd": "type", "text": "hi "}));
+        wb.tick(Instant::now());
+        let line0 = |wb: &Workbench, i: usize| wb.windows[i].ed.doc.line(0);
+        assert_eq!((line0(&wb, views[0]), line0(&wb, views[1])), ("hi fn main() {".to_string(), "hi fn main() {".to_string()));
+        let other = wb.windows.remove(views[0]);
+        wb.windows.push(other);
+        keys(&mut wb, &["Ctrl+Z"]);
+        wb.tick(Instant::now());
+        assert!(wb.windows.iter().filter(|w| w.ed.doc.title() == "main.rs").all(|w| w.ed.doc.line(0) == "fn main() {"));
+        // Saving from one: neither is marked changed.
+        run(&mut wb, json!({"cmd": "type", "text": "x"}));
+        keys(&mut wb, &["F2"]);
+        wb.tick(Instant::now());
+        assert!(wb.windows.iter().filter(|w| w.ed.doc.title() == "main.rs").all(|w| !w.ed.doc.dirty));
+        // Again: one editor; then two files side by side.
+        wb.key(KeyEvent::new(Key::Char('\\'), Mods::CTRL));
+        wb.goto_file(&dir.join("notes.md"), None, 0);
+        wb.key(KeyEvent::new(Key::Char('\\'), Mods::CTRL));
+        wb.tick(Instant::now());
+        let rect = |wb: &Workbench, name: &str| wb.windows.iter().rev().find(|w| w.ed.doc.title() == name).unwrap().win.rect;
+        assert_eq!(rect(&wb, "notes.md").x, wb.layout().editors.x + wb.layout().editors.w / 2);
         // The halves follow the side bar.
         keys(&mut wb, &["Ctrl+B"]);
         wb.tick(Instant::now());
-        assert_eq!(rect(&wb, "main.rs").x, wb.layout().editors.x);
-        // Again: one editor filling the area.
-        wb.key(KeyEvent::new(Key::Char('\\'), Mods::CTRL));
-        wb.tick(Instant::now());
-        assert_eq!(rect(&wb, "notes.md"), wb.layout().editors);
+        assert_eq!(rect(&wb, "notes.md").x, wb.layout().editors.x + wb.layout().editors.w / 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -5,6 +5,7 @@
 use super::*;
 use crate::dock::{Dock, Layout, Tab};
 use crate::palette::{self, Palette, Pick};
+use std::collections::HashMap;
 use turbine_ui::list::{ListOut, Row};
 
 /// Where typing goes, besides dialogs and menus.
@@ -51,6 +52,8 @@ pub(super) struct Shell {
     pub split: Option<(u32, u32, usize)>,
     /// Ctrl+\ with one editor: the file picked next opens beside it.
     pub split_pending: Option<u32>,
+    /// Each mirror group's document as last synced: (version, dirty, path).
+    pub mirrored: HashMap<u32, (u64, bool, Option<PathBuf>)>,
 }
 
 impl Shell {
@@ -74,6 +77,7 @@ impl Shell {
             chat_agent: false,
             split: None,
             split_pending: None,
+            mirrored: HashMap::new(),
         }
     }
 }
@@ -593,14 +597,81 @@ impl Workbench {
         match eds.as_slice() {
             [front, other, ..] => self.shell.split = Some((*other, *front, 1)),
             [only] => {
-                // One editor: pick the file to show beside it.
-                self.shell.split_pending = Some(*only);
-                self.open_palette("");
-                self.say("Split: choose the file to open beside it");
+                // One editor: the same file beside it (as VS Code does);
+                // an edit in either shows in both.
+                let only = *only;
+                let Some(i) = self.windows.iter().position(|w| w.win.id == only) else { return };
+                let src = &self.windows[i];
+                let group = src.mirror.unwrap_or(only);
+                let mut ed = EditorView::new(src.ed.doc.clone());
+                ed.line_numbers = src.ed.line_numbers;
+                ed.cursor = src.ed.cursor;
+                ed.scroll_y = src.ed.scroll_y;
+                ed.highlights = src.ed.highlights.clone();
+                let lang = src.lang.clone();
+                let mut win = Window::new(self.next_id, &src.win.title, src.win.rect);
+                win.toggle_zoom(self.layout().editors);
+                self.next_id += 1;
+                let id = win.id;
+                self.windows[i].mirror = Some(group);
+                let vim = (self.keymap == Keymap::Vim).then(Session::new);
+                self.windows.push(EdWin {
+                    win,
+                    ed,
+                    vim,
+                    term: None,
+                    term_text: String::new(),
+                    lang,
+                    lang_for: None,
+                    hl_sent: None,
+                    lsp_key: None,
+                    lsp_sent: None,
+                    was_dirty: false,
+                    special: None,
+                    dock: None,
+                    mirror: Some(group),
+                });
+                self.renumber();
+                self.shell.split = Some((only, id, 1));
             }
             [] => {}
         }
         self.focus_editor();
+    }
+
+    /// Windows showing one document: copy the one that changed (an edit,
+    /// an undo, a save, Save As) to the others, undo history and all.
+    pub(super) fn sync_mirrors(&mut self) {
+        let groups: HashSet<u32> = self.windows.iter().filter_map(|w| w.mirror).collect();
+        for g in groups {
+            let members: Vec<usize> = (0..self.windows.len()).filter(|&i| self.windows[i].mirror == Some(g)).collect();
+            if members.len() < 2 {
+                // (Alone again: no longer a mirror.)
+                for i in members {
+                    self.windows[i].mirror = None;
+                }
+                self.shell.mirrored.remove(&g);
+                continue;
+            }
+            let state = |w: &EdWin| (w.ed.doc.version, w.ed.doc.dirty, w.ed.doc.path.clone());
+            let last = self.shell.mirrored.get(&g).cloned();
+            let changed = members.iter().copied().find(|&i| Some(state(&self.windows[i])) != last);
+            if let Some(src) = changed {
+                let doc = self.windows[src].ed.doc.clone();
+                let title = self.windows[src].win.title.clone();
+                for &i in &members {
+                    if i != src {
+                        let w = &mut self.windows[i];
+                        w.ed.doc = doc.clone();
+                        w.win.title = title.clone();
+                        let n = w.ed.doc.rope.len_chars();
+                        w.ed.cursor = w.ed.cursor.min(n);
+                        w.ed.anchor = w.ed.anchor.map(|a| a.min(n));
+                    }
+                }
+                self.shell.mirrored.insert(g, state(&self.windows[src]));
+            }
+        }
     }
 
     /// Toggle a part; showing one focuses its view.
