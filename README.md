@@ -83,6 +83,12 @@ comes back once the action has finished on screen.
   language's own site, fetched once and kept for offline reading), Shift+F1
   lists them all, Ctrl+F1 asks the language server about the word under
   the cursor
+- AI from hearth's AI hub when it's there (its models, loaded through its
+  memory manager), else a local Ollama or any OpenAI-compatible server
+  (`TURBINE_AI_URL`): Ctrl+L asks about the selection or the code around
+  the cursor and streams the answer into an AI Chat window; tab completion
+  shows a fill-in-the-middle model's suggestion as dim ghost text after you
+  pause typing, and Tab takes it
 - Unicode: grapheme clusters, East Asian wide characters (two cells each),
   combining marks, emoji, and bidirectional text with an RTL mode
 - Encodings detected on open and kept on save: UTF-8/16 (with or without

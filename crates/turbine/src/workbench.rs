@@ -4,6 +4,7 @@
 use crate::agent::{Driver, Output, Step};
 use crate::vim::{self, Keymap};
 use turbine_term::{MouseOutcome, Spawn, TerminalView};
+use turbine_services::ai::{self, Ai, AiEvent, ChatMessage};
 use turbine_services::dap::{self, DapClient, DapEvent, Frame, Launch, Variable};
 use turbine_services::lsp::{self, CompletionItem, LspClient, LspEvent, Pos};
 use std::collections::{BTreeMap, BTreeSet};
@@ -173,6 +174,21 @@ pub struct Workbench {
     guide_tx: std::sync::mpsc::Sender<(String, String, Result<String, String>)>,
     guide_rx: Receiver<(String, String, Result<String, String>)>,
     guides_fetching: usize,
+    /// AI models (hearth's hub, or local fallbacks); None until started.
+    ai: Option<Ai>,
+    /// Cursor-style ghost-text completion while typing.
+    tab_complete: bool,
+    /// The last edit by a person: (when, window, doc version).
+    last_edit: Option<(Instant, u32, u64)>,
+    /// A completion asked for: (request, window, version, cursor).
+    fim_pending: Option<(u64, u32, u64, usize)>,
+    /// The chat so far, and the answer being streamed (request id).
+    chat_history: Vec<ChatMessage>,
+    chat_streaming: Option<(u64, String)>,
+    /// The chat model the person picked (else the hub's loaded one).
+    chat_model: Option<String>,
+    /// A question asked before the model list arrived.
+    pending_question: Option<String>,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -332,11 +348,11 @@ fn menus() -> Vec<Menu> {
         Menu::new(
             "~A~I",
             vec![
-                soon("~C~hat", "Ctrl+L", "ai.chat"),
+                it("~C~hat...", "Ctrl+L", "ai.chat"),
                 soon("~I~nline Edit", "Ctrl+K", "ai.inline"),
                 soon("~A~gent", "Ctrl+I", "ai.agent"),
-                soon("~T~ab Completion", "", "ai.tab"),
-                soon("~M~odels...", "", "ai.models"),
+                it("~T~ab Completion", "", "ai.tab"),
+                it("~M~odels...", "", "ai.models"),
                 sep(),
                 it("Agent ~D~emo", "", "agent.demo"),
                 it("~S~top Agent", "Esc", "agent.stop"),
@@ -436,6 +452,14 @@ impl Workbench {
             guide_tx,
             guide_rx,
             guides_fetching: 0,
+            ai: None,
+            tab_complete: true,
+            last_edit: None,
+            fim_pending: None,
+            chat_history: Vec::new(),
+            chat_streaming: None,
+            chat_model: None,
+            pending_question: None,
         };
         for f in files {
             wb.open_path(f);
@@ -810,6 +834,223 @@ impl Workbench {
                 Err(e) => self.show_help(&title, &format!("# {title}\n\nThis guide couldn't be fetched:\n\n    {e}\n")),
             }
         }
+    }
+
+    /// Connect to the AI models (hearth's hub when it's there).
+    pub fn start_ai(&mut self) {
+        if self.ai.is_none() {
+            self.ai = Some(Ai::start());
+        }
+    }
+
+    #[allow(dead_code)] // tests
+    pub fn set_ai(&mut self, ai: Ai) {
+        self.ai = Some(ai);
+    }
+
+    fn chat_model(&self) -> Option<ai::Model> {
+        let models = &self.ai.as_ref()?.models;
+        if let Some(name) = &self.chat_model {
+            if let Some(m) = models.iter().find(|m| &m.name == name) {
+                return Some(m.clone());
+            }
+        }
+        ai::pick_chat(models).cloned()
+    }
+
+    fn ask_dialog(&mut self) {
+        if self.ai.is_none() {
+            self.start_ai();
+        }
+        let has_sel = self.windows.last().is_some_and(|w| w.ed.selection().is_some());
+        let title = if has_sel { "Ask AI about the selection" } else { "Ask AI" };
+        let w = (self.size.0 - 6).clamp(40, 76);
+        let d = Dialog::new("ask", title, w, 8)
+            .input("q", 1, 2, w - 6, "~Q~uestion:", "")
+            .button("ok", w / 2 - 12, 4, "~A~sk", true)
+            .button("cancel", w / 2 + 2, 4, "Cancel", false);
+        self.dialog = Some(d);
+    }
+
+    /// The code the question is about: the selection, else lines around the cursor.
+    fn chat_context(&self) -> String {
+        let Some(w) = self.windows.iter().rev().find(|w| w.special.is_none() && w.term.is_none()) else { return String::new() };
+        let name = w.ed.doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| w.ed.doc.title());
+        let lang = w.lang.clone().unwrap_or_default();
+        let code = match w.ed.selected_text() {
+            Some(t) => t,
+            None => {
+                let (line, _) = w.ed.cursor_line_col();
+                let from = line.saturating_sub(60);
+                let to = (line + 60).min(w.ed.doc.len_lines());
+                (from..to).map(|i| w.ed.doc.line(i)).collect::<Vec<_>>().join("\n")
+            }
+        };
+        format!("File: {name}\n```{lang}\n{code}\n```")
+    }
+
+    fn ask(&mut self, q: &str) {
+        let Some(model) = self.chat_model() else {
+            // The model list may not be here yet: ask when it is.
+            self.pending_question = Some(q.to_string());
+            self.say("Waiting for the AI model list...");
+            return;
+        };
+        if self.chat_history.is_empty() {
+            self.chat_history.push(ChatMessage {
+                role: "system".into(),
+                content: "You are the assistant inside Turbine, a retro DOS-style code editor. Answer briefly, in Markdown, with code in fenced blocks.".into(),
+            });
+        }
+        let ctx = self.chat_context();
+        self.chat_history.push(ChatMessage { role: "user".into(), content: format!("{q}\n\n{ctx}") });
+        self.append_chat(&format!("\n## You\n\n{q}\n\n## {}\n\n", model.name));
+        let msgs = self.chat_history.clone();
+        let id = self.ai.as_mut().unwrap().chat(&model, msgs);
+        self.chat_streaming = Some((id, String::new()));
+    }
+
+    fn append_chat(&mut self, text: &str) {
+        let i = match self.windows.iter().position(|w| w.special == Some("chat")) {
+            Some(i) => i,
+            None => {
+                let d = self.desktop();
+                let mut win = Window::new(self.next_id, "AI Chat", Rect::new(d.x + d.w / 2, d.y, d.w - d.w / 2, d.h));
+                win.min_h = 4;
+                self.next_id += 1;
+                let mut ed = EditorView::new(Document::from_str("# AI Chat\n"));
+                ed.line_numbers = false;
+                self.windows.push(EdWin {
+                    win,
+                    ed,
+                    vim: None,
+                    term: None,
+                    term_text: String::new(),
+                    lang: Some("markdown".into()),
+                    lang_for: Some(None),
+                    hl_sent: None,
+                    lsp_key: None,
+                    lsp_sent: None,
+                    was_dirty: false,
+                    special: Some("chat"),
+                });
+                self.renumber();
+                self.windows.len() - 1
+            }
+        };
+        let ed = &mut self.windows[i].ed;
+        let end = ed.doc.rope.len_chars();
+        ed.doc.insert(end, text, end);
+        ed.doc.dirty = false;
+        ed.cursor = ed.doc.rope.len_chars();
+    }
+
+    fn models_dialog(&mut self) {
+        self.start_ai();
+        let Some(a) = &self.ai else { return };
+        if a.models.is_empty() {
+            self.say("No AI models found yet (looking...)");
+            return;
+        }
+        let cur = self.chat_model().map(|m| m.name);
+        let items: Vec<String> = a
+            .models
+            .iter()
+            .map(|m| {
+                let tags = [m.loaded.then_some("loaded"), m.fim.then_some("tab completion"), (!m.chat).then_some("no chat")]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{}  [{}{}]", m.name, m.provider, if tags.is_empty() { String::new() } else { format!("; {tags}") })
+            })
+            .collect();
+        let sel = a.models.iter().position(|m| Some(&m.name) == cur.as_ref()).unwrap_or(0);
+        let w = (self.size.0 - 4).clamp(40, 78);
+        let h = (items.len() as i32 + 7).clamp(9, self.size.1 - 2);
+        let d = Dialog::new("models", &format!("AI Models ({})", a.source), w, h)
+            .label(1, 0, "Chat model:")
+            .list("models", Rect::new(1, 1, w - 18, h - 5), items, sel)
+            .button("ok", w - 15, 1, "O~K~", true)
+            .button("cancel", w - 15, 4, "Cancel", false);
+        self.dialog = Some(d);
+    }
+
+    /// Ghost-text completion after typing pauses, and AI answers.
+    fn update_ai(&mut self, now: Instant) {
+        let Some(a) = &mut self.ai else { return };
+        let events = a.poll();
+        for e in events {
+            match e {
+                AiEvent::Models(models) => {
+                    if let Some(q) = self.pending_question.take() {
+                        if models.iter().any(|m| m.chat) {
+                            self.ask(&q);
+                        } else {
+                            self.say("No chat model: start Ollama or llama.cpp (hearth's AI hub lists them)");
+                        }
+                    }
+                }
+                AiEvent::HubGone(why) => self.say(format!("AI hub: {why}")),
+                AiEvent::Chunk { id, text } => {
+                    if self.chat_streaming.as_ref().is_some_and(|(i, _)| *i == id) {
+                        self.chat_streaming.as_mut().unwrap().1.push_str(&text);
+                        self.append_chat(&text);
+                    }
+                }
+                AiEvent::Done { id } => {
+                    if let Some((i, answer)) = self.chat_streaming.take() {
+                        if i == id {
+                            self.chat_history.push(ChatMessage { role: "assistant".into(), content: answer });
+                            self.append_chat("\n");
+                        } else {
+                            self.chat_streaming = Some((i, answer));
+                        }
+                    }
+                }
+                AiEvent::Error { id, message } => {
+                    if self.chat_streaming.as_ref().is_some_and(|(i, _)| *i == id) {
+                        self.chat_streaming = None;
+                        self.append_chat(&format!("\n*(The model didn't answer: {message})*\n"));
+                    } else if self.fim_pending.as_ref().is_some_and(|p| p.0 == id) {
+                        self.fim_pending = None;
+                    }
+                }
+                AiEvent::Completion { id, text } => {
+                    let Some((rid, win, version, cursor)) = self.fim_pending.take() else { continue };
+                    if rid != id {
+                        self.fim_pending = Some((rid, win, version, cursor));
+                        continue;
+                    }
+                    if let Some(w) = self.windows.last_mut() {
+                        if w.win.id == win && w.ed.doc.version == version && w.ed.cursor == cursor {
+                            let ghost: String = text.trim_end().lines().take(3).collect::<Vec<_>>().join("\n");
+                            if !ghost.trim().is_empty() {
+                                w.ed.ghost = Some(ghost);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Ask for a completion once typing has paused.
+        let Some((at, win, version)) = self.last_edit else { return };
+        if now.duration_since(at) < Duration::from_millis(350) || self.fim_pending.is_some() {
+            return;
+        }
+        self.last_edit = None;
+        let Some(w) = self.windows.last() else { return };
+        if w.win.id != win || w.ed.doc.version != version || w.ed.selection().is_some() {
+            return;
+        }
+        let Some(a) = &mut self.ai else { return };
+        let Some(model) = ai::pick_fim(&a.models).cloned() else { return };
+        let rope = &w.ed.doc.rope;
+        let cur = w.ed.cursor;
+        let before = rope.slice(cur.saturating_sub(3000)..cur).to_string();
+        let after = rope.slice(cur..(cur + 1500).min(rope.len_chars())).to_string();
+        let id = a.complete(&model, before, after);
+        self.fim_pending = Some((id, win, version, cur));
     }
 
     /// Output and Debug along the bottom, code windows above them.
@@ -1195,7 +1436,7 @@ impl Workbench {
             let path = w.ed.doc.path.clone();
             // Untitled documents are checked again as they're typed (a #! line).
             // (Help windows say their language themselves.)
-            let fixed = w.special == Some("help");
+            let fixed = matches!(w.special, Some("help" | "chat"));
             let stale = !fixed && (w.lang_for.as_ref() != Some(&path) || (path.is_none() && w.hl_sent != Some(w.ed.doc.version)));
             if stale {
                 let lang = turbine_syntax::detect(path.as_deref(), &w.ed.doc.line(0));
@@ -1279,11 +1520,13 @@ impl Workbench {
             .last()
             .map(|w| (w.ed.line_numbers, w.ed.base_rtl == Some(true)))
             .unwrap_or((true, false));
+        let tab = self.tab_complete;
         for m in &mut self.menubar.menus {
             for it in &mut m.items {
                 match it.command.as_str() {
                     "view.line_numbers" => it.checked = Some(ln),
                     "view.rtl" => it.checked = Some(rtl),
+                    "ai.tab" => it.checked = Some(tab),
                     _ => {}
                 }
             }
@@ -1344,6 +1587,15 @@ impl Workbench {
                 }
             }
             "lsp.complete" => self.start_completion(),
+            "ai.chat" => self.ask_dialog(),
+            "ai.models" => self.models_dialog(),
+            "ai.tab" => {
+                self.tab_complete = !self.tab_complete;
+                if self.tab_complete {
+                    self.start_ai();
+                }
+                self.say(if self.tab_complete { "AI tab completion on" } else { "AI tab completion off" });
+            }
             "help.contents" => {
                 let lang = self.windows.last().and_then(|w| w.lang.clone()).filter(|_| self.windows.last().is_some_and(|w| w.special.is_none()));
                 match lang.filter(|l| turbine_services::guides::find(l).is_some()) {
@@ -1630,6 +1882,22 @@ impl Workbench {
             return;
         }
         let kind = d.kind.clone();
+        if kind == "ask" {
+            let q = d.value("q").unwrap_or_default();
+            if !q.trim().is_empty() {
+                self.ask(q.trim());
+            }
+            return;
+        }
+        if kind == "models" {
+            if let (Some(i), Some(a)) = (d.selected_index("models"), &self.ai) {
+                if let Some(m) = a.models.get(i) {
+                    self.chat_model = Some(m.name.clone());
+                    self.say(format!("Chat model: {}", m.name));
+                }
+            }
+            return;
+        }
         if let Some(keys) = kind.strip_prefix("guides:") {
             if let Some(i) = d.selected_index("guides") {
                 if let Some(k) = keys.split('\u{1f}').nth(i) {
@@ -1817,9 +2085,18 @@ impl Workbench {
                 }
             }
         }
+        let before = self.windows.last().map(|w| (w.win.id, w.ed.doc.version));
         self.key_inner(k);
         if self.completion.is_some() {
             self.refilter_completion();
+        }
+        // A person typed in an editor: maybe suggest a completion soon.
+        let after = self.windows.last().filter(|w| w.special.is_none() && w.term.is_none() && w.vim.is_none()).map(|w| (w.win.id, w.ed.doc.version));
+        if self.tab_complete && !self.from_agent && after.is_some() && after != before {
+            let (win, v) = after.unwrap();
+            self.last_edit = Some((Instant::now(), win, v));
+        } else if after != before {
+            self.last_edit = None;
         }
     }
 
@@ -1882,7 +2159,9 @@ impl Workbench {
                 VimOut::NotMine => {}
             }
         }
-        let shortcut = if k.is(Key::Char(' '), Mods::CTRL) {
+        let shortcut = if k.is_ctrl('l') {
+            Some("ai.chat")
+        } else if k.is(Key::Char(' '), Mods::CTRL) {
             Some("lsp.complete")
         } else if k.is(Key::F(12), Mods::NONE) {
             Some("go.definition")
@@ -2650,6 +2929,7 @@ impl App for Workbench {
         self.update_lsp();
         self.update_debug();
         self.update_guides();
+        self.update_ai(now);
         if let Some(rx) = &self.requests {
             let reqs: Vec<Request> = rx.try_iter().collect();
             for r in reqs {
@@ -2688,7 +2968,13 @@ impl App for Workbench {
         let msg_tick = self.message.as_ref().map(|(_, t)| *t + Duration::from_secs(4));
         let poll = self.requests.as_ref().map(|_| now + Duration::from_millis(50));
         // Terminals are read on ticks: ~60 a second while one is open.
-        let lsp_waiting = self.lsp.values().any(|c| c.waiting() > 0) || self.debug.is_some() || self.guides_fetching > 0;
+        let lsp_waiting = self.lsp.values().any(|c| c.waiting() > 0)
+            || self.debug.is_some()
+            || self.guides_fetching > 0
+            || self.fim_pending.is_some()
+            || self.chat_streaming.is_some()
+            || self.pending_question.is_some()
+            || self.last_edit.is_some();
         let term_tick = (any_term || self.hl_pending > 0 || lsp_waiting).then(|| now + Duration::from_millis(16));
         // Servers send diagnostics unasked: look a few times a second.
         let lsp_tick = (!self.lsp.is_empty()).then(|| now + Duration::from_millis(100));
@@ -3169,6 +3455,77 @@ mod tests {
         let d = wb.dialog.as_ref().expect("guide index");
         assert!(d.kind.starts_with("guides:"));
         assert!(d.kind.contains("rust") && d.kind.contains("python"));
+    }
+
+    /// A pretend model server: streamed chat, and Ollama-style FIM.
+    fn fake_model_server() -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for conn in l.incoming().flatten() {
+                let mut r = BufReader::new(conn.try_clone().unwrap());
+                let mut first = String::new();
+                r.read_line(&mut first).unwrap();
+                let mut len = 0;
+                loop {
+                    let mut h = String::new();
+                    r.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0; len];
+                r.read_exact(&mut body).unwrap();
+                let mut w = conn;
+                if first.contains("/v1/chat/completions") {
+                    let chunk = |t: &str| format!("data: {}\n\n", json!({"choices": [{"delta": {"content": t}}]}));
+                    let out = format!("{}{}{}data: [DONE]\n\n", chunk("Hello"), chunk(" <think>hmm</think>"), chunk("world"));
+                    let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len());
+                } else {
+                    let out = json!({"response": "println!(\"hi\");\n"}).to_string();
+                    let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len());
+                }
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn ai_chat_streams_and_tab_completion_ghosts() {
+        let addr = fake_model_server();
+        let mut wb = bench();
+        wb.set_ai(Ai::with_models(vec![ai::Model {
+            provider: "ollama-test".into(),
+            name: "test-model".into(),
+            base: format!("http://{addr}/v1"),
+            key: None,
+            loaded: true,
+            fim: true,
+            chat: true,
+        }]));
+        // Chat: the answer streams into the AI Chat window, thinking left out.
+        wb.ask("what does this do?");
+        wait_until(&mut wb, "chat answer", |wb| wb.chat_streaming.is_none());
+        let chat = wb.windows.iter().find(|w| w.special == Some("chat")).unwrap().ed.doc.rope.to_string();
+        assert!(chat.contains("## You\n\nwhat does this do?"), "{chat}");
+        assert!(chat.contains("Hello world"), "{chat}");
+        assert_eq!(wb.chat_history.last().unwrap().content, "Hello world");
+
+        // Tab completion: a person types, pauses, and a ghost appears; Tab takes it.
+        let ed = wb.windows.iter().position(|w| w.special.is_none()).unwrap();
+        let w = wb.windows.remove(ed);
+        wb.windows.push(w);
+        for c in "fn main() { ".chars() {
+            wb.key(KeyEvent::plain(Key::Char(c)));
+        }
+        wait_until(&mut wb, "ghost text", |wb| wb.windows.last().unwrap().ed.ghost.is_some());
+        assert_eq!(wb.windows.last().unwrap().ed.ghost.as_deref(), Some("println!(\"hi\");"));
+        wb.key(KeyEvent::plain(Key::Tab));
+        assert_eq!(wb.windows.last().unwrap().ed.doc.line(0), "fn main() { println!(\"hi\");");
     }
 
     #[test]

@@ -118,6 +118,10 @@ fn main() {
     if args.demo {
         wb.run_command("agent.demo");
     }
+    // AI models: hearth's hub when it's installed (TURBINE_AI_HUB=0 skips it).
+    if !args.headless || std::env::var("TURBINE_AI").is_ok() {
+        wb.start_ai();
+    }
 
     if args.headless {
         wb.event(Event::Resize(args.size.0, args.size.1));

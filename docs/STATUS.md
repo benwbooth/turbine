@@ -38,8 +38,13 @@
 | System clipboard from terminal mode via OSC 52 (editor and terminal copies) | done |
 | Terminal: find, OSC 133 marks, images, split terminals, event-driven wakeups (now ~60 Hz ticks while open) | planned |
 | WASI extension host (wasmtime, `wit/turbine.wit`) | interface drafted |
-| AI providers, tab completion, assistant, agent tools | planned |
-| hearth AI hub provider + MCP server for hearth's assistant | planned |
+| AI service: hearth AI hub (hearth-ai JSON lines: models, loaded state, load through the hub's VRAM arbiter) or a local Ollama / `TURBINE_AI_URL` | done |
+| AI Chat (Ctrl+L): streams the answer into a Markdown window, with the selection or nearby code as context; reasoning (<think>) dropped | done (live-tested with the hub and qwen3.5:4b) |
+| Tab completion: fill-in-the-middle model (e.g. qwen2.5-coder base) after a 350 ms pause, dim ghost text, Tab accepts; AI > Tab Completion toggles | done (tested with a fake server; not yet live) |
+| AI > Models: pick the chat model | done |
+| Assistant as an agent with tools (driving Turbine's UI visibly), inline edit (Ctrl+K), Claude/Codex/Gemini via the hub's CLIs, MCP server for hearth's assistant | planned |
+| hearth AI hub as model provider | done |
+| MCP server so hearth's assistant can drive Turbine | planned |
 | Docs service: Tessera's ~230 language guides fetched from official sites, converted to Markdown, kept offline (turbine/guides) | done |
 | Help windows (read-only, Markdown highlighting): F1 guide for the file's language, Shift+F1 index, Download All Guides | done |
 | QBasic-style rendered help with links (<Contents> <Index> <Back>), search across guides | planned |
