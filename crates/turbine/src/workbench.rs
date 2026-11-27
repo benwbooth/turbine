@@ -927,7 +927,7 @@ impl Workbench {
         }
         let program = match lang.as_str() {
             "rust" => {
-                let name = std::fs::read_to_string(root.join("main.rs"))
+                let name = std::fs::read_to_string(root.join("Cargo.toml"))
                     .ok()
                     .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("name").map(|r| r.trim_start_matches([' ', '=']).trim().trim_matches('"').to_string())))
                     .unwrap_or_else(|| "main".into());
@@ -5140,7 +5140,7 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../extensions/hello");
         let st = std::process::Command::new(env!("CARGO"))
             .args(["build", "--quiet", "--release", "--target", "wasm32-unknown-unknown", "--manifest-path"])
-            .arg(root.join("main.rs"))
+            .arg(root.join("Cargo.toml"))
             .status()
             .unwrap();
         assert!(st.success());
