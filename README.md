@@ -78,13 +78,18 @@ comes back once the action has finished on screen.
   cells, so it works inside terminal mode too. It speaks the kitty keyboard
   protocol to programs, does bracketed paste and scrollback, and uses the DOS
   16-colour palette. Every key goes to the program except F10 (menus),
-  Alt+F3 (close) and Alt+0..9 (windows).
+  Alt+F3 (close) and Alt+0..9 (windows). Mouse clicks go to programs that
+  ask for them (hold Shift to select instead); otherwise drag selects
+  (double-click a word, triple-click a line, Alt for a block) and copies.
+  Ctrl+Shift+C/V or Ctrl/Shift+Insert copy and paste, and a middle click
+  pastes. Copies reach your system clipboard (OSC 52), even over SSH.
 - The automation socket, plus `--headless --script` for tests and screenshots
 
 The plan covers much more: LSP, DAP, tree-sitter, an embedded terminal
 WASI extensions, Emacs and VS Code keymaps, AI completion and an
 assistant, hearth AI hub integration, a global menu, desktop and web front
-ends, and retro platforms. See [docs/DESIGN.md](docs/DESIGN.md) and
+ends (a cxx-qt Qt app and a Leptos web app, no JavaScript), and retro
+platforms. See [docs/DESIGN.md](docs/DESIGN.md) and
 [docs/STATUS.md](docs/STATUS.md).
 
 ## Build

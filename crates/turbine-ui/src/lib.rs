@@ -30,4 +30,8 @@ pub trait App {
     fn tick(&mut self, now: Instant) -> Option<Instant>;
     fn render(&mut self, surface: &mut Surface);
     fn should_quit(&self) -> bool;
+    /// Text the app copied, for the system clipboard (taken once).
+    fn take_clipboard(&mut self) -> Option<String> {
+        None
+    }
 }

@@ -33,7 +33,7 @@ This document is the plan. `docs/STATUS.md` tracks what exists.
                +-------------------------------------------------+
                |                 turbine (binary)                |
                +-------------------------------------------------+
-   front ends  | turbine-tui | turbine-app (winit+wgpu) | web     |
+   front ends  | turbine-tui | turbine-app (cxx-qt)  | turbine-web (Leptos) |
                +-------------+--------------------------+---------+
                |           turbine-ui  (widgets, layout,         |
                |           themes, input, automation tree)       |
@@ -55,13 +55,22 @@ last one and draw what changed.
 - **TUI** writes the changes with crossterm (truecolor, falling back to 256
   and 16 colours, and to CP437/ASCII line drawing on terminals that can't
   show box characters).
-- **App** draws cells with a real font on the GPU (winit + wgpu, glyphon for
-  shaping). Because it owns the pixels it can do what a terminal can't:
-  half-cell smooth scrolling, sub-cell mouse positions, a pixel-perfect VGA
-  font option, images in cells, fractional scaling without blur.
-- **Web** compiles the same core to `wasm32` and draws cells to a canvas.
-  A second web mode, `turbine serve`, runs the editor on a machine and
-  streams surface diffs over a WebSocket to a thin page (remote editing).
+- **App** is a Qt Quick application written in Rust with **cxx-qt**, like
+  Tessera and Grove. A C++ `QQuickItem` paints the cell rows with QPainter
+  (native FreeType text: `NativeTextRendering` and the 0.001 px nudge from
+  the first commit) into textures, the way Tessera paints terminal rows.
+  Because it owns the pixels it can do what a terminal can't: smooth
+  scrolling, sub-cell mouse positions, a pixel-perfect VGA font option,
+  images in cells, fractional scaling without blur. Qt gives it native
+  menus, so hearth's global menu, macOS's menu bar and Windows all come from
+  Qt's own platform menu support.
+- **Web** is a **Leptos** app compiled to `wasm32`: the same core runs in
+  the browser and Leptos components draw the surface (rows of styled spans,
+  or a `<canvas>` through `web-sys`). **No hand-written JavaScript**, here
+  or anywhere in Turbine; the only JS is the loader `wasm-bindgen`
+  generates. A second mode, `turbine serve`, runs the editor on a machine
+  (a Leptos server, with server functions) and streams surface diffs to the
+  page over a WebSocket, for remote editing.
 
 Cell content is a grapheme cluster, not a `char`, so combining marks, emoji
 ZWJ sequences and East Asian wide characters all take the right number of
@@ -179,8 +188,10 @@ described by `wit/turbine.wit`, hosted with `wasmtime`. An extension can:
 - read and edit documents through the host's text API
 
 Capabilities are explicit (filesystem roots, network, process spawn) and
-shown when an extension is installed. In the web build, components run on
-the browser's own WebAssembly engine (transpiled with `jco`).
+shown when an extension is installed. In the web build (no JavaScript, so
+no `jco` transpiling) components run in a Rust WebAssembly interpreter
+(`wasmi`) inside Turbine's own wasm module, or on the server with
+`turbine serve`.
 
 Built-in features use the same interface compiled natively, so moving a
 feature into or out of the core never changes its API.
@@ -271,12 +282,14 @@ no feature an agent can use that a person can't, and vice versa.
 
 ### Global menu (hearth, macOS, Windows)
 
-The menu bar is a data model (`MenuModel`), not just drawing. The app front
-end exports it over D-Bus as `com.canonical.dbusmenu` and registers the
-window with `com.canonical.AppMenu.Registrar`, so hearth/arbor show it in
-the global menu bar; on macOS it becomes the native NSMenu and on Windows
-the in-window menu stays (via `muda` for the non-Linux cases). The in-window
-DOS menu bar can be hidden when a global menu is present.
+The menu bar is a data model (`MenuModel`), not just drawing. The Qt app
+builds native menus from it (Qt.labs.platform `MenuBar`, as Tessera does);
+Qt exports them over D-Bus as `com.canonical.dbusmenu` and registers the
+window with `com.canonical.AppMenu.Registrar`, so hearth/arbor show them in
+the global menu bar. On macOS they become the native menu bar; on Windows
+the in-window DOS menu stays. The in-window DOS menu bar can be hidden when
+a global menu is present. In terminal mode inside Tessera, the same model
+could be offered to Tessera's menus later.
 
 ### Configuration
 
@@ -315,5 +328,5 @@ docs/            design and status
 The binary also holds the workbench (`workbench.rs`), the agent driver
 (`agent.rs`) and the automation socket (`server.rs`) for now.
 
-Planned crates: `turbine-term`, `turbine-ext`, `turbine-lsp`,
+Planned crates: `turbine-app` (cxx-qt), `turbine-web` (Leptos), `turbine-term`, `turbine-ext`, `turbine-lsp`,
 `turbine-dap`, `turbine-ai`, `turbine-app`, `turbine-web`.

@@ -1,8 +1,8 @@
 //! The terminal drawn as a Turbine view.
 
-use crate::terminal::{CellStyle, CursorShape as TermCursor, KeyInput, Spawn, Terminal};
+use crate::terminal::{CellStyle, CursorShape as TermCursor, KeyInput, MouseAct, MouseOutcome, Spawn, Terminal};
 use libghostty_vt::key::{Key as GKey, Mods as GMods};
-use turbine_ui::event::{Key, KeyEvent, KeyKind, MouseEvent, MouseKind};
+use turbine_ui::event::{Button, Key, KeyEvent, KeyKind, Mods, MouseEvent, MouseKind};
 use turbine_ui::theme::{Attrs, Color, Style, Theme};
 use turbine_ui::{Canvas, CursorShape, Point, Rect};
 
@@ -71,14 +71,51 @@ impl TerminalView {
         true
     }
 
-    pub fn handle_mouse(&mut self, ev: &MouseEvent) -> bool {
-        let Ok(t) = &mut self.term else { return false };
-        match ev.kind {
-            MouseKind::ScrollUp => t.scroll(-3),
-            MouseKind::ScrollDown => t.scroll(3),
-            _ => return false,
+    /// A mouse event in screen coordinates (the view knows where it is).
+    pub fn handle_mouse(&mut self, ev: &MouseEvent) -> MouseOutcome {
+        let Ok(t) = &mut self.term else { return MouseOutcome::Ignored };
+        let b = |b: Button| match b {
+            Button::Left => 1,
+            Button::Right => 2,
+            Button::Middle => 3,
+        };
+        let act = match ev.kind {
+            MouseKind::Down(x) => MouseAct::Press(b(x)),
+            MouseKind::Up(x) => MouseAct::Release(b(x)),
+            MouseKind::Drag(_) | MouseKind::Moved => MouseAct::Motion,
+            MouseKind::ScrollUp => MouseAct::Wheel { up: true },
+            MouseKind::ScrollDown => MouseAct::Wheel { up: false },
+        };
+        t.mouse(act, ev.pos.x - self.area.x, ev.pos.y - self.area.y, gmods(ev.mods))
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.term.as_ref().ok().filter(|t| t.has_selection()).map(|t| t.selected_text().to_string())
+    }
+
+    pub fn select_all(&mut self) {
+        if let Ok(t) = &mut self.term {
+            t.select_all();
         }
-        true
+    }
+
+    pub fn clear_selection(&mut self) {
+        if let Ok(t) = &mut self.term {
+            t.clear_selection();
+        }
+    }
+
+    /// Place the view (and size the terminal) without drawing.
+    pub fn layout(&mut self, area: Rect) {
+        self.area = area;
+        if let Ok(t) = &mut self.term {
+            t.resize(area.w.max(2) as u16, area.h.max(1) as u16);
+        }
+    }
+
+    /// Where the view is on screen.
+    pub fn area(&self) -> Rect {
+        self.area
     }
 
     pub fn draw(&mut self, c: &mut Canvas, area: Rect, theme: &Theme, focused: bool) {
@@ -94,8 +131,10 @@ impl TerminalView {
         };
         t.resize(area.w.max(2) as u16, area.h.max(1) as u16);
         let mut c = c.sub(area);
+        let sel = theme.scheme.editor_selection;
         let cursor = t.render(|x, y, g, _w, st| {
-            c.print(area.x + x as i32, area.y + y as i32, g, style(st, base));
+            let s = if st.selected { sel } else { style(st, base) };
+            c.print(area.x + x as i32, area.y + y as i32, g, s);
         });
         if focused {
             if let Some((x, y, shape)) = cursor {
@@ -167,20 +206,25 @@ fn char_key(c: char) -> (GKey, Option<char>) {
     (k, Some(u))
 }
 
-pub fn key_input(ev: &KeyEvent) -> KeyInput {
+fn gmods(m: Mods) -> GMods {
     let mut mods = GMods::empty();
-    if ev.mods.shift {
+    if m.shift {
         mods |= GMods::SHIFT;
     }
-    if ev.mods.ctrl {
+    if m.ctrl {
         mods |= GMods::CTRL;
     }
-    if ev.mods.alt {
+    if m.alt {
         mods |= GMods::ALT;
     }
-    if ev.mods.meta {
+    if m.meta {
         mods |= GMods::SUPER;
     }
+    mods
+}
+
+pub fn key_input(ev: &KeyEvent) -> KeyInput {
+    let mut mods = gmods(ev.mods);
     let special = |k: GKey| KeyInput { key: k, mods, text: None, unshifted: None };
     match ev.key {
         Key::Char(c) => {

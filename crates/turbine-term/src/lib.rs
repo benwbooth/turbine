@@ -8,5 +8,5 @@
 pub mod terminal;
 pub mod view;
 
-pub use terminal::{Spawn, Terminal};
+pub use terminal::{MouseAct, MouseOutcome, Spawn, Terminal};
 pub use view::TerminalView;

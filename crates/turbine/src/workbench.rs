@@ -3,7 +3,7 @@
 
 use crate::agent::{Driver, Output, Step};
 use crate::vim::{self, Keymap};
-use turbine_term::{Spawn, TerminalView};
+use turbine_term::{MouseOutcome, Spawn, TerminalView};
 use turbine_vi::{ExAction, Out as VimOut, Session};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -65,6 +65,8 @@ pub struct Workbench {
     keymap: Keymap,
     /// True while applying an agent's input (it types literal text).
     from_agent: bool,
+    /// Copied text for the system clipboard (the front end takes it).
+    clipboard_out: Option<String>,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -305,6 +307,7 @@ impl Workbench {
             last_click: None,
             keymap: Keymap::Cua,
             from_agent: false,
+            clipboard_out: None,
         };
         for f in files {
             wb.open_path(f);
@@ -380,6 +383,15 @@ impl Workbench {
         }
         self.windows.push(ew);
         self.renumber();
+    }
+
+    /// Put text on Turbine's clipboard and the system's.
+    fn copy(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.clipboard_out = Some(text.clone());
+        self.clipboard = text;
     }
 
     /// A terminal window running the user's shell (or `argv`).
@@ -465,11 +477,32 @@ impl Workbench {
                     "edit.paste" => 'v',
                     _ => 'a',
                 };
+                if let Some(t) = self.windows.last_mut().and_then(|w| w.term.as_mut()) {
+                    match k {
+                        'c' | 'x' => {
+                            if let Some(s) = t.selected_text() {
+                                self.copy(s);
+                            }
+                        }
+                        'v' => {
+                            let c = self.clipboard.clone();
+                            t.paste(&c);
+                        }
+                        'a' => t.select_all(),
+                        _ => {}
+                    }
+                    return;
+                }
+                let before = self.clipboard.clone();
                 let mut clip = std::mem::take(&mut self.clipboard);
                 if let Some(w) = self.active() {
                     w.ed.handle_key(&KeyEvent::new(Key::Char(k), Mods::CTRL), &mut clip);
                 }
-                self.clipboard = clip;
+                if clip != before {
+                    self.copy(clip);
+                } else {
+                    self.clipboard = clip;
+                }
             }
             "search.goto" => {
                 let d = Dialog::new("goto", "Go to Line", 36, 8)
@@ -906,7 +939,21 @@ impl Workbench {
             if from_agent && k.key == Key::Enter {
                 k.mods = Mods::NONE;
             }
-            w.term.as_mut().unwrap().handle_key(&k);
+            let t = w.term.as_mut().unwrap();
+            // Copy and paste keys (Ctrl+C itself belongs to the program).
+            let ch = |c: char| matches!(k.key, Key::Char(x) if x.eq_ignore_ascii_case(&c));
+            let copy = (k.mods.ctrl && k.mods.shift && ch('c')) || k.is(Key::Insert, Mods::CTRL);
+            let paste = (k.mods.ctrl && k.mods.shift && ch('v')) || k.is(Key::Insert, Mods::SHIFT);
+            if copy {
+                if let Some(s) = t.selected_text() {
+                    self.copy(s);
+                }
+            } else if paste {
+                let c = self.clipboard.clone();
+                t.paste(&c);
+            } else {
+                t.handle_key(&k);
+            }
             return;
         }
         match self.menubar.handle_key(&k) {
@@ -971,11 +1018,16 @@ impl Workbench {
         if vim_on && !matches!(k.key, Key::PageUp | Key::PageDown) {
             return;
         }
+        let before = self.clipboard.clone();
         let mut clip = std::mem::take(&mut self.clipboard);
         if let Some(w) = self.windows.last_mut() {
             w.ed.handle_key(&k, &mut clip);
         }
-        self.clipboard = clip;
+        if clip != before {
+            self.copy(clip);
+        } else {
+            self.clipboard = clip;
+        }
     }
 
     /// What vim's ex commands ask of Turbine: files and windows.
@@ -1217,13 +1269,39 @@ impl Workbench {
             return;
         }
         if let Some(i) = self.selecting {
+            let done = !matches!(m.kind, MouseKind::Drag(_) | MouseKind::Moved);
             if i < self.windows.len() {
-                self.windows[i].ed.handle_mouse(&m);
+                if let Some(t) = &mut self.windows[i].term {
+                    t.handle_mouse(&m);
+                    // Copy on select, as X terminals do.
+                    if done {
+                        if let Some(s) = t.selected_text() {
+                            self.copy(s);
+                        }
+                    }
+                } else {
+                    self.windows[i].ed.handle_mouse(&m);
+                }
             }
-            if !matches!(m.kind, MouseKind::Drag(_)) {
+            if done {
                 self.selecting = None;
             }
             return;
+        }
+        // Other buttons and motion over the active terminal go to it (programs
+        // that track the mouse, and middle-click paste).
+        if let Some(w) = self.windows.last_mut() {
+            if let Some(t) = &mut w.term {
+                let inside = w.win.inner().contains(m.pos);
+                let other = matches!(m.kind, MouseKind::Down(Button::Right | Button::Middle) | MouseKind::Up(_) | MouseKind::Moved);
+                if inside && other {
+                    if t.handle_mouse(&m) == MouseOutcome::PasteRequest {
+                        let c = self.clipboard.clone();
+                        t.paste(&c);
+                    }
+                    return;
+                }
+            }
         }
         if m.pos.y == self.size.1 - 1 {
             if let MouseKind::Down(Button::Left) = m.kind {
@@ -1266,7 +1344,13 @@ impl Workbench {
                             w.ed.cursor = w.ed.doc.rope.line_to_char(line.min(w.ed.doc.len_lines().saturating_sub(1)));
                         }
                     }
-                    Hit::Inside if w.term.is_some() => {}
+                    Hit::Inside if w.term.is_some() => {
+                        let t = w.term.as_mut().unwrap();
+                        let out = t.handle_mouse(&m);
+                        if out == MouseOutcome::Selection || out == MouseOutcome::Reported {
+                            self.selecting = Some(i);
+                        }
+                    }
                     Hit::Inside => {
                         if w.ed.handle_mouse(&m) {
                             self.selecting = Some(i);
@@ -1281,7 +1365,8 @@ impl Workbench {
                 m2.pos = w.win.inner().center();
                 match &mut w.term {
                     Some(t) => {
-                        t.handle_mouse(&m2);
+                        // At the pointer: programs that track the mouse want where.
+                        t.handle_mouse(&m);
                     }
                     None => {
                         w.ed.handle_mouse(&m2);
@@ -1588,6 +1673,7 @@ impl App for Workbench {
         for w in &mut self.windows {
             if let Some(t) = &mut w.term {
                 any_term = true;
+                t.layout(w.win.inner());
                 if t.pump() {
                     w.term_text = t.screen_text();
                     w.win.title = t.title().unwrap_or_else(|| "Terminal".into());
@@ -1738,6 +1824,10 @@ impl App for Workbench {
     fn should_quit(&self) -> bool {
         self.quit
     }
+
+    fn take_clipboard(&mut self) -> Option<String> {
+        self.clipboard_out.take()
+    }
 }
 
 #[cfg(test)]
@@ -1878,6 +1968,67 @@ mod tests {
         let mut surf = Surface::new(100, 30);
         wb.render(&mut surf);
         assert!(surf.to_text().contains("turbine-42"), "{}", surf.to_text());
+    }
+
+    #[test]
+    fn terminal_drag_selects_and_copies() {
+        let mut wb = bench();
+        wb.new_terminal(vec!["sh".into(), "-c".into(), "printf 'alpha beta gamma\\n'; exec cat".into()]);
+        let start = Instant::now();
+        let mut surf = Surface::new(100, 30);
+        let (x0, y) = loop {
+            wb.tick(Instant::now());
+            wb.render(&mut surf);
+            let text = surf.to_text();
+            if let Some((row, line)) = text.lines().enumerate().find(|(_, l)| l.contains("alpha beta")) {
+                break (line.chars().take_while(|_| true).collect::<String>().find("alpha").map(|b| line[..b].chars().count()).unwrap() as i64, row as i64);
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "no output: {text}");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Drag from "beta" to the end of "gamma".
+        let r = run(&mut wb, json!({"cmd": "drag", "from": [x0 + 6, y], "to": [x0 + 15, y]}));
+        assert_eq!(r["ok"], true);
+        assert_eq!(wb.clipboard, "beta gamma");
+        assert_eq!(wb.clipboard_out.as_deref(), Some("beta gamma"));
+        // Shift+Insert pastes it back into the program (cat echoes it).
+        run(&mut wb, json!({"cmd": "key", "key": "Shift+Insert"}));
+        let start = Instant::now();
+        loop {
+            wb.tick(Instant::now());
+            if wb.windows.last().unwrap().term_text.matches("beta gamma").count() >= 2 {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "{}", wb.windows.last().unwrap().term_text);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn terminal_reports_clicks_to_programs_that_ask() {
+        let mut wb = bench();
+        let script = "printf '\\033[?1000h\\033[?1006hready\\n'; stty -icanon -echo; exec cat -v";
+        wb.new_terminal(vec!["sh".into(), "-c".into(), script.into()]);
+        let start = Instant::now();
+        while !wb.windows.last().unwrap().term_text.contains("ready") {
+            wb.tick(Instant::now());
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100)); // let stty run
+        let inner = wb.windows.last().unwrap().win.inner();
+        run(&mut wb, json!({"cmd": "click", "x": inner.x + 4, "y": inner.y + 2}));
+        let start = Instant::now();
+        loop {
+            wb.tick(Instant::now());
+            let t = &wb.windows.last().unwrap().term_text;
+            if t.contains("^[[<0;5;3M") && t.contains("^[[<0;5;3m") {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "{t}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(wb.clipboard.is_empty(), "a reported click doesn't select");
     }
 
     #[test]

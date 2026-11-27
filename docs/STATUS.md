@@ -26,13 +26,15 @@
 | DAP client | planned |
 | Embedded terminal (turbine-term: libghostty-vt on a PTY; works in TUI mode too) | done |
 | Terminal: kitty/xterm key encoding, bracketed paste, wheel scrollback, DOS palette, title, restart on Enter after exit | done |
-| Terminal: mouse reporting, selection/copy, find, OSC 133 marks, images, split terminals, event-driven wakeups (now ~60 Hz ticks while open) | planned |
+| Terminal: mouse reporting (any mode Ghostty encodes), selection (drag, double-click word, triple-click line, Alt for a block), copy on select, Ctrl+Shift+C/V, Ctrl/Shift+Ins, middle-click paste, wheel = arrows in full-screen programs | done |
+| System clipboard from terminal mode via OSC 52 (editor and terminal copies) | done |
+| Terminal: find, OSC 133 marks, images, split terminals, event-driven wakeups (now ~60 Hz ticks while open) | planned |
 | WASI extension host (wasmtime, `wit/turbine.wit`) | interface drafted |
 | AI providers, tab completion, assistant, agent tools | planned |
 | hearth AI hub provider + MCP server for hearth's assistant | planned |
 | Markdown help window, language guides download | planned |
 | File viewers (hex, images, tables, archives, PDF) | planned |
-| Desktop app (winit + wgpu) with dbusmenu global menu | planned |
-| Web front end (wasm canvas) and `turbine serve` | planned |
+| Desktop app: cxx-qt Qt Quick, QPainter cell rows, native menus (global menu via Qt's dbusmenu) | planned |
+| Web front end: Leptos (wasm, no hand-written JS) and `turbine serve` (Leptos server) | planned |
 | Windows 9x (rust9x) TUI build; DOS / Win 3.1 thin clients | planned |
 | Settings file + Settings dialog | planned |

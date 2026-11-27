@@ -179,6 +179,13 @@ impl Terminal {
         Ok(())
     }
 
+    /// Put text on the system clipboard through the terminal (OSC 52), so a
+    /// copy in Turbine reaches the desktop even over SSH.
+    pub fn set_clipboard(&mut self, text: &str) -> io::Result<()> {
+        write!(self.out, "\x1b]52;c;{}\x07", base64(text.as_bytes()))?;
+        self.out.flush()
+    }
+
     /// Wait up to `timeout` for input; returns every event that arrived.
     pub fn poll(&mut self, timeout: Duration) -> io::Result<Vec<Event>> {
         let mut evs = Vec::new();
@@ -318,8 +325,40 @@ pub fn run(app: &mut dyn App) -> io::Result<()> {
         if app.should_quit() {
             return Ok(());
         }
+        if let Some(text) = app.take_clipboard() {
+            term.set_clipboard(&text)?;
+        }
         surface.cursor = None;
         app.render(&mut surface);
         term.draw(&surface)?;
+    }
+}
+
+/// Base64 for OSC 52 (no dependency for 20 lines).
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn base64_matches_rfc4648() {
+        assert_eq!(super::base64(b""), "");
+        assert_eq!(super::base64(b"f"), "Zg==");
+        assert_eq!(super::base64(b"fo"), "Zm8=");
+        assert_eq!(super::base64(b"foobar"), "Zm9vYmFy");
     }
 }

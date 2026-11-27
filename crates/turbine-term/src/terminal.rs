@@ -5,14 +5,20 @@
 //! feeds it to the engine, as often as the host ticks.
 
 use libghostty_vt::{
-    key,
+    fmt::{Format, Formatter, FormatterOptions},
+    key, mouse,
     paste,
     render::{CellIterator, CursorVisualStyle, RenderState, RowIterator},
-    screen::CellWide,
+    screen::{CellWide, Screen},
+    selection::{
+        gesture::{Behavior, Behaviors, DragEvent, Geometry, Gesture, PressEvent, ReleaseEvent},
+        Selection,
+    },
     style::{RgbColor, Underline},
-    terminal::{Mode, Options, ScrollViewport},
+    terminal::{Mode, Options, Point, PointCoordinate, ScrollViewport},
     Terminal as VtTerminal,
 };
+use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::cell::RefCell;
 use std::io::{Read, Write};
@@ -33,7 +39,39 @@ pub struct CellStyle {
     pub underline: bool,
     pub inverse: bool,
     pub faint: bool,
+    /// Inside the mouse selection.
+    pub selected: bool,
 }
+
+/// A mouse action on the terminal, in cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseAct {
+    /// Button 1 left, 2 right, 3 middle.
+    Press(u8),
+    Release(u8),
+    /// Pointer moved (with or without buttons held).
+    Motion,
+    Wheel { up: bool },
+}
+
+/// What a mouse action did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseOutcome {
+    /// Sent to the program (it asked for mouse reports).
+    Reported,
+    /// Started, extended or finished a selection.
+    Selection,
+    /// Scrolled the scrollback (or sent arrows to a full-screen program).
+    Scrolled,
+    /// Middle click: the host should paste its clipboard.
+    PasteRequest,
+    Ignored,
+}
+
+/// Cells are given to the engine as 8×16 "pixels", so pixel-based mouse
+/// reports and click-distance thresholds still make sense on a cell grid.
+const CW: u32 = 8;
+const CH: u32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorShape {
@@ -91,6 +129,20 @@ pub struct Terminal {
     cells_it: CellIterator<'static>,
     key_enc: key::Encoder<'static>,
     key_ev: key::Event<'static>,
+    mouse_enc: mouse::Encoder<'static>,
+    mouse_ev: mouse::Event<'static>,
+    gesture: Gesture<'static>,
+    press: PressEvent<'static>,
+    release: ReleaseEvent<'static>,
+    drag: DragEvent<'static>,
+    t0: Instant,
+    /// Buttons held (bit 1 left, 2 right, 3 middle).
+    buttons: u8,
+    selecting: bool,
+    /// Where the selection started (col, row), to know the drag direction.
+    press_at: (u16, u32),
+    last_motion: Vec<u8>,
+    selected: String,
     /// What the engine wants written back to the program (query replies).
     outbox: Rc<RefCell<Vec<u8>>>,
     master: Box<dyn MasterPty + Send>,
@@ -188,6 +240,27 @@ impl Terminal {
             cells_it: CellIterator::new().map_err(err)?,
             key_enc: key::Encoder::new().map_err(err)?,
             key_ev: key::Event::new().map_err(err)?,
+            mouse_enc: mouse::Encoder::new().map_err(err)?,
+            mouse_ev: mouse::Event::new().map_err(err)?,
+            gesture: Gesture::new().map_err(err)?,
+            press: {
+                let mut p = PressEvent::new().map_err(err)?;
+                p.set_repeat_interval(Duration::from_millis(500)).map_err(err)?;
+                let b = Behaviors::new()
+                    .with_single_click_behavior(Behavior::Cell)
+                    .with_double_click_behavior(Behavior::Word)
+                    .with_triple_click_behavior(Behavior::Line);
+                p.set_behaviors(&b).map_err(err)?;
+                p
+            },
+            release: ReleaseEvent::new().map_err(err)?,
+            drag: DragEvent::new().map_err(err)?,
+            t0: Instant::now(),
+            buttons: 0,
+            selecting: false,
+            press_at: (0, 0),
+            last_motion: Vec::new(),
+            selected: String::new(),
             outbox,
             master: pair.master,
             writer,
@@ -270,6 +343,178 @@ impl Terminal {
         self.changed = true;
     }
 
+    /// The selected text (empty when nothing is selected).
+    pub fn selected_text(&self) -> &str {
+        &self.selected
+    }
+
+    pub fn has_selection(&self) -> bool {
+        !self.selected.is_empty()
+    }
+
+    pub fn clear_selection(&mut self) {
+        if !self.selected.is_empty() {
+            let _ = self.term.set_selection(None);
+            self.selected.clear();
+            self.changed = true;
+        }
+    }
+
+    /// Select everything (screen and scrollback).
+    pub fn select_all(&mut self) {
+        if let Ok(Some(sel)) = self.term.select_all() {
+            let _ = self.term.set_selection(Some(&sel));
+            self.selected = format_selection(&self.term, &sel);
+            self.changed = true;
+        }
+    }
+
+    /// True when the program asked for mouse reports.
+    pub fn wants_mouse(&self) -> bool {
+        self.term.is_mouse_tracking().unwrap_or(false)
+    }
+
+    /// A mouse action at cell (col, row) of the screen. Shift (or a program
+    /// that doesn't track the mouse) means the action selects text.
+    pub fn mouse(&mut self, act: MouseAct, col: i32, row: i32, mods: key::Mods) -> MouseOutcome {
+        let (cols, rows) = (self.cols as i32, self.rows as i32);
+        let cx = col.clamp(0, cols - 1) as u16;
+        let cy = row.clamp(0, rows - 1) as u32;
+        let (x, y) = (cx as f32 * CW as f32 + CW as f32 / 2.0, cy as f32 * CH as f32 + CH as f32 / 2.0);
+        match act {
+            MouseAct::Press(b) if (1..4).contains(&b) => self.buttons |= 1 << b,
+            MouseAct::Release(b) if (1..4).contains(&b) => self.buttons &= !(1 << b),
+            _ => {}
+        }
+        let report = self.wants_mouse() && !mods.contains(key::Mods::SHIFT) && !self.selecting;
+
+        if let MouseAct::Wheel { up } = act {
+            if !report {
+                if matches!(self.term.active_screen(), Ok(Screen::Alternate)) {
+                    // Full-screen programs scroll with arrow keys (alternate scroll).
+                    let app = self.term.mode(Mode::DECCKM).unwrap_or(false);
+                    let seq: &[u8] = match (up, app) {
+                        (true, false) => b"\x1b[A",
+                        (false, false) => b"\x1b[B",
+                        (true, true) => b"\x1bOA",
+                        (false, true) => b"\x1bOB",
+                    };
+                    self.write(&seq.repeat(3));
+                } else {
+                    self.scroll(if up { -3 } else { 3 });
+                }
+                return MouseOutcome::Scrolled;
+            }
+        }
+
+        if report {
+            self.mouse_enc
+                .set_options_from_terminal(&self.term)
+                .set_size(mouse::EncoderSize {
+                    screen_width: self.cols as u32 * CW,
+                    screen_height: self.rows as u32 * CH,
+                    cell_width: CW,
+                    cell_height: CH,
+                    padding_top: 0,
+                    padding_bottom: 0,
+                    padding_left: 0,
+                    padding_right: 0,
+                })
+                .set_any_button_pressed(self.buttons != 0)
+                .set_track_last_cell(true);
+            let btn = |b: u8| match b {
+                1 => Some(mouse::Button::Left),
+                2 => Some(mouse::Button::Right),
+                3 => Some(mouse::Button::Middle),
+                _ => None,
+            };
+            let held = [1u8, 2, 3].into_iter().find(|b| self.buttons & (1 << b) != 0).and_then(btn);
+            let (actions, button): (&[mouse::Action], Option<mouse::Button>) = match act {
+                MouseAct::Press(b) => (&[mouse::Action::Press], btn(b)),
+                MouseAct::Release(b) => (&[mouse::Action::Release], btn(b)),
+                MouseAct::Motion => (&[mouse::Action::Motion], held),
+                MouseAct::Wheel { up } => (
+                    &[mouse::Action::Press, mouse::Action::Release],
+                    Some(if up { mouse::Button::Four } else { mouse::Button::Five }),
+                ),
+            };
+            self.mouse_ev.set_mods(mods).set_position(mouse::Position { x, y });
+            let mut out = Vec::new();
+            for &a in actions {
+                self.mouse_ev.set_action(a).set_button(button);
+                let _ = self.mouse_enc.encode_to_vec(&self.mouse_ev, &mut out);
+            }
+            if act == MouseAct::Motion {
+                if out == self.last_motion {
+                    return MouseOutcome::Reported;
+                }
+                self.last_motion = out.clone();
+            } else {
+                self.last_motion.clear();
+            }
+            self.write(&out);
+            return MouseOutcome::Reported;
+        }
+
+        if act == MouseAct::Press(3) {
+            return MouseOutcome::PasteRequest;
+        }
+        let point = Point::Viewport(PointCoordinate { x: cx, y: cy });
+        match act {
+            MouseAct::Press(1) => {
+                let Ok(grid) = self.term.grid_ref(point) else { return MouseOutcome::Ignored };
+                let elapsed = self.t0.elapsed();
+                let sel = self
+                    .press
+                    .set_repeat_distance(CW as f64)
+                    .and_then(|p| p.set_time(elapsed))
+                    .and_then(|p| p.set_position(x as f64, y as f64))
+                    .and_then(|p| p.apply(&mut self.gesture, &self.term, grid));
+                self.selecting = true;
+                self.press_at = (cx, cy);
+                if let Ok(sel) = sel {
+                    let _ = self.term.set_selection(sel.as_ref());
+                    self.selected = sel.map(|s| format_selection(&self.term, &s)).unwrap_or_default();
+                }
+                self.changed = true;
+                MouseOutcome::Selection
+            }
+            MouseAct::Motion if self.selecting => {
+                // Dragging past the top or bottom scrolls.
+                if row < 0 {
+                    self.term.scroll_viewport(ScrollViewport::Delta(-1));
+                } else if row >= rows {
+                    self.term.scroll_viewport(ScrollViewport::Delta(1));
+                }
+                let Ok(grid) = self.term.grid_ref(point) else { return MouseOutcome::Ignored };
+                // The cell under the pointer counts as selected: put the point
+                // at its far edge in the drag's direction.
+                let forward = (cy, cx) >= (self.press_at.1, self.press_at.0);
+                let x = if forward { (cx as u32 * CW + CW - 1) as f32 } else { (cx as u32 * CW) as f32 };
+                let rect = mods.contains(key::Mods::ALT);
+                let geometry = Geometry { columns: cols as u32, cell_width: CW, padding_left: 0, screen_height: rows as u32 * CH };
+                let sel = self
+                    .drag
+                    .set_rectangle(rect)
+                    .and_then(|d| d.set_position(x as f64, y as f64))
+                    .and_then(|d| d.apply(&mut self.gesture, &self.term, grid, geometry));
+                if let Ok(sel) = sel {
+                    let _ = self.term.set_selection(sel.as_ref());
+                    self.selected = sel.as_ref().map(|s| format_selection(&self.term, s)).unwrap_or_default();
+                }
+                self.changed = true;
+                MouseOutcome::Selection
+            }
+            MouseAct::Release(1) if self.selecting => {
+                let grid = self.term.grid_ref(point).ok();
+                let _ = self.release.apply(&mut self.gesture, &self.term, grid);
+                self.selecting = false;
+                MouseOutcome::Selection
+            }
+            _ => MouseOutcome::Ignored,
+        }
+    }
+
     /// Encode a key the way the program asked (legacy, xterm modifyOtherKeys
     /// or the kitty keyboard protocol) and send it.
     pub fn key(&mut self, k: &KeyInput) {
@@ -295,6 +540,7 @@ impl Terminal {
         }
         if !out.is_empty() {
             self.term.scroll_viewport(ScrollViewport::Bottom);
+            self.clear_selection();
             self.write(&out);
         }
     }
@@ -359,6 +605,7 @@ impl Terminal {
                     let mut st = CellStyle {
                         fg: cell.fg_color().ok().flatten().map(rgb),
                         bg: cell.bg_color().ok().flatten().map(rgb),
+                        selected: cell.is_selected().unwrap_or(false),
                         ..Default::default()
                     };
                     if cell.has_styling().unwrap_or(false) {
@@ -410,4 +657,10 @@ impl Drop for Terminal {
             let _ = self.child.kill();
         }
     }
+}
+
+fn format_selection(term: &VtTerminal<'static, 'static>, sel: &Selection<'_>) -> String {
+    let opts = FormatterOptions::new().with_format(Format::Plain).with_selection(sel).with_trim(true).with_unwrap(true);
+    let Ok(mut f) = Formatter::new(term, opts) else { return String::new() };
+    f.format_alloc(None).map(|b| String::from_utf8_lossy(&b).trim_end_matches(['\n', '\r']).to_string()).unwrap_or_default()
 }
