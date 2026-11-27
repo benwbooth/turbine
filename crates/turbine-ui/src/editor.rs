@@ -83,6 +83,9 @@ pub struct EditorView {
     pub ghost: Option<String>,
     /// Overrides the cursor shape (vim's normal mode: a block).
     pub cursor_shape: Option<CursorShape>,
+    /// The cursor when inserting (a setting: block by default); typing
+    /// over (Insert) shows the other one.
+    pub insert_shape: CursorShape,
     /// Syntax highlighting per line: (start byte, end byte, kind index),
     /// later spans over earlier. May lag an edit by a moment.
     pub highlights: Vec<Vec<(u32, u32, u8)>>,
@@ -159,6 +162,7 @@ impl EditorView {
             base_rtl: None,
             ghost: None,
             cursor_shape: None,
+            insert_shape: CursorShape::Block,
             highlights: Vec::new(),
             diagnostics: Vec::new(),
             breakpoints: Vec::new(),
@@ -940,7 +944,8 @@ impl EditorView {
             let (crow, cx) = self.screen_place(cur_line, cur_col);
             let x = text_x + cx as i32;
             let y = area.y + if self.hidden(cur_line) { -1 } else { crow };
-            let shape = self.cursor_shape.unwrap_or(if self.overwrite { CursorShape::Block } else { CursorShape::Underline });
+            let other = if self.insert_shape == CursorShape::Block { CursorShape::Underline } else { CursorShape::Block };
+            let shape = self.cursor_shape.unwrap_or(if self.overwrite { other } else { self.insert_shape });
             c.set_cursor(Point::new(x, y), shape);
         }
     }

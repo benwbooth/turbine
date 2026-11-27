@@ -372,11 +372,9 @@ impl Workbench {
                             ("refresh", false) => "↻",
                             _ => "-",
                         };
-                        let row_st = if self.shell.explorer.list.selected == 0 && self.shell.focus == Focus::View(Tab::Explorer) {
-                            theme.scheme.menu_selected
-                        } else {
-                            theme.scheme.panel
-                        };
+                        // (In the row's own colours: the selection bar's or the
+                        // panel's, one background all along.)
+                        let row_st = c.style_at(r.x.saturating_sub(1), r.y).unwrap_or(theme.scheme.panel);
                         c.print(r.x, r.y, label, row_st);
                     }
                 }

@@ -70,6 +70,10 @@ private:
     QImage m_vgaImage;
     int m_cols = 0, m_rows = 0;
     QTimer m_timer;
+    // The cursor's blink: shown or not, switched every half second (and
+    // shown again at once on a key).
+    QTimer m_blink;
+    bool m_cursorOn = true;
     QString m_title, m_menusJson;
     int m_buttons = 0;
     QPoint m_lastCell { -1, -1 };

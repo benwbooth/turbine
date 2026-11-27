@@ -166,10 +166,13 @@ impl Terminal {
         }
         queue!(out, SetAttribute(Attribute::Reset))?;
         if let Some((p, shape)) = s.cursor {
-            let style = match shape {
-                CursorShape::Underline => cursor::SetCursorStyle::BlinkingUnderScore,
-                CursorShape::Block => cursor::SetCursorStyle::BlinkingBlock,
-                CursorShape::Bar => cursor::SetCursorStyle::BlinkingBar,
+            let style = match (shape, s.cursor_blink) {
+                (CursorShape::Underline, true) => cursor::SetCursorStyle::BlinkingUnderScore,
+                (CursorShape::Block, true) => cursor::SetCursorStyle::BlinkingBlock,
+                (CursorShape::Bar, true) => cursor::SetCursorStyle::BlinkingBar,
+                (CursorShape::Underline, false) => cursor::SetCursorStyle::SteadyUnderScore,
+                (CursorShape::Block, false) => cursor::SetCursorStyle::SteadyBlock,
+                (CursorShape::Bar, false) => cursor::SetCursorStyle::SteadyBar,
             };
             queue!(out, cursor::MoveTo(p.x as u16, p.y as u16), style, cursor::Show)?;
         }

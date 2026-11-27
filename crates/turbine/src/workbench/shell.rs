@@ -55,6 +55,9 @@ pub(super) struct Shell {
     pub split_pending: Option<u32>,
     /// Long lines wrap (new editors too).
     pub word_wrap: bool,
+    /// The cursor: "Block", "Underline" or "Bar", and whether it blinks.
+    pub cursor_style: String,
+    pub cursor_blink: bool,
     /// Each mirror group's document as last synced: (version, dirty, path).
     pub mirrored: HashMap<u32, (u64, bool, Option<PathBuf>)>,
     /// The breadcrumbs from the last layout: their places, labels and where
@@ -97,6 +100,8 @@ impl Shell {
             split: None,
             split_pending: None,
             word_wrap: false,
+            cursor_style: "Block".into(),
+            cursor_blink: true,
             mirrored: HashMap::new(),
             crumbs: Vec::new(),
             minimap: None,
@@ -310,6 +315,8 @@ impl Workbench {
                     }
                 }
             }
+            // (A page with no file: its window's title, HELP: Turbine.)
+            None if w.special.is_some() => items.push((w.win.title.clone(), Crumb::File)),
             None => items.push((w.ed.doc.title(), Crumb::File)),
         }
         let line = w.ed.cursor_line_col().0;
@@ -1476,29 +1483,29 @@ impl Workbench {
         let s = &theme.scheme;
         // Editor tabs: one per window on the desktop, the front one lit.
         if let Some(tr) = l.editor_tabs {
-            c.fill(tr, " ", s.menu);
+            c.fill(tr, " ", s.tab_bar);
             let front = self.editor_index().map(|i| self.windows[i].win.id);
             let mut tc = c.sub(tr);
             let icons = theme.style.icons;
             for (id, r, x) in &self.shell.editor_tab_rects {
                 let Some(w) = self.windows.iter().find(|w| w.win.id == *id) else { continue };
                 let on = Some(*id) == front;
-                let stl = if on { s.menu_selected } else { s.menu };
+                let stl = if on { s.tab_active } else { s.tab_inactive };
                 tc.print(r.x, r.y, &editor_tab_name(w, icons), stl);
                 tc.print(x.x, x.y, "×", stl);
                 if icons && on {
                     // The front tab as a pill.
-                    let cap = Style::new(stl.bg, s.menu.bg);
+                    let cap = Style::new(stl.bg, s.tab_bar.bg);
                     tc.print(r.x - 1, r.y, crate::dock::CAP_LEFT, cap);
                     tc.print(x.x + 1, x.y, crate::dock::CAP_RIGHT, cap);
                 } else if !icons {
-                    tc.print(x.x + 1, x.y, "│", s.menu);
+                    tc.print(x.x + 1, x.y, "│", s.tab_bar);
                 }
             }
         }
         // Breadcrumbs.
         if let Some(br) = l.breadcrumbs {
-            let row = Style::new(s.menu.fg, s.menu.bg);
+            let row = s.crumbs;
             c.fill(br, " ", row);
             let mut bc = c.sub(br);
             if self.shell.crumbs.first().is_some_and(|(r, ..)| r.x > br.x + 1) {
@@ -1506,9 +1513,9 @@ impl Workbench {
             }
             let n = self.shell.crumbs.len();
             for (k, (r, t, _)) in self.shell.crumbs.iter().enumerate() {
-                bc.print(r.x, r.y, t, if k + 1 == n { Style { attrs: turbine_ui::theme::Attrs { bold: true, ..row.attrs }, ..row } } else { row });
+                bc.print(r.x, r.y, t, if k + 1 == n { s.crumbs_last } else { row });
                 if k + 1 < n {
-                    bc.print(r.right() + 1, r.y, "»", s.menu_disabled);
+                    bc.print(r.right() + 1, r.y, "»", s.crumbs_sep);
                 }
             }
         }

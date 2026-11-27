@@ -118,6 +118,14 @@ pub struct Scheme {
     pub help_heading: Style,
     pub help_link: Style,
     pub help_mark: Style,
+    /// The editor tabs' row, the front tab and the others; the
+    /// breadcrumbs' row, its separators and its last (current) item.
+    pub tab_bar: Style,
+    pub tab_active: Style,
+    pub tab_inactive: Style,
+    pub crumbs: Style,
+    pub crumbs_sep: Style,
+    pub crumbs_last: Style,
     /// Filled title bars (VB-DOS): the active window's, others', dialogs'.
     pub title_active: Style,
     pub title_inactive: Style,
@@ -231,6 +239,12 @@ impl Scheme {
             help_heading: s!(WHITE on CYAN),
             help_link: s!(YELLOW on CYAN),
             help_mark: s!(YELLOW on CYAN),
+            tab_bar: s!(LIGHT_GRAY on BLUE),
+            tab_active: s!(BLACK on GREEN),
+            tab_inactive: s!(LIGHT_GRAY on BLUE),
+            crumbs: s!(BLACK on CYAN),
+            crumbs_sep: s!(BLUE on CYAN),
+            crumbs_last: s!(WHITE on CYAN),
             title_active: s!(WHITE on BLUE),
             title_inactive: s!(LIGHT_GRAY on BLUE),
             dialog_title: s!(WHITE on LIGHT_GRAY),
@@ -297,6 +311,12 @@ impl Scheme {
             help_heading: s!(WHITE on BLACK),
             help_link: s!(WHITE on BLACK),
             help_mark: s!(LIGHT_GREEN on BLACK),
+            tab_bar: s!(LIGHT_GRAY on BLACK),
+            tab_active: s!(WHITE on BLUE),
+            tab_inactive: s!(LIGHT_GRAY on BLACK),
+            crumbs: s!(BLACK on CYAN),
+            crumbs_sep: s!(BLUE on CYAN),
+            crumbs_last: s!(WHITE on CYAN),
             title_active: s!(WHITE on BLUE),
             title_inactive: s!(LIGHT_GRAY on BLUE),
             dialog_title: s!(WHITE on LIGHT_GRAY),
@@ -347,6 +367,8 @@ impl Scheme {
         s.panel = s!(BLACK on LIGHT_GRAY);
         s.panel_frame = s!(BLACK on LIGHT_GRAY);
         s.panel_selected = s!(LIGHT_GRAY on BLACK);
+        // (The front tab: VB-DOS's magenta title bar.)
+        s.tab_active = s!(WHITE on MAGENTA);
         s
     }
 
@@ -430,6 +452,12 @@ impl Scheme {
             help_heading: Style { attrs: Attrs { bold: true, ..Attrs::default() }, ..n },
             help_link: Style { attrs: Attrs { underline: true, ..Attrs::default() }, ..n },
             help_mark: n,
+            tab_bar: n,
+            tab_active: r,
+            tab_inactive: Style::new(dim, k),
+            crumbs: Style::new(dim, k),
+            crumbs_sep: Style::new(dim, k),
+            crumbs_last: n,
             title_active: r,
             title_inactive: n,
             dialog_title: r,

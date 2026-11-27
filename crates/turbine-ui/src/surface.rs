@@ -37,13 +37,15 @@ pub struct Surface {
     pub h: i32,
     pub cells: Vec<Cell>,
     pub cursor: Option<(Point, CursorShape)>,
+    /// Whether the cursor blinks (a setting).
+    pub cursor_blink: bool,
 }
 
 impl Surface {
     pub fn new(w: i32, h: i32) -> Self {
         let w = w.max(1);
         let h = h.max(1);
-        Surface { w, h, cells: vec![Cell::default(); (w * h) as usize], cursor: None }
+        Surface { w, h, cells: vec![Cell::default(); (w * h) as usize], cursor: None, cursor_blink: true }
     }
 
     pub fn rect(&self) -> Rect {
@@ -95,6 +97,11 @@ impl<'a> Canvas<'a> {
     pub fn sub(&mut self, r: Rect) -> Canvas<'_> {
         let clip = self.clip.intersect(&r);
         Canvas { surf: self.surf, clip }
+    }
+
+    /// The style already drawn at a cell (to draw over it in its colours).
+    pub fn style_at(&self, x: i32, y: i32) -> Option<Style> {
+        self.surf.get(x, y).map(|c| c.style)
     }
 
     fn put(&mut self, x: i32, y: i32, g: &str, w: i32, style: Style) {

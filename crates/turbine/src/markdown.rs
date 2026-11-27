@@ -435,6 +435,46 @@ pub fn render(md: &str, width: usize) -> Rendered {
     o.r
 }
 
+/// A help page's first line, as QBasic's and VB-DOS's help have it:
+/// ◄Contents► ◄Index► ◄Back► at the right (links to `help:contents`,
+/// `help:index` and `help:back`), then a blank line.
+pub fn with_nav(mut r: Rendered, width: usize) -> Rendered {
+    let items = [("Contents", "help:contents"), ("Index", "help:index"), ("Back", "help:back")];
+    let row_w: usize = items.iter().map(|(t, _)| str_width(t) + 2).sum::<usize>() + 2 * (items.len() - 1);
+    let mut line = " ".repeat(width.saturating_sub(row_w + 1));
+    let mut spans = Vec::new();
+    let mut links = Vec::new();
+    for (i, (t, target)) in items.iter().enumerate() {
+        if i > 0 {
+            line.push_str("  ");
+        }
+        let a = line.len();
+        line.push('◄');
+        let b = line.len();
+        line.push_str(t);
+        let c = line.len();
+        line.push('►');
+        spans.push((a as u32, b as u32, kind("label")));
+        spans.push((b as u32, c as u32, kind("function")));
+        spans.push((c as u32, line.len() as u32, kind("label")));
+        links.push((0, a, line.len(), target.to_string()));
+    }
+    r.text = format!("{line}\n\n{}", r.text);
+    r.spans.insert(0, Vec::new());
+    r.spans.insert(0, spans);
+    for l in &mut r.links {
+        l.0 += 2;
+    }
+    r.links.splice(0..0, links);
+    for h in &mut r.headings {
+        h.0 += 2;
+    }
+    for a in &mut r.anchors {
+        a.1 += 2;
+    }
+    r
+}
+
 /// A code block: in a box, highlighted when its language is known.
 fn code_block(o: &mut Out, lang: &str, text: &str) {
     let text = text.strip_suffix('\n').unwrap_or(text);

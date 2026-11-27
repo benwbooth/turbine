@@ -1099,6 +1099,8 @@ impl Workbench {
                 let d = self.desktop();
                 let mut win = Window::new(self.next_id, &name, Rect::new(d.x + 2, d.y + 1, (d.w - 4).max(20), (d.h - 2).max(6)));
                 win.min_h = 4;
+                // (Filling the editors' area, as every editor window does.)
+                win.toggle_zoom(d);
                 self.next_id += 1;
                 let mut ed = EditorView::new(Document::new());
                 ed.line_numbers = false;
@@ -2247,6 +2249,7 @@ impl Workbench {
                 self.say(if self.tab_complete { "AI tab completion on" } else { "AI tab completion off" });
             }
             "help.contents" => self.show_help("Turbine", MANUAL),
+            "help.back" => self.page_back(),
             "edit.language" => {
                 let mut names: Vec<String> = turbine_syntax::BUILTIN.iter().map(|b| b.0.to_string()).collect();
                 for n in turbine_syntax::grammars::known() {
@@ -3356,6 +3359,8 @@ impl Workbench {
             Some("window.zoom")
         } else if k.is(Key::F(3), Mods::ALT) || k.is_ctrl('w') {
             Some("window.close")
+        } else if k.is(Key::F(1), Mods::ALT) && self.windows.last().is_some_and(|w| matches!(w.special, Some("help" | "preview"))) {
+            Some("help.back")
         } else if k.is(Key::F(1), Mods::NONE) {
             Some("help.contents")
         } else if k.is(Key::F(1), Mods::SHIFT) {
@@ -4205,6 +4210,16 @@ impl App for Workbench {
     }
 
     fn render(&mut self, surf: &mut Surface) {
+        // The cursor setting: editors insert with it; fields and dialogs use
+        // it too (vim's normal mode keeps its block).
+        let shape = match self.shell.cursor_style.as_str() {
+            "Underline" => turbine_ui::CursorShape::Underline,
+            "Bar" => turbine_ui::CursorShape::Bar,
+            _ => turbine_ui::CursorShape::Block,
+        };
+        for w in &mut self.windows {
+            w.ed.insert_shape = shape;
+        }
         if surf.w != self.size.0 || surf.h != self.size.1 {
             *surf = Surface::new(self.size.0, self.size.1);
         }
@@ -4231,7 +4246,18 @@ impl App for Workbench {
             if theme.style.shadows {
                 wc.shadow(w.win.rect, theme.scheme.shadow);
             }
-            w.win.draw_frame(&mut wc, &theme, active);
+            // (A help page's frame in the help colours: QBasic's white lines
+            // on black, VB-DOS's none at the sides.)
+            if w.ed.help_look {
+                let mut ht = theme.clone();
+                let h = theme.scheme.help;
+                let line = if theme.style.title_bar { Style::new(h.bg, h.bg) } else { Style::new(h.fg, h.bg) };
+                ht.scheme.frame = line;
+                ht.scheme.frame_active = line;
+                w.win.draw_frame(&mut wc, &ht, active);
+            } else {
+                w.win.draw_frame(&mut wc, &theme, active);
+            }
             let inner = w.win.inner();
             if let Some(t) = &mut w.term {
                 t.draw(&mut wc, inner, &theme, active && !has_modal);
@@ -4358,6 +4384,13 @@ impl App for Workbench {
             if self.driver.busy() {
                 let st: Style = theme.scheme.agent_pointer;
                 c.set_style_at(p, st);
+            }
+        }
+        surf.cursor_blink = self.shell.cursor_blink;
+        let in_editor = self.dialog.is_none() && self.overwrite_q.is_none() && self.shell.focus == Focus::Editors && self.shell.palette.is_none();
+        if let Some((p, s)) = surf.cursor {
+            if !in_editor && s != shape {
+                surf.cursor = Some((p, shape));
             }
         }
     }
@@ -5477,7 +5510,9 @@ mod tests {
         wb.dispatch(Event::Resize(100, 30));
         keys(&mut wb, &["F1"]);
         assert_eq!(wb.windows.last().unwrap().win.title, "HELP: Turbine");
-        wait_until(&mut wb, "rendered", |wb| wb.windows.last().unwrap().ed.doc.line(0) == "Turbine");
+        // (The Contents / Index / Back row, then the page.)
+        wait_until(&mut wb, "rendered", |wb| wb.windows.last().unwrap().ed.doc.line(2) == "Turbine");
+        assert!(wb.windows.last().unwrap().ed.doc.line(0).trim_start().starts_with("◄Contents►  ◄Index►  ◄Back►"));
         keys(&mut wb, &["Shift+F1"]);
         let d = wb.dialog.as_mut().expect("the index");
         let items = match d.controls.iter().find_map(|c| match &c.control {
@@ -5759,16 +5794,19 @@ mod tests {
         let mut wb = bench();
         wb.show_help("Test Guide", "# Title\n\nSome `code` here, [a link](#title).\n");
         assert_eq!(wb.windows.last().unwrap().win.title, "HELP: Test Guide");
-        wait_until(&mut wb, "rendered", |wb| wb.windows.last().unwrap().ed.doc.line(0) == "Title" && !wb.windows.last().unwrap().ed.highlights.is_empty());
-        assert_eq!(wb.windows.last().unwrap().ed.doc.line(2), "Some code here, ◄a link►.");
+        wait_until(&mut wb, "rendered", |wb| wb.windows.last().unwrap().ed.doc.line(2) == "Title" && !wb.windows.last().unwrap().ed.highlights.is_empty());
+        assert_eq!(wb.windows.last().unwrap().ed.doc.line(4), "Some code here, ◄a link►.");
         assert!(wb.windows.last().unwrap().ed.help_look);
         run(&mut wb, json!({"cmd": "type", "text": "xyz"}));
-        assert!(wb.windows.last().unwrap().ed.doc.line(0) == "Title", "typing doesn't change help");
+        assert!(wb.windows.last().unwrap().ed.doc.line(2) == "Title", "typing doesn't change help");
         // Enter on the link goes to its heading.
         let w = wb.windows.last_mut().unwrap();
-        w.ed.cursor = w.ed.doc.rope.line_to_char(2) + "Some code here, ◄a l".len();
+        w.ed.cursor = w.ed.doc.rope.line_to_char(4) + "Some code here, ◄a l".len();
         keys(&mut wb, &["Enter"]);
-        assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, 0);
+        assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, 2);
+        // Alt+F1 goes back.
+        keys(&mut wb, &["Alt+F1"]);
+        assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, 4);
         wb.run_command("help.guides");
         let d = wb.dialog.as_ref().expect("guide index");
         assert!(d.kind.starts_with("guides:"));

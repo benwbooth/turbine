@@ -36,6 +36,7 @@ pub mod ffi {
         cursor_y: i32,
         /// -1 hidden, 0 underline, 1 block, 2 bar.
         cursor_shape: i32,
+        cursor_blink: bool,
         /// Dots per character in the VGA font: 9, or 8 (VB-DOS).
         dots: i32,
     }
@@ -274,9 +275,9 @@ fn app_frame() -> ffi::Frame {
         };
         st.shown = Some(s.clone());
         let dots = st.wb.theme().style.dots as i32;
-        ffi::Frame { cols: s.w, rows: s.h, cells, cursor_x: cx, cursor_y: cy, cursor_shape: shape, dots }
+        ffi::Frame { cols: s.w, rows: s.h, cells, cursor_x: cx, cursor_y: cy, cursor_shape: shape, cursor_blink: s.cursor_blink, dots }
     })
-    .unwrap_or(ffi::Frame { cols: 0, rows: 0, cells: Vec::new(), cursor_x: 0, cursor_y: 0, cursor_shape: -1, dots: 9 })
+    .unwrap_or(ffi::Frame { cols: 0, rows: 0, cells: Vec::new(), cursor_x: 0, cursor_y: 0, cursor_shape: -1, cursor_blink: false, dots: 9 })
 }
 
 fn app_take_clipboard() -> String {

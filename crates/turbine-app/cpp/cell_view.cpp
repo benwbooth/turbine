@@ -161,6 +161,12 @@ CellView::CellView(QQuickItem* parent)
         setSmooth(true);
     }
 
+    m_blink.setInterval(530);
+    connect(&m_blink, &QTimer::timeout, this, [this] {
+        m_cursorOn = !m_cursorOn;
+        update();
+    });
+    m_blink.start();
     m_timer.setSingleShot(true);
     connect(&m_timer, &QTimer::timeout, this, &CellView::tick);
     m_timer.start(0);
@@ -244,6 +250,9 @@ void CellView::afterInput()
 {
     // Run a tick soon (coalescing a burst of input into one paint).
     if (!m_timer.isActive() || m_timer.remainingTime() > 1) m_timer.start(0);
+    // (Typing shows the cursor at once, its blink started over.)
+    m_cursorOn = true;
+    m_blink.start();
 }
 
 QPoint CellView::cellAt(QPointF pos) const
@@ -523,7 +532,7 @@ void CellView::paintVga(QPainter* p)
         }
     }
     // The cursor: VGA's two bottom scan lines, or the whole cell.
-    if (f.cursor_shape >= 0 && f.cursor_x < cols && f.cursor_y < rows && hasActiveFocus()) {
+    if (f.cursor_shape >= 0 && f.cursor_x < cols && f.cursor_y < rows && hasActiveFocus() && (m_cursorOn || !f.cursor_blink)) {
         const auto& c = f.cells[size_t(f.cursor_y * cols + f.cursor_x)];
         const QRect r(f.cursor_x * gw, f.cursor_y * gh, ((c.flags & 16) ? 2 : 1) * gw, gh);
         const QColor fg = rgb(c.fg);
@@ -615,7 +624,7 @@ void CellView::paint(QPainter* p)
     }
     p->restore();
     // The cursor.
-    if (f.cursor_shape >= 0 && f.cursor_x < cols && f.cursor_y < rows && hasActiveFocus()) {
+    if (f.cursor_shape >= 0 && f.cursor_x < cols && f.cursor_y < rows && hasActiveFocus() && (m_cursorOn || !f.cursor_blink)) {
         const auto& c = f.cells[size_t(f.cursor_y * cols + f.cursor_x)];
         const QColor fg = rgb(c.fg);
         const QRectF r = cellRect(f.cursor_x, f.cursor_y, (c.flags & 16) ? 2 : 1);

@@ -13,6 +13,8 @@ use std::sync::mpsc::{Sender, channel};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum PageKind {
     Markdown,
+    /// Help and guides: Markdown with the Contents / Index / Back row.
+    Help,
     Diff { side_by_side: bool },
     Log,
 }
@@ -40,6 +42,8 @@ pub(super) struct Preview {
     pub root: PathBuf,
     /// A heading to go to once it's rendered.
     pub jump: Option<String>,
+    /// Lines left by following links on this page (Back, Alt+F1).
+    pub back: Vec<usize>,
 }
 
 type Job = (u32, u64, String, usize, PageKind, PathBuf);
@@ -70,6 +74,7 @@ impl Default for PreviewState {
                     for (_, (id, generation, md, width, kind, root)) in latest {
                         let r = match kind {
                             PageKind::Markdown => markdown::render(&md, width),
+                            PageKind::Help => markdown::with_nav(markdown::render(&md, width), width),
                             PageKind::Diff { side_by_side } => crate::diffview::render(&md, width, side_by_side, &root),
                             PageKind::Log => log_page(&md),
                         };
@@ -92,7 +97,7 @@ impl Workbench {
         let w = self.windows.last_mut().unwrap();
         w.ed.doc = Document::from_str("Rendering…\n");
         let id = w.win.id;
-        self.preview.previews.insert(id, Preview { source: Source::Text(md.to_string()), base, asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind: PageKind::Markdown, root: PathBuf::new() });
+        self.preview.previews.insert(id, Preview { source: Source::Text(md.to_string()), base, asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind: PageKind::Help, root: PathBuf::new(), back: Vec::new() });
     }
 
     /// A page of `kind` whose text comes from running git (in the
@@ -111,7 +116,7 @@ impl Workbench {
         let w = self.windows.last_mut().unwrap();
         w.special = Some("preview");
         let id = w.win.id;
-        self.preview.previews.insert(id, Preview { source: Source::Pending, base: Some(root.to_path_buf()), asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind, root: root.to_path_buf() });
+        self.preview.previews.insert(id, Preview { source: Source::Pending, base: Some(root.to_path_buf()), asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind, root: root.to_path_buf(), back: Vec::new() });
         let tx = self.preview.text_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send((id, make()));
@@ -206,7 +211,7 @@ impl Workbench {
         w.special = Some("preview");
         let id = w.win.id;
         let root = base.clone().map(|b| lsp::project_root(&b.join("x"))).unwrap_or_default();
-        self.preview.previews.insert(id, Preview { source: Source::Window(src), base, asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind, root });
+        self.preview.previews.insert(id, Preview { source: Source::Window(src), base, asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind, root, back: Vec::new() });
         // Side by side with its file.
         self.shell.split = Some((src, id, 1));
     }
@@ -334,15 +339,27 @@ impl Workbench {
     /// Follow the link at the cursor. True when there was one.
     pub(super) fn follow_link(&mut self) -> bool {
         let Some((id, target)) = self.link_here() else { return false };
+        match target.as_str() {
+            "help:index" => {
+                self.run_command("help.index");
+                return true;
+            }
+            "help:back" => {
+                self.page_back();
+                return true;
+            }
+            "help:contents" => {
+                // (The page's own contents, else its top.)
+                let line = self.preview.previews.get(&id).and_then(|p| p.rendered.as_ref()).and_then(|r| r.anchors.iter().find(|(s, _)| s == "contents").map(|(_, l)| *l)).unwrap_or(0);
+                self.page_go(id, line);
+                return true;
+            }
+            _ => {}
+        }
         if let Some(anchor) = target.strip_prefix('#') {
             let line = self.preview.previews.get(&id).and_then(|p| p.rendered.as_ref()).and_then(|r| r.anchors.iter().find(|(s, _)| s == anchor).map(|(_, l)| *l));
             match line {
-                Some(l) => {
-                    let w = self.windows.last_mut().unwrap();
-                    w.ed.cursor = w.ed.doc.rope.line_to_char(l);
-                    w.ed.scroll_y = l;
-                    w.ed.anchor = None;
-                }
+                Some(l) => self.page_go(id, l),
                 None => self.say(format!("No heading {target} here")),
             }
             return true;
@@ -364,6 +381,33 @@ impl Workbench {
             self.say(format!("No file {}", p.display()));
         }
         true
+    }
+}
+
+impl Workbench {
+    /// Go to a line of a page, noting where it was for Back.
+    fn page_go(&mut self, id: u32, line: usize) {
+        let Some(w) = self.windows.iter_mut().find(|w| w.win.id == id) else { return };
+        let here = w.ed.cursor_line_col().0;
+        w.ed.cursor = w.ed.doc.rope.line_to_char(line.min(w.ed.doc.len_lines().saturating_sub(1)));
+        w.ed.scroll_y = line;
+        w.ed.anchor = None;
+        if let Some(p) = self.preview.previews.get_mut(&id) {
+            p.back.push(here);
+        }
+    }
+
+    /// Back (Alt+F1): where the front page was before its last link.
+    pub(super) fn page_back(&mut self) {
+        let Some(id) = self.windows.last().map(|w| w.win.id) else { return };
+        let Some(line) = self.preview.previews.get_mut(&id).and_then(|p| p.back.pop()) else {
+            self.say("Nowhere to go back to");
+            return;
+        };
+        let w = self.windows.last_mut().unwrap();
+        w.ed.cursor = w.ed.doc.rope.line_to_char(line.min(w.ed.doc.len_lines().saturating_sub(1)));
+        w.ed.scroll_y = line.saturating_sub(2);
+        w.ed.anchor = None;
     }
 }
 
