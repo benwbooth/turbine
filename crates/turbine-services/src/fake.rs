@@ -248,10 +248,40 @@ pub fn fake_debug_adapter() -> std::io::Result<RpcProcess> {
         let mut program = String::new();
         let mut lines: Vec<String> = Vec::new();
         let mut bps: Vec<u32> = Vec::new();
+        // Conditions and log messages by line; variables set with `x = v`.
+        let mut opts: HashMap<u32, (String, String)> = HashMap::new();
+        let mut vars: HashMap<String, String> = HashMap::new();
         let mut at: u32 = 0; // current line, 1-based; 0 = not started
         let mut stop_on_entry = false;
         // Run from `from` (inclusive) until a breakpoint or the end; true = stopped.
-        fn run(w: &mut std::io::PipeWriter, send: &mut dyn FnMut(&mut std::io::PipeWriter, Value), lines: &[String], bps: &[u32], at: &mut u32, from: u32, step: bool) -> bool {
+        // Does a breakpoint at `l` stop (its condition), or log instead?
+        fn hits(w: &mut std::io::PipeWriter, send: &mut dyn FnMut(&mut std::io::PipeWriter, Value), bps: &[u32], opts: &HashMap<u32, (String, String)>, l: u32) -> bool {
+            if !bps.contains(&l) {
+                return false;
+            }
+            let Some((cond, log)) = opts.get(&l) else { return true };
+            if !cond.is_empty() {
+                // "line == N", "line > N", "line < N"
+                let parts: Vec<&str> = cond.split_whitespace().collect();
+                let n: u32 = parts.get(2).and_then(|n| n.parse().ok()).unwrap_or(0);
+                let ok = match parts.get(1).copied() {
+                    Some("==") => l == n,
+                    Some(">") => l > n,
+                    Some("<") => l < n,
+                    _ => true,
+                };
+                if !ok {
+                    return false;
+                }
+            }
+            if !log.is_empty() {
+                send(w, json!({"type": "event", "event": "output", "body": {"category": "console", "output": format!("{}\n", log.replace("{line}", &l.to_string()))}}));
+                return false;
+            }
+            true
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn run(w: &mut std::io::PipeWriter, send: &mut dyn FnMut(&mut std::io::PipeWriter, Value), lines: &[String], bps: &[u32], opts: &HashMap<u32, (String, String)>, at: &mut u32, from: u32, step: bool) -> bool {
             let mut l = from;
             loop {
                 if l as usize > lines.len() {
@@ -259,7 +289,7 @@ pub fn fake_debug_adapter() -> std::io::Result<RpcProcess> {
                     send(w, json!({"type": "event", "event": "terminated"}));
                     return false;
                 }
-                if (step && l == from) || (!step && bps.contains(&l) && l != *at) || (step && l > from) {
+                if (step && l == from) || (!step && l != *at && hits(w, send, bps, opts, l)) || (step && l > from) {
                     if !(step && l == from) {
                         *at = l;
                         let reason = if step { "step" } else { "breakpoint" };
@@ -274,7 +304,7 @@ pub fn fake_debug_adapter() -> std::io::Result<RpcProcess> {
                     send(w, json!({"type": "event", "event": "output", "body": {"category": "stdout", "output": format!("{inner}\n")}}));
                 }
                 l += 1;
-                if !step && bps.contains(&l) {
+                if !step && hits(w, send, bps, opts, l) {
                     *at = l;
                     send(w, json!({"type": "event", "event": "stopped", "body": {"reason": "breakpoint", "threadId": 1}}));
                     return true;
@@ -286,7 +316,30 @@ pub fn fake_debug_adapter() -> std::io::Result<RpcProcess> {
             let a = &m["arguments"];
             let ok = |body: Value| json!({"type": "response", "request_seq": m["seq"], "success": true, "command": cmd, "body": body});
             match cmd.as_str() {
-                "initialize" => send(&mut w, ok(json!({"supportsConfigurationDoneRequest": true}))),
+                "initialize" => send(&mut w, ok(json!({"supportsConfigurationDoneRequest": true, "supportsConditionalBreakpoints": true, "supportsLogPoints": true, "supportsSetExpression": true}))),
+                "attach" => {
+                    send(&mut w, ok(json!({})));
+                    send(&mut w, json!({"type": "event", "event": "initialized"}));
+                }
+                "evaluate" | "setExpression" => {
+                    let e = a["expression"].as_str().unwrap_or("").trim().to_string();
+                    let assign = if cmd == "setExpression" { Some((e.clone(), a["value"].as_str().unwrap_or("").to_string())) } else { e.split_once(" = ").map(|(n, v)| (n.trim().to_string(), v.trim().to_string())) };
+                    if let Some((name, value)) = assign {
+                        vars.insert(name, value.clone());
+                        send(&mut w, ok(json!({"result": value, "value": value, "type": "int", "variablesReference": 0})));
+                    } else if e == "line" {
+                        send(&mut w, ok(json!({"result": at.to_string(), "type": "int", "variablesReference": 0})));
+                    } else if e == "text" {
+                        let t = lines.get((at as usize).wrapping_sub(1)).cloned().unwrap_or_default();
+                        send(&mut w, ok(json!({"result": format!("{t:?}"), "type": "str", "variablesReference": 0})));
+                    } else if e == "point" {
+                        send(&mut w, ok(json!({"result": "Point(x=1, y=2)", "type": "Point", "variablesReference": 8})));
+                    } else if let Some(v) = vars.get(&e) {
+                        send(&mut w, ok(json!({"result": v, "type": "int", "variablesReference": 0})));
+                    } else {
+                        send(&mut w, json!({"type": "response", "request_seq": m["seq"], "success": false, "command": cmd, "message": format!("name '{e}' is not defined")}));
+                    }
+                }
                 "launch" => {
                     program = a["program"].as_str().unwrap_or("").to_string();
                     stop_on_entry = a["stopOnEntry"].as_bool().unwrap_or(false);
@@ -296,6 +349,15 @@ pub fn fake_debug_adapter() -> std::io::Result<RpcProcess> {
                 }
                 "setBreakpoints" => {
                     bps = a["breakpoints"].as_array().map(|b| b.iter().filter_map(|x| x["line"].as_u64().map(|l| l as u32)).collect()).unwrap_or_default();
+                    opts = a["breakpoints"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|x| {
+                            let (c, m) = (x["condition"].as_str().unwrap_or(""), x["logMessage"].as_str().unwrap_or(""));
+                            (!c.is_empty() || !m.is_empty()).then(|| (x["line"].as_u64().unwrap_or(0) as u32, (c.to_string(), m.to_string())))
+                        })
+                        .collect();
                     let out: Vec<Value> = bps.iter().map(|l| json!({"verified": true, "line": l})).collect();
                     send(&mut w, ok(json!({"breakpoints": out})));
                 }
@@ -309,13 +371,19 @@ pub fn fake_debug_adapter() -> std::io::Result<RpcProcess> {
                         send(&mut w, json!({"type": "event", "event": "stopped", "body": {"reason": "breakpoint", "threadId": 1}}));
                     } else {
                         let mut a2 = at;
-                        run(&mut w, &mut send, &lines, &bps, &mut a2, 1, false);
+                        run(&mut w, &mut send, &lines, &bps, &opts, &mut a2, 1, false);
                         at = a2;
                     }
                 }
                 "threads" => send(&mut w, ok(json!({"threads": [{"id": 1, "name": "main"}]}))),
                 "stackTrace" => send(&mut w, ok(json!({"stackFrames": [{"id": 1, "name": "main", "line": at, "column": 1, "source": {"path": program}}], "totalFrames": 1}))),
                 "scopes" => send(&mut w, ok(json!({"scopes": [{"name": "Locals", "variablesReference": 7, "expensive": false}]}))),
+                "variables" if a["variablesReference"] == 8 => {
+                    send(&mut w, ok(json!({"variables": [
+                        {"name": "x", "value": "1", "type": "int", "variablesReference": 0},
+                        {"name": "y", "value": "2", "type": "int", "variablesReference": 0}
+                    ]})));
+                }
                 "variables" => {
                     let text = lines.get(at as usize - 1).cloned().unwrap_or_default();
                     send(&mut w, ok(json!({"variables": [
@@ -326,13 +394,13 @@ pub fn fake_debug_adapter() -> std::io::Result<RpcProcess> {
                 "next" | "stepIn" | "stepOut" => {
                     send(&mut w, ok(json!({})));
                     let mut a2 = at;
-                    run(&mut w, &mut send, &lines, &bps, &mut a2, at, true);
+                    run(&mut w, &mut send, &lines, &bps, &opts, &mut a2, at, true);
                     at = a2;
                 }
                 "continue" => {
                     send(&mut w, ok(json!({"allThreadsContinued": true})));
                     let mut a2 = at;
-                    run(&mut w, &mut send, &lines, &bps, &mut a2, at, false);
+                    run(&mut w, &mut send, &lines, &bps, &opts, &mut a2, at, false);
                     at = a2;
                 }
                 "disconnect" => {

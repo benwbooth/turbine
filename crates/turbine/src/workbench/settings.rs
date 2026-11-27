@@ -151,6 +151,7 @@ impl Workbench {
         json!({
             "keymap": self.keymap.name(),
             "tab_complete": self.tab_complete,
+            "watches": self.dbx.watches,
             "inlay_hints": !self.lspx.inlays_off,
             "semantic": !self.lspx.semantic_off,
             "hidden_files": self.shell.explorer.show_hidden,
@@ -170,6 +171,10 @@ impl Workbench {
         }
         if let Some(b) = v["tab_complete"].as_bool() {
             self.tab_complete = b;
+        }
+        if let Some(a) = v["watches"].as_array() {
+            self.dbx.watches = a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+            self.dbx.watch_vals = vec![None; self.dbx.watches.len()];
         }
         if let Some(b) = v["inlay_hints"].as_bool() {
             self.lspx.inlays_off = !b;

@@ -580,6 +580,28 @@ impl Workbench {
 
     fn update_debug_view(&mut self) {
         let mut rows = Vec::new();
+        // Watches first (Delete removes one), then the stack and variables.
+        if !self.dbx.watches.is_empty() {
+            rows.push(Row::new("Watch").heading());
+            for l in self.watch_lines() {
+                rows.push(Row::new(l.trim().to_string()).indent(1));
+            }
+        }
+        let bps: Vec<(PathBuf, u32)> = self.breakpoints.iter().flat_map(|(p, ls)| ls.iter().map(move |l| (p.clone(), *l))).collect();
+        if !bps.is_empty() {
+            rows.push(Row::new("Breakpoints").heading());
+            for (p, l) in bps {
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let o = self.dbx.bp_opts.get(&p).and_then(|m| m.get(&l));
+                let how = match o {
+                    Some(o) if !o.log_message.is_empty() => format!("log: {}", o.log_message),
+                    Some(o) if !o.condition.is_empty() => format!("when {}", o.condition),
+                    Some(o) if !o.hit_condition.is_empty() => format!("hit {}", o.hit_condition),
+                    _ => String::new(),
+                };
+                rows.push(Row::new(format!("{name}:{l}")).indent(1).detail(how));
+            }
+        }
         match &self.debug {
             None => {
                 rows.push(Row::new("Not debugging."));
@@ -664,7 +686,7 @@ impl Workbench {
     }
 
     /// Show a tab and give it focus.
-    fn show_tab(&mut self, t: Tab) {
+    pub(super) fn show_tab(&mut self, t: Tab) {
         self.shell.dock.show(t);
         match t {
             Tab::Pane(id) => self.activate_pane(id),
@@ -1139,6 +1161,12 @@ impl Workbench {
                 }
             }
             Tab::Debug => {
+                // Delete on a watch removes it.
+                let sel = self.shell.debug_view.selected;
+                if k.key == Key::Delete && !self.dbx.watches.is_empty() && (1..=self.dbx.watches.len()).contains(&sel) {
+                    self.remove_watch(sel - 1);
+                    return;
+                }
                 self.shell.debug_view.key(k);
             }
             Tab::Extensions => match self.shell.extensions.list.key(k) {

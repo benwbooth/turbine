@@ -70,9 +70,23 @@ pub enum DapEvent {
     /// A breakpoint the adapter moved or rejected: (path, requested line, actual line, verified).
     Breakpoint { path: PathBuf, line: u32, verified: bool },
     Terminated,
+    /// An `evaluate` (or setExpression) answer: the value, its type and
+    /// its children's reference; or why it failed.
+    Evaluated { id: i64, result: Result<(String, String, i64), String> },
+    /// A variable's children (from `children`).
+    Children { id: i64, vars: Vec<Variable> },
     Failed(String),
     Log(String),
     Exited(String),
+}
+
+/// A breakpoint's extras: stop only when `condition` holds, or log a
+/// message instead of stopping (`{expr}` in it is evaluated).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BreakpointOpts {
+    pub condition: String,
+    pub hit_condition: String,
+    pub log_message: String,
 }
 
 #[derive(Clone, Debug)]
@@ -85,16 +99,22 @@ enum Pending {
     StackTrace(i64, String),
     Scopes,
     Variables(String),
+    Evaluate(i64),
+    Children(i64),
     Other(String),
 }
 
 /// What to debug.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Launch {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub stop_on_entry: bool,
+    /// "launch" (the default) or "attach".
+    pub request: String,
+    /// The configuration's name (from launch.json).
+    pub name: String,
     /// Extra fields for the adapter's launch request (adapter specific).
     pub extra: Value,
 }
@@ -107,7 +127,14 @@ pub struct DapClient {
     /// Breakpoints to send once the adapter is ready: path → lines (1-based).
     pub breakpoints: BTreeMap<PathBuf, BTreeSet<u32>>,
     configured: bool,
+    /// Conditions and log messages: path → line → options.
+    pub options: BTreeMap<PathBuf, BTreeMap<u32, BreakpointOpts>>,
     pub thread: Option<i64>,
+    /// The frame being looked at (the top one at a stop): evaluations
+    /// happen in it.
+    pub frame: Option<i64>,
+    /// What the adapter said it can do (initialize's answer).
+    pub capabilities: Value,
     pub running: bool,
     /// Scopes being gathered for one stop: (name, variables) in order.
     gathering: Vec<(String, Option<Vec<Variable>>)>,
@@ -127,8 +154,11 @@ impl DapClient {
             pending: HashMap::new(),
             launch,
             breakpoints,
+            options: BTreeMap::new(),
             configured: false,
             thread: None,
+            frame: None,
+            capabilities: Value::Null,
             running: false,
             gathering: Vec::new(),
             dead: None,
@@ -163,7 +193,21 @@ impl DapClient {
 
     fn send_breakpoints(&mut self, path: &Path) {
         let lines: Vec<u32> = self.breakpoints.get(path).map(|s| s.iter().copied().collect()).unwrap_or_default();
-        let bps: Vec<Value> = lines.iter().map(|l| json!({"line": l})).collect();
+        let opts = self.options.get(path);
+        let bps: Vec<Value> = lines
+            .iter()
+            .map(|l| {
+                let mut b = json!({"line": l});
+                if let Some(o) = opts.and_then(|o| o.get(l)) {
+                    for (k, v) in [("condition", &o.condition), ("hitCondition", &o.hit_condition), ("logMessage", &o.log_message)] {
+                        if !v.trim().is_empty() {
+                            b[k] = json!(v.trim());
+                        }
+                    }
+                }
+                b
+            })
+            .collect();
         self.request(
             Pending::SetBreakpoints(path.to_path_buf()),
             "setBreakpoints",
@@ -217,7 +261,53 @@ impl DapClient {
     }
 
     pub fn stop(&mut self) {
-        self.request(Pending::Other("disconnect".into()), "disconnect", json!({"terminateDebuggee": true}));
+        let attached = self.launch.request == "attach";
+        self.request(Pending::Other("disconnect".into()), "disconnect", json!({"terminateDebuggee": !attached}));
+    }
+
+    /// A line's condition / log message (sent now when set up).
+    pub fn set_options(&mut self, path: &Path, line: u32, o: BreakpointOpts) {
+        let m = self.options.entry(path.to_path_buf()).or_default();
+        if o == BreakpointOpts::default() {
+            m.remove(&line);
+        } else {
+            m.insert(line, o);
+        }
+        if self.configured {
+            self.send_breakpoints(path);
+        }
+    }
+
+    /// Evaluate an expression in the current frame. `context`: "watch",
+    /// "repl" (the debug console: statements too) or "hover".
+    pub fn evaluate(&mut self, expr: &str, context: &str) -> i64 {
+        let mut a = json!({"expression": expr, "context": context});
+        if let Some(f) = self.frame {
+            a["frameId"] = json!(f);
+        }
+        let seq = self.seq;
+        self.request(Pending::Evaluate(seq), "evaluate", a)
+    }
+
+    /// Give an expression (a variable, a field) a new value: with
+    /// setExpression when the adapter has it, else as an assignment.
+    pub fn set_expression(&mut self, expr: &str, value: &str) -> i64 {
+        if self.capabilities["supportsSetExpression"].as_bool() == Some(true) {
+            let mut a = json!({"expression": expr, "value": value});
+            if let Some(f) = self.frame {
+                a["frameId"] = json!(f);
+            }
+            let seq = self.seq;
+            self.request(Pending::Evaluate(seq), "setExpression", a)
+        } else {
+            self.evaluate(&format!("{expr} = {value}"), "repl")
+        }
+    }
+
+    /// A structured value's children (its `reference`).
+    pub fn children(&mut self, reference: i64) -> i64 {
+        let seq = self.seq;
+        self.request(Pending::Children(seq), "variables", json!({"variablesReference": reference}))
     }
 
     pub fn poll(&mut self) -> Vec<DapEvent> {
@@ -246,6 +336,11 @@ impl DapClient {
                 if m["success"].as_bool() == Some(false) {
                     let msg = m["message"].as_str().unwrap_or("failed").to_string();
                     let detail = m["body"]["error"]["format"].as_str().map(|f| format!(": {f}")).unwrap_or_default();
+                    if let Pending::Evaluate(id) = kind {
+                        let why = m["body"]["error"]["format"].as_str().map(str::to_string).unwrap_or(msg);
+                        evs.push(DapEvent::Evaluated { id, result: Err(why) });
+                        return;
+                    }
                     evs.push(DapEvent::Failed(format!("{}{msg}{detail}", match &kind {
                         Pending::Launch => "launch: ",
                         Pending::Initialize => "initialize: ",
@@ -326,20 +421,30 @@ impl DapClient {
     fn response(&mut self, kind: Pending, b: &Value, evs: &mut Vec<DapEvent>) {
         match kind {
             Pending::Initialize => {
+                self.capabilities = b.clone();
+                let request = if self.launch.request.is_empty() { "launch" } else { self.launch.request.as_str() };
                 let mut args = json!({
                     "program": self.launch.program,
                     "args": self.launch.args,
                     "cwd": self.launch.cwd,
                     "stopOnEntry": self.launch.stop_on_entry,
-                    "name": "Turbine",
-                    "request": "launch",
+                    "name": if self.launch.name.is_empty() { "Turbine" } else { self.launch.name.as_str() },
+                    "request": request,
                 });
+                if request == "attach" {
+                    if let Some(a) = args.as_object_mut() {
+                        a.remove("program");
+                        a.remove("args");
+                        a.remove("stopOnEntry");
+                    }
+                }
                 if let (Some(a), Some(extra)) = (args.as_object_mut(), self.launch.extra.as_object()) {
                     for (k, v) in extra {
                         a.insert(k.clone(), v.clone());
                     }
                 }
-                self.request(Pending::Launch, "launch", args);
+                let command = if request == "attach" { "attach" } else { "launch" };
+                self.request(Pending::Launch, command, args);
             }
             Pending::Launch | Pending::ConfigurationDone | Pending::Other(_) => {}
             Pending::SetBreakpoints(path) => {
@@ -374,6 +479,7 @@ impl DapClient {
                     })
                     .unwrap_or_default();
                 if let Some(top) = frames.first() {
+                    self.frame = Some(top.id);
                     self.request(Pending::Scopes, "scopes", json!({"frameId": top.id}));
                 }
                 evs.push(DapEvent::Stopped { reason, thread, frames });
@@ -393,20 +499,14 @@ impl DapClient {
                     evs.push(DapEvent::Variables { scopes: vec![] });
                 }
             }
+            Pending::Evaluate(id) => {
+                let value = b["result"].as_str().or(b["value"].as_str()).unwrap_or("").to_string();
+                let kind = b["type"].as_str().unwrap_or("").to_string();
+                evs.push(DapEvent::Evaluated { id, result: Ok((value, kind, b["variablesReference"].as_i64().unwrap_or(0))) });
+            }
+            Pending::Children(id) => evs.push(DapEvent::Children { id, vars: variables(b) }),
             Pending::Variables(scope) => {
-                let vars: Vec<Variable> = b["variables"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .map(|v| Variable {
-                                name: v["name"].as_str().unwrap_or("").to_string(),
-                                value: v["value"].as_str().unwrap_or("").to_string(),
-                                kind: v["type"].as_str().unwrap_or("").to_string(),
-                                reference: v["variablesReference"].as_i64().unwrap_or(0),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let vars = variables(b);
                 if let Some(slot) = self.gathering.iter_mut().find(|(n, v)| *n == scope && v.is_none()) {
                     slot.1 = Some(vars);
                 }
@@ -417,6 +517,178 @@ impl DapClient {
             }
         }
     }
+}
+
+fn variables(b: &Value) -> Vec<Variable> {
+    b["variables"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|v| Variable {
+                    name: v["name"].as_str().unwrap_or("").to_string(),
+                    value: v["value"].as_str().unwrap_or("").to_string(),
+                    kind: v["type"].as_str().unwrap_or("").to_string(),
+                    reference: v["variablesReference"].as_i64().unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A debug configuration from `.turbine/launch.json` or
+/// `.vscode/launch.json`, its `${...}` variables filled in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LaunchConfig {
+    pub name: String,
+    /// The adapter type ("lldb", "debugpy", "go", ...).
+    pub kind: String,
+    pub launch: Launch,
+}
+
+/// The language whose adapter a launch.json `type` means.
+pub fn lang_for_type(kind: &str) -> &'static str {
+    match kind {
+        "lldb" | "lldb-dap" | "codelldb" | "cppdbg" | "cppvsdbg" | "gdb" => "cpp",
+        "debugpy" | "python" => "python",
+        "go" | "delve" => "go",
+        "bashdb" => "bash",
+        _ => "",
+    }
+}
+
+/// JSON with comments and trailing commas (as VS Code writes it) → JSON.
+pub fn strip_jsonc(t: &str) -> String {
+    let (mut out, mut chars) = (String::with_capacity(t.len()), t.chars().peekable());
+    let mut in_str = false;
+    while let Some(c) = chars.next() {
+        if in_str {
+            out.push(c);
+            if c == '\\' {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_str = true;
+                out.push(c);
+            }
+            ('/', Some('/')) => {
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut prev = ' ';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    // Trailing commas: a comma whose next non-space is } or ].
+    let b: Vec<char> = out.chars().collect();
+    let mut res = String::with_capacity(b.len());
+    let mut in_str = false;
+    for i in 0..b.len() {
+        let c = b[i];
+        if in_str {
+            in_str = !(c == '"' && b[..i].iter().rev().take_while(|&&x| x == '\\').count() % 2 == 0);
+        } else if c == '"' {
+            in_str = true;
+        } else if c == ',' && b[i + 1..].iter().find(|x| !x.is_whitespace()).is_some_and(|&x| x == '}' || x == ']') {
+            continue;
+        }
+        res.push(c);
+    }
+    res
+}
+
+/// The project's debug configurations. `file`: the active file (for
+/// `${file}` and friends).
+pub fn launch_configs(root: &Path, file: Option<&Path>) -> Vec<LaunchConfig> {
+    let text = [".turbine/launch.json", ".vscode/launch.json"].iter().find_map(|f| std::fs::read_to_string(root.join(f)).ok());
+    let Some(text) = text else { return Vec::new() };
+    let Ok(v) = serde_json::from_str::<Value>(&strip_jsonc(&text)) else { return Vec::new() };
+    let file_s = file.map(|f| f.display().to_string()).unwrap_or_default();
+    let vars: Vec<(&str, String)> = vec![
+        ("${workspaceFolder}", root.display().to_string()),
+        ("${workspaceRoot}", root.display().to_string()),
+        ("${workspaceFolderBasename}", root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+        ("${file}", file_s.clone()),
+        ("${relativeFile}", file.and_then(|f| f.strip_prefix(root).ok()).map(|f| f.display().to_string()).unwrap_or_default()),
+        ("${fileBasename}", file.and_then(|f| f.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+        ("${fileBasenameNoExtension}", file.and_then(|f| f.file_stem()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+        ("${fileDirname}", file.and_then(|f| f.parent()).map(|f| f.display().to_string()).unwrap_or_default()),
+        ("${fileExtname}", file.and_then(|f| f.extension()).map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default()),
+        ("${userHome}", std::env::var("HOME").unwrap_or_default()),
+    ];
+    fn fill(v: &mut Value, vars: &[(&str, String)]) {
+        match v {
+            Value::String(s) => {
+                for (k, val) in vars {
+                    if s.contains(k) {
+                        *s = s.replace(k, val);
+                    }
+                }
+                while let Some(i) = s.find("${env:") {
+                    let Some(end) = s[i..].find('}') else { break };
+                    let name = s[i + 6..i + end].to_string();
+                    *s = format!("{}{}{}", &s[..i], std::env::var(&name).unwrap_or_default(), &s[i + end + 1..]);
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(|x| fill(x, vars)),
+            Value::Object(o) => o.values_mut().for_each(|x| fill(x, vars)),
+            _ => {}
+        }
+    }
+    v["configurations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut c| {
+            fill(&mut c, &vars);
+            let s = |k: &str| c[k].as_str().unwrap_or("").to_string();
+            let cwd = c["cwd"].as_str().map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
+            let mut extra = c.clone();
+            if let Some(o) = extra.as_object_mut() {
+                for k in ["name", "type", "request", "program", "args", "cwd", "stopOnEntry"] {
+                    o.remove(k);
+                }
+            }
+            let args = match &c["args"] {
+                Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
+                Value::String(s) => s.split_whitespace().map(str::to_string).collect(),
+                _ => Vec::new(),
+            };
+            LaunchConfig {
+                name: s("name"),
+                kind: s("type"),
+                launch: Launch {
+                    program: PathBuf::from(s("program")),
+                    args,
+                    cwd,
+                    stop_on_entry: c["stopOnEntry"].as_bool().unwrap_or(false),
+                    request: if s("request").is_empty() { "launch".into() } else { s("request") },
+                    name: s("name"),
+                    extra,
+                },
+            }
+        })
+        .collect()
 }
 
 impl Drop for DapClient {

@@ -10,6 +10,7 @@ use turbine_ui::list::ListView;
 use turbine_ui::theme::vga;
 use turbine_ui::Canvas;
 
+mod debug_more;
 mod explorer_ops;
 mod extensions;
 pub use extensions::extension_dirs;
@@ -223,6 +224,7 @@ pub struct Workbench {
     /// Languages with no server (or whose server failed): not tried again.
     lsp_missing: HashSet<String>,
     lspx: lsp_more::LspExtra,
+    dbx: debug_more::DebugExtra,
     lsp_spawn: LspSpawner,
     lsp_requests: HashMap<(LspKey, i64), (LspReq, u32)>,
     completion: Option<Completion>,
@@ -422,8 +424,11 @@ fn menus() -> Vec<Menu> {
                 it("~A~rguments...", "", "run.arguments"),
                 sep(),
                 it("Toggle ~B~reakpoint", "Ctrl+F8", "run.breakpoint"),
-                soon("Add ~W~atch...", "Ctrl+F7", "run.watch"),
-                soon("E~v~aluate/Modify...", "Ctrl+F4", "run.evaluate"),
+                it("Breakpoint Con~d~ition...", "Ctrl+Shift+F8", "run.bp_condition"),
+                it("Add ~W~atch...", "Ctrl+F7", "run.watch"),
+                it("E~v~aluate/Modify...", "Ctrl+F4", "run.evaluate"),
+                it("~I~mmediate Window", "Ctrl+Shift+Y", "run.immediate"),
+                it("Debug Co~n~figurations...", "", "run.configurations"),
                 it("~C~all Stack", "Ctrl+F3", "run.stack"),
                 sep(),
                 soon("C~o~mpile", "Alt+F9", "build.compile"),
@@ -543,6 +548,7 @@ impl Workbench {
             lsp: HashMap::new(),
             lsp_missing: HashSet::new(),
             lspx: Default::default(),
+            dbx: Default::default(),
             lsp_spawn: default_lsp_spawner(),
             lsp_requests: HashMap::new(),
             completion: None,
@@ -787,6 +793,7 @@ impl Workbench {
         let d = self.desktop();
         let (title, rect) = match kind {
             "output" => ("Output", Rect::new(d.x, d.bottom() - (d.h / 3).max(6), d.w / 2, (d.h / 3).max(6))),
+            "immediate" => ("Immediate", Rect::new(d.x, d.bottom() - (d.h / 4).max(5), d.w, (d.h / 4).max(5))),
             _ => ("Debug", Rect::new(d.x + d.w / 2, d.bottom() - (d.h / 3).max(6), d.w - d.w / 2, (d.h / 3).max(6))),
         };
         let mut win = Window::new(self.next_id, title, rect);
@@ -829,7 +836,16 @@ impl Workbench {
 
     fn show_debug_info(&mut self) {
         let Some(d) = &self.debug else { return };
-        let mut t = String::from("Call stack\n");
+        let mut t = String::new();
+        if !self.dbx.watches.is_empty() {
+            t.push_str("Watch\n");
+            for l in self.watch_lines() {
+                t.push_str(&l);
+                t.push('\n');
+            }
+            t.push('\n');
+        }
+        t.push_str("Call stack\n");
         for f in &d.frames {
             let place = f.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             t.push_str(&format!("  {}  {}:{}\n", f.name, place, f.line));
@@ -886,21 +902,32 @@ impl Workbench {
     }
 
     fn start_debugging(&mut self, stop_on_entry: bool) {
+        if self.start_with_config(stop_on_entry) {
+            return;
+        }
         let Some((root, program, lang)) = self.guess_program() else {
             self.say("Open a file of the program to debug first");
             return;
         };
         let args = self.run_config.get(&root).map(|(_, a)| a.clone()).unwrap_or_default();
-        let launch = Launch { program: program.clone(), args, cwd: root.clone(), stop_on_entry, extra: serde_json::Value::Null };
+        let launch = Launch { program: program.clone(), args, cwd: root.clone(), stop_on_entry, ..Default::default() };
         match (self.dap_spawn)(&lang, launch, self.breakpoints.clone()) {
             None => self.say(format!("No debugger for {lang}: install lldb-dap, gdb, debugpy or dlv")),
             Some(Err(e)) => self.say(format!("Debugger didn't start: {e}")),
-            Some(Ok(c)) => {
+            Some(Ok(mut c)) => {
+                c.options = self.dbx.bp_opts.clone();
                 self.say(format!("Debugging {} with {}", program.display(), c.name()));
-                self.debug = Some(Debug { client: c, frames: Vec::new(), scopes: Vec::new(), temp: None });
-                self.debug_layout();
+                self.debug_started(c);
             }
         }
+    }
+
+    fn debug_started(&mut self, c: DapClient) {
+        self.debug = Some(Debug { client: c, frames: Vec::new(), scopes: Vec::new(), temp: None });
+        for v in &mut self.dbx.watch_vals {
+            *v = None;
+        }
+        self.debug_layout();
     }
 
     fn debug_command(&mut self, cmd: &str) {
@@ -1508,8 +1535,11 @@ impl Workbench {
                         }
                         self.say(format!("Stopped ({reason}) in {} at line {}", f.name, f.line));
                     }
+                    self.eval_watches();
                     self.show_debug_info();
                 }
+                DapEvent::Evaluated { id, result } => self.debug_evaluated(id, result),
+                DapEvent::Children { .. } => {}
                 DapEvent::Variables { scopes } => {
                     if let Some(d) = &mut self.debug {
                         d.scopes = scopes;
@@ -2128,6 +2158,11 @@ impl Workbench {
             "run.arguments" => self.arguments_dialog(),
             "lsp.hover" => self.lsp_request(LspReq::Hover),
             "go.definition" => self.lsp_request(LspReq::Definition),
+            "run.watch" => self.add_watch_dialog(),
+            "run.evaluate" => self.evaluate_dialog(),
+            "run.bp_condition" => self.breakpoint_dialog(),
+            "run.immediate" => self.open_immediate(),
+            "run.configurations" => self.edit_launch_json(),
             "edit.format" => self.lsp_format(),
             "edit.quick_fix" => self.lsp_quick_fix(),
             "lsp.signature" => self.lsp_signature(),
@@ -2609,6 +2644,31 @@ impl Workbench {
             }
             return;
         }
+        if kind == "watch" {
+            let e = d.value("expr").unwrap_or_default();
+            self.add_watch(&e);
+            return;
+        }
+        if kind == "evaluate" {
+            self.evaluate_button(d, &b);
+            return;
+        }
+        if let Some(rest) = kind.strip_prefix("bp_opts:") {
+            let rest = rest.to_string();
+            self.breakpoint_done(&d, &b, &rest);
+            return;
+        }
+        if let Some(rest) = kind.strip_prefix("launch_cfg:") {
+            let (stop, root) = rest.split_once('\u{1f}').unwrap_or(("0", ""));
+            let (stop, root) = (stop == "1", PathBuf::from(root));
+            let name = d.value("config").unwrap_or_default();
+            let (_, configs) = self.launch_configs();
+            if let Some(c) = configs.into_iter().find(|c| c.name == name) {
+                self.dbx.config.insert(root, name);
+                self.start_config(c, stop);
+            }
+            return;
+        }
         if kind == "rename_symbol" {
             let name = d.value("name").unwrap_or_default().trim().to_string();
             if !name.is_empty() {
@@ -2929,6 +2989,14 @@ impl Workbench {
             Some("lsp.hover")
         } else if k.is(Key::F(9), Mods::CTRL) {
             Some("run.run")
+        } else if k.is(Key::F(7), Mods::CTRL) {
+            Some("run.watch")
+        } else if k.is(Key::F(4), Mods::CTRL) {
+            Some("run.evaluate")
+        } else if k.is(Key::F(8), Mods { ctrl: true, shift: true, ..Mods::NONE }) {
+            Some("run.bp_condition")
+        } else if k.mods.ctrl && k.mods.shift && !k.mods.alt && matches!(k.key, Key::Char('y' | 'Y')) {
+            Some("run.immediate")
         } else if k.is(Key::F(7), Mods::NONE) {
             Some("run.step_into")
         } else if k.is(Key::F(8), Mods::NONE) && self.debug.is_some() {
@@ -2988,8 +3056,12 @@ impl Workbench {
                 return;
             }
         }
+        // The Immediate window runs its lines.
+        if self.immediate_key(&k) {
+            return;
+        }
         // Help, Debug and Output windows are read-only: only moving around.
-        if self.windows.last().is_some_and(|w| w.special.is_some()) {
+        if self.windows.last().is_some_and(|w| w.special.is_some() && w.special != Some("immediate")) {
             let editing = matches!(k.key, Key::Char(_) | Key::Enter | Key::Backspace | Key::Delete | Key::Tab)
                 && !(k.mods.ctrl && matches!(k.key, Key::Char('c' | 'C' | 'a' | 'A')));
             if editing {
@@ -4874,6 +4946,121 @@ mod tests {
         keys(&mut wb, &["F12"]);
         assert!(wb.dialog.is_none(), "offered once");
         assert!(wb.message.as_ref().unwrap().0.contains("Install Language Server"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn debugger_watches_evaluate_conditions_immediate() {
+        let dir = std::env::temp_dir().join(format!("turbine-dbg2-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let f = dir.join("prog.py");
+        std::fs::write(&f, "print(a)\nx = 1\nprint(b)\nprint(c)\nprint(d)\n").unwrap();
+        let mut wb = Workbench::new(&[f.clone()]);
+        wb.set_lsp_spawner(Box::new(|_, _| None));
+        wb.set_dap_spawner(Box::new(|_, launch, bps| {
+            Some(turbine_services::fake::fake_debug_adapter().map(|rpc| DapClient::with_rpc(rpc, launch, bps)))
+        }));
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+        let special = |wb: &Workbench, k: &str| wb.windows.iter().find(|w| w.special == Some(k)).map(|w| w.ed.doc.rope.to_string()).unwrap_or_default();
+        let set_bp = |wb: &mut Workbench, line: usize, fields: &[&str]| {
+            wb.goto_file(&f, Some(line), 0);
+            keys(wb, &["Ctrl+Shift+F8"]);
+            assert!(wb.dialog.as_ref().is_some_and(|d| d.kind.starts_with("bp_opts:")));
+            for (i, t) in fields.iter().enumerate() {
+                if i > 0 {
+                    keys(wb, &["Tab"]);
+                }
+                run(wb, json!({"cmd": "type", "text": t}));
+            }
+            keys(wb, &["Enter"]);
+            assert!(wb.dialog.is_none());
+        };
+        // Line 2 never stops (its condition); line 3 logs; line 4 stops.
+        set_bp(&mut wb, 1, &["line > 9"]);
+        set_bp(&mut wb, 2, &["", "", "at line {line}"]);
+        set_bp(&mut wb, 3, &["line == 4"]);
+        assert_eq!(wb.breakpoints.get(&Workbench::canon(&f)).map(|s| s.len()), Some(3));
+
+        // Watches, before running: not available yet.
+        keys(&mut wb, &["Ctrl+F7"]);
+        run(&mut wb, json!({"cmd": "type", "text": "text"}));
+        keys(&mut wb, &["Enter"]);
+        wb.add_watch("nope");
+        wb.tick(Instant::now());
+        assert!(wb.shell.debug_view.rows.iter().any(|r| r.text == "text: <not available>"));
+
+        keys(&mut wb, &["Ctrl+F9"]);
+        wait_until(&mut wb, "the conditional stop", |wb| wb.windows.iter().any(|w| w.ed.exec_line == Some(3)));
+        assert!(special(&wb, "output").contains("at line 3\n"), "{}", special(&wb, "output"));
+        wait_until(&mut wb, "watches", |wb| special(wb, "debug").contains("text: \"print(c)\"") && special(wb, "debug").contains("nope: <name 'nope' is not defined>"));
+
+        // Ctrl+F4: evaluate, then modify.
+        keys(&mut wb, &["Ctrl+F4"]);
+        run(&mut wb, json!({"cmd": "type", "text": "line"}));
+        keys(&mut wb, &["Enter"]);
+        wait_until(&mut wb, "the result", |wb| wb.dialog.as_ref().and_then(|d| d.value("result")).as_deref() == Some("4"));
+        let d = wb.dialog.as_mut().unwrap();
+        d.set_value("expr", "x");
+        d.set_value("value", "42");
+        let d = wb.dialog.take().unwrap();
+        wb.finish_dialog(d, Some("modify".into()));
+        wait_until(&mut wb, "the change", |wb| wb.dialog.as_ref().and_then(|d| d.value("result")).as_deref() == Some("42"));
+        keys(&mut wb, &["Esc"]);
+
+        // The Immediate window runs what's typed in the stopped program.
+        keys(&mut wb, &["Ctrl+Shift+Y"]);
+        assert_eq!(wb.windows.last().unwrap().special, Some("immediate"));
+        run(&mut wb, json!({"cmd": "type", "text": "x"}));
+        keys(&mut wb, &["Enter"]);
+        wait_until(&mut wb, "the answer", |wb| special(wb, "immediate") == "x\n42\n");
+
+        // Delete removes a watch in Run and Debug.
+        wb.show_tab(crate::dock::Tab::Debug);
+        wb.shell.focus = Focus::View(crate::dock::Tab::Debug);
+        wb.shell.debug_view.select(2);
+        keys(&mut wb, &["Delete"]);
+        assert_eq!(wb.dbx.watches, vec!["text".to_string()]);
+
+        wb.shell.focus = Focus::Editors;
+        keys(&mut wb, &["Ctrl+F9"]);
+        wait_until(&mut wb, "finish", |wb| wb.debug.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn debugger_launch_configurations() {
+        let dir = std::env::temp_dir().join(format!("turbine-dbg3-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join(".vscode")).unwrap();
+        std::fs::write(dir.join("one.py"), "print(one)\n").unwrap();
+        std::fs::write(dir.join("two.py"), "print(two)\n").unwrap();
+        std::fs::write(
+            dir.join(".vscode/launch.json"),
+            "{\n  // comments, as VS Code writes them\n  \"configurations\": [\n    {\"name\": \"One\", \"type\": \"debugpy\", \"request\": \"launch\", \"program\": \"${workspaceFolder}/one.py\"},\n    {\"name\": \"Two\", \"type\": \"debugpy\", \"request\": \"launch\", \"program\": \"${workspaceFolder}/two.py\",},\n  ],\n}\n",
+        )
+        .unwrap();
+        let mut wb = Workbench::new(&[dir.join("one.py")]);
+        wb.set_lsp_spawner(Box::new(|_, _| None));
+        let langs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = langs.clone();
+        wb.set_dap_spawner(Box::new(move |lang, launch, bps| {
+            seen.borrow_mut().push(lang.to_string());
+            Some(turbine_services::fake::fake_debug_adapter().map(|rpc| DapClient::with_rpc(rpc, launch, bps)))
+        }));
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+        wb.run_command("run.debug");
+        let d = wb.dialog.as_ref().expect("which configuration");
+        assert_eq!(d.title, "Select Debug Configuration");
+        keys(&mut wb, &["Down", "Enter"]);
+        let special = |wb: &Workbench, k: &str| wb.windows.iter().find(|w| w.special == Some(k)).map(|w| w.ed.doc.rope.to_string()).unwrap_or_default();
+        wait_until(&mut wb, "finish", |wb| wb.debug.is_none() && special(wb, "output") == "two\n");
+        assert_eq!(*langs.borrow(), vec!["python".to_string()]);
+        // The choice is remembered.
+        wb.run_command("run.debug");
+        assert!(wb.dialog.is_none());
+        wait_until(&mut wb, "again", |wb| wb.debug.is_none() && special(wb, "output") == "two\ntwo\n");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
