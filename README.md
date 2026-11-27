@@ -109,8 +109,8 @@ comes back once the action has finished on screen.
 - The automation socket, plus `--headless --script` for tests and screenshots
 
 The plan covers much more:
-WASI extensions, Emacs and VS Code keymaps, AI completion and an
-assistant, hearth AI hub integration, a global menu, desktop and web front
+WASI extensions, Emacs and VS Code keymaps, an assistant that works as an
+agent, a global menu, desktop and web front
 ends (a cxx-qt Qt app and a Leptos web app, no JavaScript), and retro
 platforms. See [docs/DESIGN.md](docs/DESIGN.md) and
 [docs/STATUS.md](docs/STATUS.md).
