@@ -4,6 +4,7 @@
 //! run a [`workbench::Workbench`] as a `turbine_ui::App`.
 
 pub mod agent;
+pub mod file_dialog;
 pub mod mcp;
 pub mod server;
 pub mod tools;

@@ -114,9 +114,11 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
+use turbine_text::encoding::{LineEnding, TextEncoding};
 use turbine_text::Document;
 use turbine_ui::automation::Node;
-use turbine_ui::dialog::{Control, Dialog, DialogResult};
+use crate::file_dialog::FileDialog;
+use turbine_ui::dialog::{Dialog, DialogResult};
 use turbine_ui::editor::EditorView;
 use turbine_ui::event::{Button, Event, Key, KeyEvent, KeyKind, Mods, MouseEvent, MouseKind};
 use turbine_ui::menu::{Menu, MenuBar, MenuItem, MenuResult};
@@ -165,6 +167,12 @@ pub struct Workbench {
     /// Windows bottom to top; the last one is active.
     windows: Vec<EdWin>,
     dialog: Option<Dialog>,
+    /// The Open / Save As dialog's state (with `dialog` of kind "filedlg").
+    file_dlg: Option<FileDialog>,
+    /// "Replace it?" over the Save As dialog.
+    overwrite_q: Option<Dialog>,
+    /// Folders files were opened from or saved to, newest first.
+    recent_dirs: Vec<PathBuf>,
     clipboard: String,
     size: (i32, i32),
     quit: bool,
@@ -459,6 +467,9 @@ impl Workbench {
             },
             windows: Vec::new(),
             dialog: None,
+            file_dlg: None,
+            overwrite_q: None,
+            recent_dirs: Vec::new(),
             clipboard: String::new(),
             size: (80, 25),
             quit: false,
@@ -2098,16 +2109,16 @@ impl Workbench {
     }
 
     fn save(&mut self, ask: bool) {
-        let Some(w) = self.windows.last_mut() else { return };
+        let Some(w) = self.windows.last() else { return };
         if ask || w.ed.doc.path.is_none() {
-            let cur = w.ed.doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-            let d = Dialog::new("save_as", "Save As", 52, 8)
-                .input("path", 1, 2, 46, "File ~n~ame:", &cur)
-                .button("ok", 12, 4, "O~K~", true)
-                .button("cancel", 28, 4, "Cancel", false);
-            self.dialog = Some(d);
+            let doc = &w.ed.doc;
+            let dir = doc.path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
+            let name = doc.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let fmt = (Some((doc.encoding, doc.bom)), doc.line_ending);
+            self.file_dialog(true, dir, &name, fmt);
             return;
         }
+        let w = self.windows.last_mut().unwrap();
         let r = w.ed.doc.save();
         let msg = match r {
             Ok(()) => format!("Saved {} ({}, {})", w.ed.doc.title(), w.ed.doc.encoding.name(), w.ed.doc.line_ending.name()),
@@ -2117,31 +2128,187 @@ impl Workbench {
     }
 
     fn open_dialog(&mut self, dir: PathBuf) {
-        let mut items: Vec<String> = Vec::new();
-        if dir.parent().is_some() {
-            items.push("../".into());
-        }
-        let mut entries: Vec<(bool, String)> = std::fs::read_dir(&dir)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .map(|e| {
-                        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        (!is_dir, e.file_name().to_string_lossy().into_owned())
-                    })
-                    .filter(|(_, n)| !n.starts_with('.'))
-                    .collect()
-            })
-            .unwrap_or_default();
-        entries.sort();
-        items.extend(entries.into_iter().map(|(f, n)| if f { n } else { format!("{n}/") }));
-        let title = format!("Open - {}", dir.display());
-        let d = Dialog::new(&format!("open:{}", dir.display()), &title, 60, 18)
-            .input("path", 1, 2, 40, "File ~n~ame:", "")
-            .label(1, 4, "Files:")
-            .list("files", Rect::new(1, 5, 40, 10), items, 0)
-            .button("ok", 44, 2, "~O~pen", true)
-            .button("cancel", 44, 5, "Cancel", false);
+        self.file_dialog(false, Some(dir), "", (None, LineEnding::Lf));
+    }
+
+    /// Open the Open (`save` false) or Save As dialog.
+    fn file_dialog(&mut self, save: bool, dir: Option<PathBuf>, name: &str, fmt: (Option<(TextEncoding, bool)>, LineEnding)) {
+        let cur = self.windows.last().and_then(|w| w.ed.doc.path.clone());
+        let dir = dir
+            .or_else(|| cur.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)))
+            .or_else(|| self.recent_dirs.first().cloned())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let project = cur.as_deref().map(turbine_services::lsp::project_root).or_else(|| std::env::current_dir().ok());
+        let (f, d) = FileDialog::new(save, dir, name, project, &self.recent_dirs, fmt.0, fmt.1, self.size);
+        self.file_dlg = Some(f);
         self.dialog = Some(d);
+    }
+
+    fn remember_dir(&mut self, p: &Path) {
+        if let Some(d) = p.parent() {
+            self.recent_dirs.retain(|x| x != d);
+            self.recent_dirs.insert(0, d.to_path_buf());
+            self.recent_dirs.truncate(8);
+        }
+    }
+
+    /// The file dialog reacting to its controls changing or a row picked.
+    /// Returns true when the dialog should close and `finish` with OK.
+    fn file_dialog_event(&mut self, r: &DialogResult) -> bool {
+        let (Some(f), Some(d)) = (&mut self.file_dlg, &mut self.dialog) else { return false };
+        match r {
+            DialogResult::Changed(id) => match id.as_str() {
+                "places" => {
+                    if let Some((_, p)) = d.selected_index("places").and_then(|i| f.places.get(i)) {
+                        let p = p.clone();
+                        f.go(p, d);
+                    }
+                }
+                "fname" | "type" | "hidden" => f.refresh(d),
+                "fname:backspace" | "files:backspace" => f.up(d),
+                "files" if f.save => {
+                    // (Picking a file to save over fills in its name.)
+                    if let Some(Some((p, false))) = f.selected(d) {
+                        let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        d.set_value("fname", &n);
+                    }
+                }
+                _ => {}
+            },
+            DialogResult::Activated(id) if id == "places" => {
+                if let Some((_, p)) = d.selected_index("places").and_then(|i| f.places.get(i)) {
+                    let p = p.clone();
+                    f.go(p, d);
+                    d.focus_id("files");
+                }
+            }
+            DialogResult::Activated(id) if id == "files" => match f.selected(d) {
+                Some(None) => f.up(d),
+                Some(Some((p, true))) => f.go(p, d),
+                Some(Some((p, false))) => {
+                    let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    d.set_value("fname", &n);
+                    return true;
+                }
+                None => {}
+            },
+            DialogResult::Button(b) if b == "ok" => {
+                // A folder typed or selected is entered, not returned.
+                if let Some(t) = f.target(d) {
+                    if t.is_dir() {
+                        f.go(t, d);
+                        return false;
+                    }
+                }
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// OK in the file dialog: open, or save (asking before replacing).
+    fn finish_file_dialog(&mut self, overwrite_ok: bool) {
+        let (Some(f), Some(d)) = (self.file_dlg.as_ref(), self.dialog.as_ref()) else { return };
+        let Some(p) = f.target(d) else { return };
+        if !f.save {
+            self.dialog = None;
+            self.file_dlg = None;
+            self.remember_dir(&p);
+            self.open_path(&p);
+            return;
+        }
+        if d.value("fname").unwrap_or_default().trim().is_empty() {
+            return;
+        }
+        if p.exists() && !overwrite_ok {
+            // Ask over the file dialog; Yes comes back here.
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let q = Dialog::new("overwrite", "Replace File", 50, 7)
+                .label(1, 1, &format!("{name} already exists. Replace it?"))
+                .button("yes", 10, 3, "~Y~es", false)
+                .button("cancel", 26, 3, "~N~o", true);
+            self.overwrite_q = Some(q);
+            return;
+        }
+        let fmt = f.format(d);
+        self.dialog = None;
+        self.file_dlg = None;
+        self.remember_dir(&p);
+        if let Some(w) = self.windows.last_mut() {
+            if let Some((enc, bom, le)) = fmt {
+                w.ed.doc.encoding = enc;
+                w.ed.doc.bom = bom;
+                w.ed.doc.line_ending = le;
+            }
+            let r = w.ed.doc.save_as(&p);
+            w.win.title = p.display().to_string();
+            w.lang_for = None;
+            let msg = match r {
+                Ok(()) => format!("Saved {} ({}, {})", p.display(), w.ed.doc.encoding.name(), w.ed.doc.line_ending.name()),
+                Err(e) => format!("Save failed: {e}"),
+            };
+            self.say(msg);
+        }
+    }
+
+    /// What a dialog's key, click or paste did.
+    fn dialog_result(&mut self, r: DialogResult) {
+        // (The overwrite question sits over the file dialog.)
+        if self.overwrite_q.is_some() {
+            match r {
+                DialogResult::Button(b) if b == "yes" => {
+                    self.overwrite_q = None;
+                    self.finish_file_dialog(true);
+                }
+                DialogResult::Button(_) | DialogResult::Cancel => self.overwrite_q = None,
+                _ => {}
+            }
+            return;
+        }
+        if self.file_dlg.is_some() && self.dialog.as_ref().is_some_and(|d| d.kind == "filedlg") {
+            match r {
+                DialogResult::Cancel | DialogResult::Button(_) if !matches!(&r, DialogResult::Button(b) if b == "ok") => {
+                    self.dialog = None;
+                    self.file_dlg = None;
+                }
+                _ => {
+                    if self.file_dialog_event(&r) {
+                        self.finish_file_dialog(false);
+                    }
+                }
+            }
+            return;
+        }
+        match r {
+            DialogResult::None | DialogResult::Changed(_) => {}
+            DialogResult::Cancel => {
+                let d = self.dialog.take().unwrap();
+                // (Closing the agent's question is a no.)
+                if d.kind == "agent_approve" {
+                    self.finish_dialog(d, Some("deny".into()));
+                }
+            }
+            DialogResult::Button(b) => {
+                let d = self.dialog.take().unwrap();
+                self.finish_dialog(d, Some(b));
+            }
+            // (A list's Enter or double-click is its dialog's OK.)
+            DialogResult::Activated(_) => {
+                let d = self.dialog.take().unwrap();
+                let ok = d.controls.iter().find_map(|p| match &p.control {
+                    turbine_ui::dialog::Control::Button { id, default: true, .. } => Some(id.clone()),
+                    _ => None,
+                });
+                self.finish_dialog(d, Some(ok.unwrap_or_else(|| "ok".into())));
+            }
+        }
+    }
+
+    /// The dialog on top: the overwrite question, else the dialog.
+    fn top_dialog(&mut self) -> Option<&mut Dialog> {
+        if self.overwrite_q.is_some() { self.overwrite_q.as_mut() } else { self.dialog.as_mut() }
     }
 
     fn unsaved_dialog(&mut self, then: &str) {
@@ -2215,36 +2382,7 @@ impl Workbench {
             self.run_config.insert(PathBuf::from(root), (program, args));
             return;
         }
-        if let Some(dir) = kind.strip_prefix("open:") {
-            let dir = PathBuf::from(dir);
-            let typed = d.value("path").unwrap_or_default();
-            let pick = if typed.trim().is_empty() { d.value("files").unwrap_or_default() } else { typed };
-            let p = if Path::new(&pick).is_absolute() { PathBuf::from(&pick) } else { dir.join(&pick) };
-            if pick.ends_with('/') || p.is_dir() {
-                let p = if pick == "../" { dir.parent().map(Path::to_path_buf).unwrap_or(dir) } else { p };
-                self.open_dialog(p);
-            } else if !pick.is_empty() {
-                self.open_path(&p);
-            }
-            return;
-        }
         match kind.as_str() {
-            "save_as" => {
-                let p = d.value("path").unwrap_or_default();
-                if p.trim().is_empty() {
-                    return;
-                }
-                let p = PathBuf::from(p.trim());
-                if let Some(w) = self.windows.last_mut() {
-                    let r = w.ed.doc.save_as(&p);
-                    w.win.title = p.display().to_string();
-                    let msg = match r {
-                        Ok(()) => format!("Saved {}", p.display()),
-                        Err(e) => format!("Save failed: {e}"),
-                    };
-                    self.say(msg);
-                }
-            }
             "goto" => {
                 if let Ok(n) = d.value("line").unwrap_or_default().trim().parse::<usize>() {
                     if let Some(w) = self.active() {
@@ -2364,8 +2502,9 @@ impl Workbench {
             Event::Key(k) => self.key(k),
             Event::Mouse(m) => self.mouse(m),
             Event::Paste(s) => {
-                if let Some(d) = &mut self.dialog {
-                    d.handle_paste(&s);
+                if let Some(d) = self.top_dialog() {
+                    let r = d.handle_paste(&s);
+                    self.dialog_result(r);
                 } else if let Some(w) = self.active() {
                     match &mut w.term {
                         Some(t) => t.paste(&s),
@@ -2416,21 +2555,9 @@ impl Workbench {
     }
 
     fn key_inner(&mut self, k: KeyEvent) {
-        if let Some(d) = &mut self.dialog {
-            match d.handle_key(&k) {
-                DialogResult::None => {}
-                DialogResult::Cancel => {
-                    let d = self.dialog.take().unwrap();
-                    // (Closing the agent's question is a no.)
-                    if d.kind == "agent_approve" {
-                        self.finish_dialog(d, Some("deny".into()));
-                    }
-                }
-                DialogResult::Button(b) => {
-                    let d = self.dialog.take().unwrap();
-                    self.finish_dialog(d, Some(b));
-                }
-            }
+        if let Some(d) = self.top_dialog() {
+            let r = d.handle_key(&k);
+            self.dialog_result(r);
             return;
         }
         // A terminal gets every key except the few Turbine keeps: F10 (menus),
@@ -2797,21 +2924,9 @@ impl Workbench {
                 }
             }
         }
-        if let Some(d) = &mut self.dialog {
-            match d.handle_mouse(&m) {
-                DialogResult::Button(b) => {
-                    let d = self.dialog.take().unwrap();
-                    self.finish_dialog(d, Some(b));
-                }
-                DialogResult::Cancel => {
-                    let d = self.dialog.take().unwrap();
-                    // (Closing the agent's question is a no.)
-                    if d.kind == "agent_approve" {
-                        self.finish_dialog(d, Some("deny".into()));
-                    }
-                }
-                DialogResult::None => {}
-            }
+        if let Some(d) = self.top_dialog() {
+            let r = d.handle_mouse(&m);
+            self.dialog_result(r);
             return;
         }
         match self.menubar.handle_mouse(&m, screen) {
@@ -3003,32 +3118,10 @@ impl Workbench {
             root = root.child(wn);
         }
         if let Some(d) = &self.dialog {
-            let mut dn = Node::new(format!("dialog.{}", d.kind), "dialog", d.title.clone(), d.rect).focused(true);
-            for (i, p) in d.controls.iter().enumerate() {
-                let r = d.control_rect(i);
-                let (name, value) = match &p.control {
-                    Control::Label { text } => (text.clone(), None),
-                    Control::Input { label, value, .. } => (label.replace('~', ""), Some(value.clone())),
-                    Control::Button { label, .. } => (label.replace('~', ""), None),
-                    Control::List { items, selected, .. } => {
-                        (format!("{} items", items.len()), items.get(*selected).cloned())
-                    }
-                };
-                let id = p.control.id().map(|s| format!("dialog.{s}")).unwrap_or_else(|| format!("dialog.label{i}"));
-                let mut n = Node::new(id, p.control.role(), name, r).focused(i == d.focus);
-                if let Some(v) = value {
-                    n = n.value(v);
-                }
-                if let Control::List { items, scroll, .. } = &p.control {
-                    for (row, it) in items.iter().enumerate().skip(*scroll).take(r.h as usize) {
-                        let ir = Rect::new(r.x, r.y + (row - scroll) as i32, r.w, 1);
-                        let cid = format!("{}.{row}", n.id);
-                        n = n.child(Node::new(cid, "listitem", it.clone(), ir));
-                    }
-                }
-                dn = dn.child(n);
-            }
-            root = root.child(dn);
+            root = root.child(d.automation_node());
+        }
+        if let Some(q) = &self.overwrite_q {
+            root = root.child(q.automation_node());
         }
         if let Some(comp) = self.completion.as_ref().filter(|c| !c.popup.items.is_empty()) {
             let mut list = Node::new("completion", "list", "Completions", comp.popup.rect()).focused(true);
@@ -3455,9 +3548,14 @@ impl App for Workbench {
                 comp.popup.draw(&mut c, at, desk, &theme);
             }
         }
-        if let Some(d) = &mut self.dialog {
+        if let (Some(f), Some(d)) = (&mut self.file_dlg, &mut self.dialog) {
+            d.layout(screen);
+            f.fit(d);
+        }
+        for d in [&mut self.dialog, &mut self.overwrite_q].into_iter().flatten() {
             d.layout(screen);
             d.draw(&mut c, &theme);
+            d.draw_overlays(&mut c, &theme);
         }
         self.menubar.draw_dropdown(&mut c, &theme, screen);
         // The agent's pointer: a highlighted cell, like a DOS mouse cursor.
@@ -3536,6 +3634,41 @@ mod tests {
         for c in chords {
             assert_eq!(run(wb, json!({"cmd": "key", "key": c}))["ok"], true, "{c}");
         }
+    }
+
+    #[test]
+    fn file_dialog_opens_and_saves_as() {
+        let dir = std::env::temp_dir().join(format!("turbine-fdlg-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/hello.bas"), "PRINT \"HI\"\r\n").unwrap();
+        let mut wb = bench();
+        wb.open_dialog(dir.clone());
+        // Into "sub/" by typing its name and Enter, then a file by filter.
+        run(&mut wb, json!({"cmd": "type", "text": "sub"}));
+        keys(&mut wb, &["Enter"]);
+        assert!(wb.file_dlg.as_ref().unwrap().dir.ends_with("sub"));
+        run(&mut wb, json!({"cmd": "type", "text": "hel"}));
+        keys(&mut wb, &["Enter"]);
+        assert!(wb.dialog.is_none());
+        assert_eq!(run(&mut wb, json!({"cmd": "text"}))["text"], "PRINT \"HI\"\n");
+        // Save As over an existing file asks first; CP437 + CRLF chosen.
+        std::fs::write(dir.join("out.txt"), "old").unwrap();
+        wb.save(true);
+        let d = wb.dialog.as_mut().unwrap();
+        assert_eq!(d.value("fname").as_deref(), Some("hello.bas"));
+        d.set_value("fname", &dir.join("out.txt").display().to_string());
+        for p in &mut d.controls {
+            if let turbine_ui::dialog::Control::Combo { id, selected, .. } = &mut p.control {
+                *selected = if id == "encoding" { 4 } else { 1 };
+            }
+        }
+        keys(&mut wb, &["Enter"]);
+        assert!(wb.overwrite_q.is_some());
+        keys(&mut wb, &["Alt+Y"]);
+        assert!(wb.dialog.is_none() && wb.overwrite_q.is_none());
+        assert_eq!(std::fs::read(dir.join("out.txt")).unwrap(), b"PRINT \"HI\"\r\n");
+        assert_eq!(wb.recent_dirs.first(), Some(&std::fs::canonicalize(&dir).unwrap()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

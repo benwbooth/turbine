@@ -7,12 +7,14 @@
 | Menu bar (Cursor's menus + Borland's ≡, Search, Run/Compile/Debug, Options, Window), drop-downs, status bar | done; unbuilt features shown disabled |
 | Responsive menu bar (tightens; overflow stays keyboard-reachable) | done; overflow "»" menu for the mouse planned |
 | Windows: move, resize from edges/corner, zoom, tile, cascade | done |
-| Dialogs: label, input, button, list | done |
+| Dialogs: label, input, button, list (with column header), check box, radio button, combo box (drop-down), group box | done |
+| Resizable, movable dialogs: drag the title to move, the right/bottom edge or grip to resize; controls stretch or follow by anchors | done |
+| File Open / Save As: places + recent folders, files list with size and date columns that fit the width, type-to-filter, Backspace goes up, file type filter, hidden files, encoding and line endings on save, replace-file question | done |
 | Editor: graphemes, selection, clipboard, undo, auto-indent, bidi | done |
 | Encodings: UTF-8/16, DOS CP437/850, chardetng, line endings | done |
 | Colour schemes + control styles | 5 schemes (Turbo, QBasic, VB-DOS, Borland Cyan, Amber) + 4 styles (Turbo Vision, QBasic / MS-DOS Edit, VB-DOS, ASCII); a style can bring its scheme and layout; kept in ~/.config/turbine/look.json |
 | QBasic / MS-DOS Edit look, exact (reverse title, ┤↑├, ↑↓ bars, Help right, <F1=Help>, │ 00001:001, no line numbers or colours) | done |
-| VB-DOS look (magenta title bars with ▼▲, blue code windows, dithered desktop, F1=Help │ status) | done; 3-D boxed buttons, framed text boxes and group boxes come with the dialog rework |
+| VB-DOS look (magenta title bars with ▼▲, blue code windows, dithered desktop, F1=Help │ status) | done, with 3-D boxed buttons and group boxes; framed text boxes planned |
 | Automation tree + JSON-lines socket + paced agent driver | done |
 | Agents read terminal screens (snapshot/text) and `wait` for text to appear | done |
 | Headless mode with scripts and text screenshots | done |
