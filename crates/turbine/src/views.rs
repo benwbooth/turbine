@@ -276,6 +276,20 @@ impl Explorer {
         }
     }
 
+    /// Open a folder and the folders down to it, and select it.
+    pub fn expand_path(&mut self, dir: &Path) {
+        let Ok(rel) = dir.strip_prefix(&self.root) else { return };
+        let mut d = self.root.clone();
+        for c in rel.components() {
+            d.push(c);
+            if self.expanded.insert(d.clone()) {
+                self.request(&d);
+            }
+        }
+        self.want = Some(dir.to_path_buf());
+        self.rebuild();
+    }
+
     /// Show a file: open the folders down to it and select it.
     pub fn reveal(&mut self, file: &Path) {
         let Ok(rel) = file.strip_prefix(&self.root) else { return };
@@ -302,6 +316,8 @@ pub struct Outline {
     /// (window id, document version) shown, and asked for.
     shown: Option<(u32, u64)>,
     asked: Option<(u32, u64)>,
+    /// When it last asked (typing waits a moment before asking again).
+    asked_at: Option<Instant>,
     tx: Sender<(u32, u64, Option<Vec<Symbol>>)>,
     rx: Receiver<(u32, u64, Option<Vec<Symbol>>)>,
 }
@@ -309,7 +325,7 @@ pub struct Outline {
 impl Default for Outline {
     fn default() -> Self {
         let (tx, rx) = channel();
-        Outline { list: ListView::new(), lines: Vec::new(), shown: None, asked: None, tx, rx }
+        Outline { list: ListView::new(), lines: Vec::new(), shown: None, asked: None, asked_at: None, tx, rx }
     }
 }
 
@@ -331,11 +347,20 @@ fn symbol_icon(kind: &str) -> &'static str {
 impl Outline {
     /// Ask for the outline of this editor's text (when it changed).
     pub fn update(&mut self, win: u32, version: u64, lang: Option<&str>, text: impl FnOnce() -> String) {
+        // (The language is part of what's asked for: a file's language is
+        // known a moment after it opens, and then it's worth a look.)
+        let version = version.wrapping_mul(2) + u64::from(lang.is_some());
         let key = Some((win, version));
         if self.asked == key {
             return;
         }
+        // (The same file being typed in: wait a moment between parses.)
+        let same_file = self.asked.is_some_and(|(w, _)| w == win);
+        if same_file && self.asked_at.is_some_and(|t| t.elapsed() < Duration::from_millis(300)) {
+            return;
+        }
         self.asked = key;
+        self.asked_at = Some(Instant::now());
         let Some(lang) = lang.map(str::to_string) else {
             self.lines.clear();
             self.list.set_rows(vec![Row::new("No outline for this file")]);
@@ -375,6 +400,24 @@ impl Outline {
             changed = true;
         }
         changed
+    }
+
+    /// The outline is of this window.
+    pub fn shows(&self, win: u32) -> bool {
+        self.shown.is_some_and(|(w, _)| w == win)
+    }
+
+    /// The definitions the line is in, outermost first: (icon, name, line).
+    pub fn chain(&self, line: usize) -> Vec<(String, String, usize)> {
+        let mut stack: Vec<(u16, String, String, usize)> = Vec::new();
+        for (row, &l) in self.list.rows.iter().zip(&self.lines) {
+            if l > line {
+                break;
+            }
+            stack.retain(|(d, ..)| *d < row.indent);
+            stack.push((row.indent, row.icon.clone(), row.text.clone(), l));
+        }
+        stack.into_iter().map(|(_, i, n, l)| (i, n, l)).collect()
     }
 
     /// The row for the cursor's line (the definition it's in).

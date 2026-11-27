@@ -374,6 +374,7 @@ fn menus() -> Vec<Menu> {
                 it("Secondar~y~ Side Bar", "Ctrl+Alt+B", "view.secondary"),
                 it("Split Edi~t~or", "Ctrl+\\", "view.split"),
                 it("Editor Ta~b~s", "", "view.editor_tabs"),
+                it("Brea~d~crumbs", "", "view.breadcrumbs"),
                 it("Reset La~y~out", "", "view.reset_layout"),
                 sep(),
                 it("~L~ine Numbers", "", "view.line_numbers"),
@@ -1983,6 +1984,7 @@ impl Workbench {
                     "view.panel" => it.checked = Some(self.shell.dock.bottom.visible),
                     "view.secondary" => it.checked = Some(self.shell.dock.right.visible),
                     "view.editor_tabs" => it.checked = Some(self.shell.dock.editor_tabs),
+                    "view.breadcrumbs" => it.checked = Some(self.shell.dock.breadcrumbs),
                     _ => {}
                 }
             }
@@ -4478,6 +4480,25 @@ mod tests {
     }
 
     #[test]
+    fn breadcrumbs_show_folders_file_and_symbol_and_click_through() {
+        let (dir, mut wb) = project("crumbs");
+        wb.goto_file(&dir.join("src/main.rs"), Some(1), 4);
+        let names = |wb: &Workbench| wb.shell.crumbs.iter().map(|(_, t, _)| t.clone()).collect::<Vec<_>>();
+        wait_until(&mut wb, "the symbol", |wb| names(wb).iter().any(|t| t.ends_with(" main")));
+        let n = names(&wb);
+        let root = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(n[0], root);
+        assert_eq!(n[1], "src");
+        assert!(n[2].ends_with("main.rs"), "{n:?}");
+        // The "src" crumb: the Explorer opens there.
+        let r = run(&mut wb, json!({"cmd": "click", "target": "button:src"}));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(wb.shell.focus, Focus::View(crate::dock::Tab::Explorer));
+        assert!(wb.shell.explorer.expanded.contains(&dir.join("src")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn language_server_diagnostics_completion_definition_hover() {
         let dir = std::env::temp_dir().join(format!("turbine-lsp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -4813,6 +4834,7 @@ mod tests {
         // (The window alone, as the original showed it: no side bar or tabs.)
         wb.run_command("view.sidebar");
         wb.run_command("view.editor_tabs");
+        wb.run_command("view.breadcrumbs");
         wb.dispatch(Event::Resize(80, 25));
         run(&mut wb, json!({"cmd": "menu", "path": "Options/Control Style..."}));
         run(&mut wb, json!({"cmd": "click", "target": "listitem:QBasic / MS-DOS Edit"}));
@@ -4838,6 +4860,7 @@ mod tests {
         // (The window alone, as the original showed it: no side bar or tabs.)
         wb.run_command("view.sidebar");
         wb.run_command("view.editor_tabs");
+        wb.run_command("view.breadcrumbs");
         wb.dispatch(Event::Resize(80, 25));
         wb.apply_style(turbine_ui::theme::ControlStyle::vbdos());
         assert_eq!(wb.theme.scheme.name, "VB-DOS");

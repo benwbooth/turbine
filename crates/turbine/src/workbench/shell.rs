@@ -54,6 +54,17 @@ pub(super) struct Shell {
     pub split_pending: Option<u32>,
     /// Each mirror group's document as last synced: (version, dirty, path).
     pub mirrored: HashMap<u32, (u64, bool, Option<PathBuf>)>,
+    /// The breadcrumbs from the last layout: their places, labels and where
+    /// each goes.
+    pub crumbs: Vec<(Rect, String, Crumb)>,
+}
+
+/// Where a breadcrumb goes.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Crumb {
+    Folder(PathBuf),
+    File,
+    Symbol(usize),
 }
 
 impl Shell {
@@ -78,6 +89,7 @@ impl Shell {
             split: None,
             split_pending: None,
             mirrored: HashMap::new(),
+            crumbs: Vec::new(),
         }
     }
 }
@@ -156,6 +168,7 @@ impl Workbench {
         self.shell.dock.icons = self.theme.style.icons;
         let l = self.layout();
         self.layout_editor_tabs(&l);
+        self.layout_crumbs(&l);
         // (The views' lists learn their places here too, so keys and agents
         // know them before anything is drawn.)
         for side in [Side::Left, Side::Bottom, Side::Right] {
@@ -244,6 +257,65 @@ impl Workbench {
         }
     }
 
+    /// The breadcrumbs: the file's folders from the project down, the file,
+    /// and the definitions the cursor is in. A long path loses its start.
+    fn layout_crumbs(&mut self, l: &Layout) {
+        self.shell.crumbs.clear();
+        let Some(r) = l.breadcrumbs else { return };
+        let Some(i) = self.editor_index() else { return };
+        let w = &self.windows[i];
+        let mut items: Vec<(String, Crumb)> = Vec::new();
+        let icons = self.theme.style.icons;
+        match &w.ed.doc.path {
+            Some(p) => {
+                let root = &self.shell.explorer.root;
+                let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                let rel = p.strip_prefix(root).ok();
+                let mut dir = if rel.is_some() { root.clone() } else { PathBuf::from("/") };
+                if rel.is_some() {
+                    items.push((root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into()), Crumb::Folder(root.clone())));
+                }
+                let parts: Vec<String> = rel.unwrap_or(&p).iter().map(|c| c.to_string_lossy().into_owned()).filter(|c| c != "/").collect();
+                for (k, part) in parts.iter().enumerate() {
+                    dir.push(part);
+                    if k + 1 == parts.len() {
+                        let icon = if icons { format!("{} ", file_icon(part)) } else { String::new() };
+                        items.push((format!("{icon}{part}"), Crumb::File));
+                    } else {
+                        items.push((part.clone(), Crumb::Folder(dir.clone())));
+                    }
+                }
+            }
+            None => items.push((w.ed.doc.title(), Crumb::File)),
+        }
+        let line = w.ed.cursor_line_col().0;
+        if self.shell.outline.shows(w.win.id) {
+            for (icon, name, l) in self.shell.outline.chain(line) {
+                items.push((format!("{icon} {name}"), Crumb::Symbol(l)));
+            }
+        }
+        // Fit: drop from the start (keeping the file and symbols).
+        let sep = 3;
+        let total = |it: &[(String, Crumb)]| it.iter().map(|(t, _)| str_width(t) as i32 + sep).sum::<i32>();
+        let mut dropped = false;
+        while total(&items) > r.w - 3 && items.len() > 1 && matches!(items[0].1, Crumb::Folder(_)) {
+            items.remove(0);
+            dropped = true;
+        }
+        let mut x = r.x + 1;
+        if dropped {
+            x += 2;
+        }
+        for (t, c) in items {
+            let wdt = str_width(&t) as i32;
+            if x + wdt > r.right() {
+                break;
+            }
+            self.shell.crumbs.push((Rect::new(x, r.y, wdt, 1), t, c));
+            x += wdt + sep;
+        }
+    }
+
     /// The part that has focus, for its frame.
     fn focused_side(&self) -> Option<Side> {
         if self.dialog.is_some() || self.menubar.is_open() {
@@ -312,7 +384,7 @@ impl Workbench {
         if self.shell.outline.poll() {
             self.palette_symbols();
         }
-        let symbols_wanted = self.shell.palette.as_ref().is_some_and(|p| p.input.text.starts_with('@'));
+        let symbols_wanted = self.shell.palette.as_ref().is_some_and(|p| p.input.text.starts_with('@')) || self.shell.dock.breadcrumbs;
         if shown(self, Tab::Outline) || symbols_wanted {
             match self.editor_index() {
                 Some(i) if self.windows[i].special.is_none() => {
@@ -702,7 +774,7 @@ impl Workbench {
     pub(super) fn layout_json(&self) -> Value {
         let d = &self.shell.dock;
         let part = |p: &crate::dock::Part| json!({"visible": p.visible, "size": p.size, "active": p.current().filter(|t| !matches!(t, Tab::Pane(_))).map(|t| t.key())});
-        json!({"left": part(&d.left), "bottom": part(&d.bottom), "right": part(&d.right), "editor_tabs": d.editor_tabs})
+        json!({"left": part(&d.left), "bottom": part(&d.bottom), "right": part(&d.right), "editor_tabs": d.editor_tabs, "breadcrumbs": d.breadcrumbs})
     }
 
     pub(super) fn apply_layout_json(&mut self, v: &Value) {
@@ -726,6 +798,9 @@ impl Workbench {
         }
         if let Some(b) = v["editor_tabs"].as_bool() {
             self.shell.dock.editor_tabs = b;
+        }
+        if let Some(b) = v["breadcrumbs"].as_bool() {
+            self.shell.dock.breadcrumbs = b;
         }
     }
 
@@ -772,6 +847,7 @@ impl Workbench {
             "view.panel" => self.toggle_part(Side::Bottom),
             "view.secondary" => self.toggle_part(Side::Right),
             "view.editor_tabs" => self.shell.dock.editor_tabs = !self.shell.dock.editor_tabs,
+            "view.breadcrumbs" => self.shell.dock.breadcrumbs = !self.shell.dock.breadcrumbs,
             "ai.chat" => self.show_chat(),
             "view.focus_editor" => self.focus_editor(),
             "view.split" => self.toggle_split(),
@@ -1090,6 +1166,24 @@ impl Workbench {
         if press && self.shell.dock.begin_drag(&l, m.pos) {
             return true;
         }
+        // Breadcrumbs: a folder shows in the Explorer, the file or a symbol
+        // opens Go to Symbol.
+        if let Some(br) = l.breadcrumbs {
+            if br.contains(m.pos) {
+                if press {
+                    let hit = self.shell.crumbs.iter().find(|(r, ..)| r.contains(m.pos)).map(|(_, _, c)| c.clone());
+                    match hit {
+                        Some(Crumb::Folder(d)) => {
+                            self.shell.explorer.expand_path(&d);
+                            self.show_tab(Tab::Explorer);
+                        }
+                        Some(Crumb::File) | Some(Crumb::Symbol(_)) => self.open_palette("@"),
+                        None => {}
+                    }
+                }
+                return true;
+            }
+        }
         // Editor tabs.
         if let Some(tr) = l.editor_tabs {
             if tr.contains(m.pos) {
@@ -1275,6 +1369,22 @@ impl Workbench {
                 }
             }
         }
+        // Breadcrumbs.
+        if let Some(br) = l.breadcrumbs {
+            let row = Style::new(s.menu.fg, s.menu.bg);
+            c.fill(br, " ", row);
+            let mut bc = c.sub(br);
+            if self.shell.crumbs.first().is_some_and(|(r, ..)| r.x > br.x + 1) {
+                bc.print(br.x + 1, br.y, "…", row);
+            }
+            let n = self.shell.crumbs.len();
+            for (k, (r, t, _)) in self.shell.crumbs.iter().enumerate() {
+                bc.print(r.x, r.y, t, if k + 1 == n { Style { attrs: turbine_ui::theme::Attrs { bold: true, ..row.attrs }, ..row } } else { row });
+                if k + 1 < n {
+                    bc.print(r.right() + 1, r.y, "»", s.menu_disabled);
+                }
+            }
+        }
         let focused_side = self.focused_side();
         let modal = self.dialog.is_some() || self.menubar.is_open();
         for side in [Side::Left, Side::Bottom, Side::Right] {
@@ -1366,6 +1476,13 @@ impl Workbench {
             pn = pn.child(Node::new("palette.input", "input", p.title(), Rect::new(r.x + 1, r.y + 1, r.w - 2, 1)).focused(true).value(p.input.text.clone()));
             pn = pn.child(p.list.node("palette.list", "Results", false));
             root = root.child(pn);
+        }
+        if let Some(br) = l.breadcrumbs {
+            let mut n = Node::new("breadcrumbs", "toolbar", "Breadcrumbs", br);
+            for (k, (r, t, _)) in self.shell.crumbs.iter().enumerate() {
+                n = n.child(Node::new(format!("breadcrumbs.{k}"), "button", t.clone(), *r));
+            }
+            root = root.child(n);
         }
         if l.editor_tabs.is_some() {
             let mut tabs = Node::new("editor_tabs", "tablist", "Open Editors", l.editor_tabs.unwrap());
