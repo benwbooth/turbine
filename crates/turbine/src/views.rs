@@ -296,6 +296,7 @@ impl Explorer {
                     'M' => "changed",
                     'A' => "added",
                     'U' => "untracked (new)",
+                    'I' => "ignored (.gitignore)",
                     'D' => "deleted",
                     'R' => "renamed",
                     'C' => "in conflict",
@@ -350,9 +351,13 @@ impl Explorer {
             for root in roots {
             let top = std::process::Command::new("git").arg("-C").arg(&root).args(["rev-parse", "--show-toplevel"]).output().ok().filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
             if let Some(top) = top {
-                if let Ok(o) = std::process::Command::new("git").arg("-C").arg(&top).args(["status", "--porcelain=v1", "-z", "--untracked-files=normal"]).output() {
+                if let Ok(o) = std::process::Command::new("git").arg("-C").arg(&top).args(["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignored=matching"]).output() {
                     for (path, code) in crate::filetypes::parse_git_status(&String::from_utf8_lossy(&o.stdout)) {
                         let p = top.join(&path);
+                        if code == 'I' {
+                            out.insert(p, code);
+                            continue;
+                        }
                         // (Its folders show that something in them changed.)
                         let mut d = p.parent();
                         while let Some(x) = d {
@@ -455,7 +460,11 @@ impl Explorer {
             if *is_dir {
                 row = row.bold();
             }
-            if let Some(code) = self.git.get(&p) {
+            // (Ignored by git, or in an ignored folder: dim, as VS Code shows them.)
+            let ignored = p.ancestors().take_while(|a| a.starts_with(&self.root) || self.extra.iter().any(|e| a.starts_with(e))).any(|a| self.git.get(a) == Some(&'I'));
+            if ignored {
+                row = row.fg(vga::DARK_GRAY);
+            } else if let Some(code) = self.git.get(&p) {
                 let (b, c) = crate::filetypes::git_badge(*code);
                 row = row.badge(b, c);
                 // (A changed file's name takes git's colour, as in VS Code.)
@@ -907,6 +916,23 @@ pub struct Scm {
     pub in_field: bool,
     pub status: String,
     pub branch: String,
+    /// Commits ahead of and behind the branch's upstream.
+    pub ahead: u32,
+    pub behind: u32,
+    /// The upstream branch (origin/main), if it has one.
+    pub upstream: Option<String>,
+    /// Each row's git letter (U untracked, M, A, D, R, C conflict; ' ' for headings).
+    pub codes: Vec<char>,
+    /// The repository's top folder (git's paths are from it).
+    pub top: Option<PathBuf>,
+    /// git's answer to the last command run, for the status bar (taken once).
+    pub done: Option<String>,
+    /// The workspace folder the view shows (None: the Explorer's root).
+    pub chosen: Option<PathBuf>,
+    /// Every workspace folder's repository: (folder, branch, changed files),
+    /// looked at now and then when there are several.
+    pub repos: Vec<(PathBuf, String, usize)>,
+    repos_at: Option<Instant>,
     tx: Sender<ScmMsg>,
     rx: Receiver<ScmMsg>,
     busy: bool,
@@ -914,8 +940,15 @@ pub struct Scm {
 }
 
 enum ScmMsg {
-    Status(Result<String, String>),
+    Status(Option<PathBuf>, Result<String, String>),
     Done(Result<String, String>),
+    Repos(Vec<(PathBuf, String, usize)>),
+}
+
+/// The repository's top and its status (with the branch line).
+fn scm_status(root: &Path) -> ScmMsg {
+    let top = git(root, &["rev-parse", "--show-toplevel"]).ok().map(|t| PathBuf::from(t.trim()));
+    ScmMsg::Status(top, git(root, &["status", "--porcelain=v1", "-b", "-uall"]))
 }
 
 pub fn git(root: &Path, args: &[&str]) -> Result<String, String> {
@@ -937,6 +970,15 @@ impl Default for Scm {
             in_field: false,
             status: String::new(),
             branch: String::new(),
+            ahead: 0,
+            behind: 0,
+            upstream: None,
+            codes: Vec::new(),
+            top: None,
+            done: None,
+            chosen: None,
+            repos: Vec::new(),
+            repos_at: None,
             tx,
             rx,
             busy: false,
@@ -955,20 +997,47 @@ impl Scm {
         let tx = self.tx.clone();
         let root = root.to_path_buf();
         std::thread::spawn(move || {
-            let _ = tx.send(ScmMsg::Status(git(&root, &["status", "--porcelain=v1", "-b", "-uall"])));
+            let _ = tx.send(scm_status(&root));
         });
     }
 
-    /// Run a git command, then look again.
-    fn run(&mut self, root: &Path, args: Vec<String>) {
+    /// The folder git commands run in: the repository's top once known
+    /// (status gives paths from it), else the project's.
+    pub fn root_for(&self, root: &Path) -> PathBuf {
+        self.top.clone().unwrap_or_else(|| root.to_path_buf())
+    }
+
+    /// Run a git command, then look again (commit, push, pull and the rest).
+    pub fn run(&mut self, root: &Path, args: Vec<String>) {
+        self.run_all(root, vec![args]);
+    }
+
+    /// Run git commands one after another (stopping at a failure), then look again.
+    pub fn run_all(&mut self, root: &Path, cmds: Vec<Vec<String>>) {
+        self.run_with(root, move |r| {
+            let mut last = Ok(String::new());
+            for args in &cmds {
+                let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                last = git(r, &a);
+                if last.is_err() {
+                    break;
+                }
+            }
+            last
+        });
+    }
+
+    /// Do some work in the repository off the UI thread (its answer the
+    /// status line), then look again.
+    pub fn run_with(&mut self, root: &Path, f: impl FnOnce(&Path) -> Result<String, String> + Send + 'static) {
         let tx = self.tx.clone();
-        let root = root.to_path_buf();
+        let root = self.root_for(root);
         self.busy = true;
+        self.status = "Working…".into();
         std::thread::spawn(move || {
-            let a: Vec<&str> = args.iter().map(String::as_str).collect();
-            let r = git(&root, &a);
+            let r = f(&root);
             let _ = tx.send(ScmMsg::Done(r));
-            let _ = tx.send(ScmMsg::Status(git(&root, &["status", "--porcelain=v1", "-b", "-uall"])));
+            let _ = tx.send(scm_status(&root));
         });
     }
 
@@ -981,16 +1050,109 @@ impl Scm {
     }
 
     pub fn commit(&mut self, root: &Path) -> Result<(), &'static str> {
+        self.commit_with(root, &[])
+    }
+
+    /// Commit (nothing staged: every change, as VS Code's smart commit),
+    /// with more of git's arguments (--amend), the message from the box.
+    pub fn commit_with(&mut self, root: &Path, extra: &[&str]) -> Result<(), &'static str> {
+        let args = self.commit_args(extra)?;
+        self.run(root, args);
+        Ok(())
+    }
+
+    /// git's arguments for a commit (see commit_with); the box is emptied.
+    pub fn commit_args(&mut self, extra: &[&str]) -> Result<Vec<String>, &'static str> {
         let msg = self.message.text.trim().to_string();
-        if msg.is_empty() {
+        let amend = extra.contains(&"--amend");
+        if msg.is_empty() && !amend {
             return Err("Type a commit message first");
         }
-        if !self.entries.iter().flatten().any(|(s, _)| *s) {
-            return Err("Nothing staged: Space stages the selected file");
+        let any_staged = self.entries.iter().flatten().any(|(s, _)| *s);
+        let any = self.entries.iter().flatten().next().is_some();
+        if !any && !amend {
+            return Err("Nothing to commit");
         }
         self.message.set("");
-        self.run(root, vec!["commit".into(), "-m".into(), msg]);
-        Ok(())
+        let mut args: Vec<String> = vec!["commit".into()];
+        if !any_staged && !amend {
+            args.push("--all".into());
+        }
+        args.extend(extra.iter().map(|s| s.to_string()));
+        if msg.is_empty() {
+            args.push("--no-edit".into());
+        } else {
+            args.push("-m".into());
+            args.push(msg);
+        }
+        Ok(args)
+    }
+
+    /// git push's arguments: a branch with no upstream is published to origin.
+    pub fn push_args(&self) -> Vec<String> {
+        if self.upstream.is_none() && !self.branch.is_empty() {
+            vec!["push".into(), "-u".into(), "origin".into(), self.branch.clone()]
+        } else {
+            vec!["push".into()]
+        }
+    }
+
+    /// Whether anything is changed (staged or not).
+    pub fn has_changes(&self) -> bool {
+        self.entries.iter().flatten().next().is_some()
+    }
+
+    /// Show another workspace folder's repository.
+    pub fn choose(&mut self, folder: PathBuf, main_root: &Path) {
+        self.chosen = (folder != main_root).then_some(folder.clone());
+        self.top = None;
+        self.entries.clear();
+        self.codes.clear();
+        self.branch.clear();
+        self.upstream = None;
+        self.ahead = 0;
+        self.behind = 0;
+        self.list.set_rows(vec![Row::new("…")]);
+        self.list.select(0);
+        self.busy = false;
+        self.refresh(&folder);
+    }
+
+    /// The folder the view shows.
+    pub fn base(&self, main_root: &Path) -> PathBuf {
+        self.chosen.clone().unwrap_or_else(|| main_root.to_path_buf())
+    }
+
+    /// Look at every workspace folder's repository (branch, changes), off
+    /// the UI thread, when there are several and it's been a while.
+    pub fn poll_repos(&mut self, folders: Vec<PathBuf>, soon: bool) {
+        if folders.len() < 2 {
+            self.repos.clear();
+            return;
+        }
+        let every = Duration::from_secs(if soon { 6 } else { 30 });
+        if self.repos_at.is_some_and(|t| t.elapsed() < every) {
+            return;
+        }
+        self.repos_at = Some(Instant::now());
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let v = folders
+                .into_iter()
+                .map(|f| {
+                    let out = git(&f, &["status", "--porcelain=v1", "-b"]).unwrap_or_default();
+                    let branch = out.lines().next().and_then(|l| l.strip_prefix("## ")).map(|b| b.split("...").next().unwrap_or(b).split(' ').next().unwrap_or("").to_string()).unwrap_or_default();
+                    let n = out.lines().skip(1).filter(|l| l.len() > 3).count();
+                    (f, branch, n)
+                })
+                .collect();
+            let _ = tx.send(ScmMsg::Repos(v));
+        });
+    }
+
+    /// The (staged, path) on a row.
+    pub fn entry(&self, i: usize) -> Option<(bool, PathBuf)> {
+        self.entries.get(i).cloned().flatten()
     }
 
     pub fn poll(&mut self, root: &Path, shown: bool) -> bool {
@@ -1002,13 +1164,19 @@ impl Scm {
                         Ok(out) => out.lines().next().unwrap_or("Done").to_string(),
                         Err(e) => e.lines().last().unwrap_or("git failed").to_string(),
                     };
+                    self.done = Some(self.status.clone());
                 }
-                ScmMsg::Status(r) => {
+                ScmMsg::Repos(v) => self.repos = v,
+                ScmMsg::Status(top, r) => {
                     self.busy = false;
+                    if top.is_some() {
+                        self.top = top;
+                    }
                     match r {
                         Ok(out) => self.read_status(&out),
                         Err(e) => {
                             self.entries.clear();
+                            self.codes.clear();
                             self.list.set_rows(vec![Row::new(if e.contains("not a git repository") { "Not a git repository".to_string() } else { e })]);
                         }
                     }
@@ -1027,9 +1195,17 @@ impl Scm {
     fn read_status(&mut self, out: &str) {
         let mut staged = Vec::new();
         let mut changes = Vec::new();
+        let mut conflicts = Vec::new();
         for line in out.lines() {
             if let Some(b) = line.strip_prefix("## ") {
-                self.branch = b.split("...").next().unwrap_or(b).to_string();
+                // "main...origin/main [ahead 1, behind 2]"
+                let (head, rest) = b.split_once(' ').unwrap_or((b, ""));
+                let (branch, up) = head.split_once("...").map_or((head, None), |(a, u)| (a, Some(u.to_string())));
+                self.branch = branch.to_string();
+                self.upstream = up;
+                let num = |key: &str| rest.split(key).nth(1).and_then(|t| t.trim_start().split(|c: char| !c.is_ascii_digit()).next()).and_then(|n| n.parse().ok()).unwrap_or(0);
+                self.ahead = num("ahead");
+                self.behind = num("behind");
                 continue;
             }
             if line.len() < 4 {
@@ -1037,6 +1213,11 @@ impl Scm {
             }
             let (x, y) = (line.as_bytes()[0] as char, line.as_bytes()[1] as char);
             let path = line[3..].rsplit(" -> ").next().unwrap_or(&line[3..]).trim_matches('"').to_string();
+            // (Both sides changed it: a merge conflict, its own list.)
+            if matches!((x, y), ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D')) {
+                conflicts.push(('C', path));
+                continue;
+            }
             if x != ' ' && x != '?' {
                 staged.push((x, path.clone()));
             }
@@ -1047,29 +1228,34 @@ impl Scm {
         let colour = |c: char| match c {
             'M' => vga::YELLOW,
             'A' | 'U' => vga::LIGHT_GREEN,
-            'D' => vga::LIGHT_RED,
+            'D' | 'C' => vga::LIGHT_RED,
             _ => vga::LIGHT_CYAN,
         };
         let mut rows = Vec::new();
         let mut entries = Vec::new();
-        for (title, list, is_staged) in [("Staged Changes", &staged, true), ("Changes", &changes, false)] {
+        let mut codes = Vec::new();
+        for (title, list, is_staged) in [("Merge Changes", &conflicts, false), ("Staged Changes", &staged, true), ("Changes", &changes, false)] {
             if list.is_empty() {
                 continue;
             }
             rows.push(Row::new(format!("{title} ({})", list.len())).heading());
             entries.push(None);
+            codes.push(' ');
             for (c, p) in list {
                 let name = Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.clone());
                 let dir = Path::new(p).parent().map(|d| d.display().to_string()).unwrap_or_default();
                 rows.push(Row::new(name).indent(1).icon(c.to_string()).detail(dir).fg(colour(*c)));
                 entries.push(Some((is_staged, PathBuf::from(p))));
+                codes.push(*c);
             }
         }
         if rows.is_empty() {
             rows.push(Row::new("No changes"));
             entries.push(None);
+            codes.push(' ');
         }
         self.entries = entries;
+        self.codes = codes;
         self.list.set_rows(rows);
     }
 }
@@ -1271,5 +1457,13 @@ mod tests {
             ]
         );
         assert_eq!(s.entries[1], Some((true, PathBuf::from("staged.rs"))));
+        assert_eq!((s.ahead, s.behind, s.upstream.as_deref()), (0, 0, Some("origin/main")));
+        // Ahead and behind, a conflict in its own list, no upstream.
+        s.read_status("## dev...origin/dev [ahead 2, behind 13]\nUU both.rs\n");
+        assert_eq!((s.branch.as_str(), s.ahead, s.behind), ("dev", 2, 13));
+        assert_eq!(s.list.rows[0].text, "Merge Changes (1)");
+        assert_eq!(s.codes[1], 'C');
+        s.read_status("## topic\n");
+        assert_eq!((s.upstream.as_deref(), s.push_args()), (None, vec!["push".to_string(), "-u".into(), "origin".into(), "topic".into()]));
     }
 }

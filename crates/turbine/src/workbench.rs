@@ -24,6 +24,7 @@ mod images;
 mod inline_ai;
 mod lsp_more;
 mod preview;
+mod scm;
 mod sections;
 mod session;
 mod tooltip;
@@ -869,6 +870,10 @@ impl Workbench {
     }
 
     fn status_choice(&mut self, a: &str) {
+        if let Some(x) = a.strip_prefix("scm:") {
+            self.scm_action(x);
+            return;
+        }
         let Some(w) = self.windows.iter_mut().rev().find(|w| w.term.is_none() && w.special.is_none()) else { return };
         if let Some(lang) = a.strip_prefix("lang:") {
             w.lang_fixed = (!lang.is_empty()).then(|| lang.to_string());
@@ -3211,7 +3216,7 @@ impl Workbench {
             return;
         }
         let kind = d.kind.clone();
-        if self.ex_dialog_done(&kind, &d) || self.tree_edit_done(&kind, &d) || self.tree_struct_done(&kind, &d) {
+        if self.ex_dialog_done(&kind, &d) || self.scm_dialog_done(&kind, &d) || self.tree_edit_done(&kind, &d) || self.tree_struct_done(&kind, &d) {
             return;
         }
         if let Some(rest) = kind.strip_prefix("install:") {
@@ -6255,6 +6260,71 @@ mod tests {
         let tip = wb.git_mark_tip(Point::new(a.x, a.y)).map(|t| t.1).unwrap_or_default();
         assert!(tip.contains("- fn main() {") && tip.contains("+ fn main() { // changed"), "{tip}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn source_control_commits_ignores_and_switches_repositories() {
+        let (dir, mut wb) = project("scmbar");
+        let git = |d: &Path, args: &[&str]| {
+            let ok = std::process::Command::new("git").arg("-C").arg(d).args(args).output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        let init = |d: &Path| {
+            git(d, &["init", "-q", "-b", "main"]);
+            git(d, &["config", "user.name", "Ada"]);
+            git(d, &["config", "user.email", "a@x"]);
+            git(d, &["add", "."]);
+            git(d, &["commit", "-q", "-m", "first"]);
+        };
+        init(&dir);
+        std::fs::write(dir.join("notes.md"), "# Notes\nmore\n").unwrap();
+        wb.run_command("view.scm");
+        wait_until(&mut wb, "the change", |wb| wb.shell.scm.has_changes() && wb.shell.scm.branch == "main");
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        // Nothing staged: Commit commits every change (VS Code's smart commit).
+        wb.shell.scm.message.set("second");
+        assert_eq!(run(&mut wb, json!({"cmd": "click", "target": "button:✓ Commit"}))["ok"], true);
+        wait_until(&mut wb, "the commit", |wb| !wb.shell.scm.has_changes() && wb.shell.scm.status != "Working…");
+        let log = crate::views::git(&dir, &["log", "--format=%s"]).unwrap();
+        assert_eq!(log.lines().collect::<Vec<_>>(), vec!["second", "first"]);
+        // No upstream and nothing to commit: the button publishes the branch.
+        wb.render(&mut surf);
+        let inner = Rect::new(0, 0, 40, 20);
+        assert_eq!(wb.scm_buttons(inner)[0].action, "publish");
+        // A new file, added to .gitignore from its menu: gone from the list, dim in the Explorer.
+        std::fs::write(dir.join("junk.log"), "x").unwrap();
+        wb.shell.scm.refresh(&dir);
+        wait_until(&mut wb, "the new file", |wb| wb.shell.scm.has_changes());
+        let row = wb.shell.scm.entries.iter().position(|e| e.as_ref().is_some_and(|(_, p)| p == Path::new("junk.log"))).unwrap();
+        wb.shell.scm.list.select(row);
+        wb.scm_menu_open("file", Point::new(5, 5));
+        let acts = wb.status_menu.as_ref().unwrap().2.clone();
+        assert!(acts.contains(&"scm:f_ignore".to_string()) && acts.contains(&"scm:f_discard".to_string()), "{acts:?}");
+        wb.status_menu = None;
+        wb.scm_action("f_ignore");
+        wait_until(&mut wb, "ignored", |wb| wb.shell.scm.entries.iter().flatten().all(|(_, p)| p != Path::new("junk.log")));
+        assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), "/junk.log\n");
+        // A second project with its own repository: the branch menu lists both and switches.
+        let other = dir.join("..").join(format!("turbine-scmbar2-{}", std::process::id()));
+        std::fs::create_dir_all(&other).unwrap();
+        let other = std::fs::canonicalize(&other).unwrap();
+        std::fs::write(other.join("a.txt"), "a\n").unwrap();
+        init(&other);
+        git(&other, &["switch", "-q", "-c", "feature"]);
+        std::fs::write(other.join("a.txt"), "b\n").unwrap();
+        wb.shell.explorer.add_root(other.clone());
+        wait_until(&mut wb, "both repositories", |wb| wb.shell.scm.repos.len() == 2);
+        wb.scm_menu_open("branch", Point::new(5, 5));
+        let (popup, _, acts) = wb.status_menu.take().unwrap();
+        assert_eq!(acts[1], "scm:repo:1");
+        assert!(popup.items[1].1.contains("feature") && popup.items[1].1.contains("• 1"), "{:?}", popup.items);
+        wb.scm_action("repo:1");
+        wait_until(&mut wb, "the other repository", |wb| wb.shell.scm.branch == "feature" && wb.shell.scm.has_changes());
+        assert_eq!(wb.scm_root(), other);
+        assert!(wb.scm_buttons(inner).iter().any(|b| b.label.contains("turbine-scmbar2")));
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
     }
 
     #[test]

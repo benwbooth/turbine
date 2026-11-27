@@ -73,13 +73,7 @@ impl Workbench {
             "git.fetch" => self.run_task(&task("git fetch", "git fetch --all --prune")),
             "git.stash" => self.run_task(&task("git stash", "git stash push")),
             "git.stash_pop" => self.run_task(&task("git stash pop", "git stash pop")),
-            "git.checkout" => {
-                let tx = self.git.tx.clone();
-                let r = root.clone();
-                std::thread::spawn(move || {
-                    let _ = tx.send(GitAnswer::Branches(r.clone(), crate::views::git(&r, &["branch", "--all", "--format=%(HEAD) %(refname:short)"])));
-                });
-            }
+            "git.checkout" => self.git_branches(root),
             "git.blame" => {
                 let (Some(r), Some(w)) = (rel, self.windows.iter().rev().find(|w| w.term.is_none() && w.special.is_none())) else { return };
                 let line = w.ed.cursor_line_col().0 + 1;
@@ -91,6 +85,14 @@ impl Workbench {
             }
             _ => {}
         }
+    }
+
+    /// Switch Branch… for a repository: its branches, read off the UI thread.
+    pub(super) fn git_branches(&mut self, root: PathBuf) {
+        let tx = self.git.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(GitAnswer::Branches(root.clone(), crate::views::git(&root, &["branch", "--all", "--format=%(HEAD) %(refname:short)"])));
+        });
     }
 
     pub(super) fn git_tick(&mut self) {
@@ -150,7 +152,7 @@ impl Workbench {
     /// The Source Control view's Enter: the file's diff (its staged one
     /// when it's staged).
     pub(super) fn scm_diff(&mut self, staged: bool, rel: &Path) {
-        let Some((root, _)) = self.git_here() else { return };
+        let root = self.scm_root();
         let r = rel.display().to_string();
         let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let root2 = root.clone();

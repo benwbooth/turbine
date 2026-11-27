@@ -623,7 +623,17 @@ impl Workbench {
         self.shell.extensions.set_installed(installed.iter().map(|i| (i.name.clone(), i.description.clone(), i.error.clone(), i.loaded)).collect());
         self.shell.extensions.poll(ext_shown);
         let scm_shown = shown(self, Tab::Scm);
-        self.shell.scm.poll(&root, scm_shown);
+        // (A folder taken out of the workspace: back to the main one.)
+        let folders = self.shell.explorer.roots();
+        if self.shell.scm.chosen.as_ref().is_some_and(|c| !folders.contains(c)) {
+            self.shell.scm.choose(root.clone(), &root);
+        }
+        let scm_base = self.shell.scm.base(&root);
+        self.shell.scm.poll(&scm_base, scm_shown);
+        self.shell.scm.poll_repos(folders, scm_shown);
+        if let Some(d) = self.shell.scm.done.take() {
+            self.say(format!("git: {d}"));
+        }
         // The Explorer follows the editor in front.
         if let Some(i) = self.editor_index() {
             let w = &self.windows[i];
@@ -1401,6 +1411,7 @@ impl Workbench {
                 }
             }
             Tab::Scm => {
+                let root = self.scm_root();
                 let s = &mut self.shell.scm;
                 if k.key == Key::Enter && k.mods.ctrl {
                     if let Err(e) = s.commit(&root) {
@@ -1755,12 +1766,28 @@ impl Workbench {
             }
             return;
         }
+        if t == Tab::Scm && (1..scm::SCM_LIST_TOP).contains(&(m.pos.y - content.y)) {
+            if matches!(m.kind, MouseKind::Down(Button::Left)) {
+                self.shell.scm.in_field = false;
+                self.scm_click(m.pos, content);
+            }
+            return;
+        }
         if matches!(m.kind, MouseKind::Down(_)) {
             match t {
                 Tab::Search => self.shell.search.in_field = false,
                 Tab::Scm => self.shell.scm.in_field = false,
                 _ => {}
             }
+        }
+        if t == Tab::Scm && matches!(m.kind, MouseKind::Down(Button::Right)) {
+            let l = &mut self.shell.scm.list;
+            let row = l.scroll + (m.pos.y - l.area.y).max(0) as usize;
+            if l.area.contains(m.pos) && self.shell.scm.entry(row).is_some() {
+                self.shell.scm.list.select(row);
+                self.scm_menu_open("file", m.pos);
+            }
+            return;
         }
         let Some(list) = self.view_list(t) else { return };
         let out = list.mouse(m);
@@ -1794,7 +1821,7 @@ impl Workbench {
                 }
             }
             (Tab::Scm, ListOut::Activated(i)) => {
-                let root = self.shell.explorer.root.clone();
+                let root = self.scm_root();
                 if let Some(Some((_, p))) = self.shell.scm.entries.get(i).cloned() {
                     self.goto_file(&root.join(p), None, 0);
                 }
@@ -1971,9 +1998,10 @@ impl Workbench {
                     let f = view_focus(Tab::Scm);
                     let sc = &mut self.shell.scm;
                     sc.message.draw(c, Rect::new(inner.x, inner.y, inner.w, 1), theme, f && sc.in_field, "Message (Enter commits)");
-                    let info = if sc.status.is_empty() { format!("⎇ {}   Space stages", sc.branch) } else { sc.status.clone() };
-                    c.sub(inner).print(inner.x + 1, inner.y + 1, &info, Style::new(s.panel_frame.fg, s.panel.bg));
-                    sc.list.draw(c, Rect::new(inner.x, inner.y + 2, inner.w, (inner.h - 2).max(0)), theme, f && !sc.in_field);
+                    let top = scm::SCM_LIST_TOP;
+                    let list_r = Rect::new(inner.x, inner.y + top, inner.w, (inner.h - top).max(0));
+                    sc.list.draw(c, list_r, theme, f && !sc.in_field);
+                    self.draw_scm_buttons(c, inner, theme);
                 }
                 Some(t) => {
                     let f = view_focus(t);
@@ -2064,6 +2092,9 @@ impl Workbench {
                     pn = pn.child(Node::new(id, "input", label, Rect::new(inner.x, inner.y, inner.w, 1)).focused(focus && in_field).value(text.clone()));
                     let list = if t == Tab::Search { &self.shell.search.list } else { &self.shell.scm.list };
                     pn = pn.child(list.node(&format!("view.{}", t.key()), t.name(), focus && !in_field));
+                    if t == Tab::Scm {
+                        pn = self.scm_nodes(inner, pn);
+                    }
                 }
                 Some(t) => {
                     let list = match t {

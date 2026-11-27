@@ -45,7 +45,7 @@ fn trash_dir() -> Option<PathBuf> {
 
 /// Move a file or folder into the trash (with its .trashinfo), so it can
 /// be restored. Never deletes: a move across drives fails instead.
-fn trash(p: &Path) -> Result<(), String> {
+pub(super) fn trash(p: &Path) -> Result<(), String> {
     let dir = trash_dir().ok_or("no trash folder")?;
     let (files, info) = (dir.join("files"), dir.join("info"));
     std::fs::create_dir_all(&files).map_err(|e| e.to_string())?;

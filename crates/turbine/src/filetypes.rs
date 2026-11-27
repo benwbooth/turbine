@@ -150,6 +150,7 @@ pub fn parse_git_status(out: &str) -> Vec<(String, char)> {
         let (x, y) = (xy[0], xy[1]);
         let code = match (x, y) {
             ('?', '?') => 'U',
+            ('!', '!') => 'I',
             ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D') => 'C',
             ('R', _) => 'R',
             ('A', _) => 'A',
@@ -175,7 +176,7 @@ mod tests {
         assert_eq!(colour(".env", false), vga::DARK_GRAY);
         assert_ne!(icon("a.py", false, false), icon("a.rs", false, false));
         assert_ne!(icon("x", true, true), icon("x", true, false));
-        let st = parse_git_status(" M src/a.rs\0?? new.txt\0R  b.rs\0old.rs\0A  c/\0");
-        assert_eq!(st, vec![("src/a.rs".into(), 'M'), ("new.txt".into(), 'U'), ("b.rs".into(), 'R'), ("c".into(), 'A')]);
+        let st = parse_git_status(" M src/a.rs\0?? new.txt\0R  b.rs\0old.rs\0A  c/\0!! target/\0");
+        assert_eq!(st, vec![("src/a.rs".into(), 'M'), ("new.txt".into(), 'U'), ("b.rs".into(), 'R'), ("c".into(), 'A'), ("target".into(), 'I')]);
     }
 }
