@@ -171,7 +171,28 @@ pub fn default_shell() -> Vec<String> {
         let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
         return vec![comspec];
     }
+    // The account's own shell, as a login shell: $SHELL may be a build
+    // shell's (devloop runs Turbine in the project's dev shell, whose bash
+    // has no readline), and a login shell sets PATH and the rest afresh.
+    if let Some(sh) = login_shell() {
+        return vec![sh, "-l".into()];
+    }
     vec![std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())]
+}
+
+#[cfg(unix)]
+fn login_shell() -> Option<String> {
+    let pw = unsafe { libc::getpwuid(libc::getuid()) };
+    if pw.is_null() {
+        return None;
+    }
+    let sh = unsafe { std::ffi::CStr::from_ptr((*pw).pw_shell) }.to_string_lossy().into_owned();
+    (!sh.is_empty() && std::path::Path::new(&sh).exists()).then_some(sh)
+}
+
+#[cfg(not(unix))]
+fn login_shell() -> Option<String> {
+    None
 }
 
 impl Terminal {
