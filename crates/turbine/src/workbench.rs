@@ -297,6 +297,10 @@ pub struct Workbench {
     session: session::SessionState,
     tip: tooltip::TipState,
     docviews: HashMap<u32, docview::DocView>,
+    /// The last key, click or move: for a moment after it, ticks come at
+    /// screen rate, so what it started (a listing, colours, a preview)
+    /// shows the moment it's ready.
+    last_input: Option<Instant>,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -660,6 +664,7 @@ impl Workbench {
             session: session::SessionState::default(),
             tip: tooltip::TipState::default(),
             docviews: HashMap::new(),
+            last_input: None,
         };
         for f in files {
             // (A folder is the project: the Explorer shows it.)
@@ -4257,6 +4262,7 @@ impl Workbench {
 
 impl App for Workbench {
     fn event(&mut self, ev: Event) {
+        self.last_input = Some(Instant::now());
         // (The mouse leaving the window: only the tooltip cares.)
         if matches!(&ev, Event::Mouse(m) if m.pos.x < 0 || m.pos.y < 0) {
             self.tip_event(&ev);
@@ -4361,7 +4367,8 @@ impl App for Workbench {
         // Servers send diagnostics unasked: look a few times a second.
         let lsp_tick = (!self.lsp.is_empty()).then(|| now + Duration::from_millis(100));
         let tip_tick = self.tip_tick(now);
-        [next, msg_tick, poll, term_tick, lsp_tick, tip_tick].into_iter().flatten().min()
+        let lively = self.last_input.filter(|t| now.saturating_duration_since(*t) < Duration::from_millis(1500)).map(|_| now + Duration::from_millis(16));
+        [next, msg_tick, poll, term_tick, lsp_tick, tip_tick, lively].into_iter().flatten().min()
     }
 
     fn render(&mut self, surf: &mut Surface) {

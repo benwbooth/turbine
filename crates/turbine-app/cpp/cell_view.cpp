@@ -5,6 +5,8 @@
 #include <QtCore/QCoreApplication>
 #include <QtGui/QClipboard>
 #include <QtCore/QSettings>
+#include <QtCore/QElapsedTimer>
+#include <cstdio>
 #include <QtGui/QFontDatabase>
 #include <QtGui/QFontMetricsF>
 #include <QtGui/QGuiApplication>
@@ -572,6 +574,10 @@ void CellView::drawPictures(QPainter* p)
 
 void CellView::paintVga(QPainter* p)
 {
+    static const bool timing = !qEnvironmentVariable("TURBINE_TIMING").isEmpty();
+    QElapsedTimer clock;
+    clock.start();
+    struct Done { QElapsedTimer& c; ~Done() { if (timing) fprintf(stderr, "paint %.2f ms\n", c.nsecsElapsed() / 1e6); } } done { clock };
     const turbine::Frame& f = *m_frame;
     const int cols = f.cols, rows = f.rows;
     const int gw = m_dots * m_k, gh = 16 * m_k;

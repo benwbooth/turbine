@@ -260,8 +260,13 @@ fn app_tick() -> i32 {
         if st.wb.should_quit() {
             return -1;
         }
+        let ticked = now.elapsed();
         st.surf.cursor = None;
         st.wb.render(&mut st.surf);
+        static TIMING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *TIMING.get_or_init(|| std::env::var("TURBINE_TIMING").is_ok_and(|v| !v.is_empty())) {
+            eprintln!("tick {:?} render {:?}", ticked, now.elapsed() - ticked);
+        }
         let changed = match &st.shown {
             Some(prev) => prev.cells != st.surf.cells || prev.cursor != st.surf.cursor || prev.w != st.surf.w,
             None => true,
