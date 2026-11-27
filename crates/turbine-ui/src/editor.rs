@@ -106,6 +106,11 @@ pub struct EditorView {
     pub wrap: bool,
     /// Spaces, tabs and line ends drawn faintly (· → ¶).
     pub show_whitespace: bool,
+    /// Each line's change since the last commit, in the gutter: 1 added,
+    /// 2 changed, 3 lines deleted after it.
+    pub git_marks: Vec<u8>,
+    /// Who last changed a line, when and why: drawn after it in grey.
+    pub blame: Option<(usize, String)>,
     /// A help page: the scheme's help colours (QBasic's black, Borland's
     /// cyan), headings, links and their marks by highlight kind.
     pub help_look: bool,
@@ -201,6 +206,8 @@ impl EditorView {
             dragging: false,
             clicks: None,
             show_whitespace: false,
+            git_marks: Vec::new(),
+            blame: None,
             unit_drag: None,
             longest: std::cell::Cell::new(None),
             minimap: false,
@@ -844,7 +851,8 @@ impl EditorView {
     }
 
     pub fn gutter_width(&self) -> i32 {
-        if self.line_numbers { self.doc.len_lines().to_string().len().max(3) as i32 + 1 } else { 0 }
+        // (A column more for git's change marks when there are any.)
+        if self.line_numbers { self.doc.len_lines().to_string().len().max(3) as i32 + 1 + i32::from(!self.git_marks.is_empty()) } else { 0 }
     }
 
     /// Scroll sideways by some columns, no further than the longest line
@@ -940,6 +948,14 @@ impl EditorView {
                 if gw > 0 && sub == 0 {
                     let n = format!("{:>w$} ", li + 1, w = (gw - 1) as usize);
                     c.print(area.x, y, &n, s.editor_gutter);
+                    // Git's mark: a bar for added (green) or changed (cyan)
+                    // lines, a red ▼ where lines were deleted.
+                    match self.git_marks.get(li).copied().unwrap_or(0) {
+                        1 => c.print(area.x, y, "▌", s.editor_gutter.fg(crate::theme::vga::LIGHT_GREEN)),
+                        2 => c.print(area.x, y, "▌", s.editor_gutter.fg(crate::theme::vga::LIGHT_CYAN)),
+                        3 => c.print(area.x, y, "▼", s.editor_gutter.fg(crate::theme::vga::LIGHT_RED)),
+                        _ => area.x,
+                    };
                     if let Some(sev) = self.diagnostics.iter().filter(|d| d.line == li).map(|d| d.severity).min() {
                         let color = if sev == 1 { s.diag_error } else if sev == 2 { s.diag_warning } else { s.editor_gutter.fg };
                         c.print(area.x + gw - 1, y, "■", s.editor_gutter.fg(color));
@@ -1075,6 +1091,15 @@ impl EditorView {
                 if self.folds.contains_key(&li) {
                     let x = text_x + total as i32 - sx as i32;
                     tc.print(x + 1, y, "⋯", s.editor_ghost);
+                }
+                // The cursor line's blame, after its text in grey.
+                if sub + 1 == nrows {
+                    if let Some((bl, text)) = &self.blame {
+                        if *bl == li && !text.is_empty() && focused {
+                            let x = text_x + total as i32 - sx as i32 + 4;
+                            tc.print(x, y, text, s.editor_ghost);
+                        }
+                    }
                 }
                 // A wrapped row's end: ↩ in the column kept for it.
                 if wrap_w > 0 && sub + 1 < nrows {

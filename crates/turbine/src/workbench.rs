@@ -19,6 +19,7 @@ mod extensions;
 pub use extensions::extension_dirs;
 mod find;
 mod git;
+mod gitlines;
 mod images;
 mod inline_ai;
 mod lsp_more;
@@ -312,6 +313,8 @@ pub struct Workbench {
     /// What the front end's window should do (its own title bar's buttons):
     /// 1 minimize, 2 maximize or restore, 3 close, 4 start a move.
     window_op: i32,
+    /// What git knows of each open file's lines (marks, blame).
+    gitlines: gitlines::GitLines,
     /// Projects whose environment note was shown (loading, blocked).
     env_note: HashSet<PathBuf>,
     /// A status item's drop-up: its list, where, and each choice's action
@@ -691,6 +694,7 @@ impl Workbench {
             docviews: HashMap::new(),
             ed_menu: None,
             window_op: 0,
+            gitlines: gitlines::GitLines::default(),
             env_note: HashSet::new(),
             status_menu: None,
             outer: (80, 25),
@@ -4764,6 +4768,7 @@ impl App for Workbench {
         self.images_tick();
         self.session_tick(now);
         self.docview_tick();
+        self.gitlines_tick();
         // (Closed file managers' state goes; the rest take their answers.)
         let ids: HashSet<u32> = self.windows.iter().map(|w| w.win.id).collect();
         self.xtrees.retain(|id, _| ids.contains(id));
@@ -6224,6 +6229,32 @@ mod tests {
         wb.render(&mut surf);
         assert_eq!(wb.tip.drawn.get().unwrap().h, 20, "the box keeps its size");
         assert!(surf.to_text().contains("line 29") && !surf.to_text().contains("line 9 "), "scrolled to its last line");
+    }
+
+    #[test]
+    fn git_marks_changes_and_blames_the_cursor_line() {
+        let (dir, mut wb) = project("gitlines");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").arg("-C").arg(&dir).args(args).env("GIT_AUTHOR_NAME", "Ada").env("GIT_AUTHOR_EMAIL", "a@x").env("GIT_COMMITTER_NAME", "Ada").env("GIT_COMMITTER_EMAIL", "a@x").output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "The first version"]);
+        wb.goto_file(&dir.join("src/main.rs"), Some(0), 0);
+        wait_until(&mut wb, "the blame", |wb| wb.windows.last().unwrap().ed.blame.as_ref().is_some_and(|(_, t)| t.contains("Ada") && t.contains("The first version")));
+        // An edit: its line marked changed, and not committed.
+        keys(&mut wb, &["End"]);
+        run(&mut wb, json!({"cmd": "type", "text": " // changed"}));
+        wait_until(&mut wb, "the mark", |wb| wb.windows.last().unwrap().ed.git_marks.first() == Some(&2));
+        assert!(wb.windows.last().unwrap().ed.blame.as_ref().is_some_and(|(_, t)| t.contains("not committed")));
+        // Hovering the mark: what it was.
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let a = wb.windows.last().unwrap().ed.area();
+        let tip = wb.git_mark_tip(Point::new(a.x, a.y)).map(|t| t.1).unwrap_or_default();
+        assert!(tip.contains("- fn main() {") && tip.contains("+ fn main() { // changed"), "{tip}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -227,6 +227,12 @@ impl Workbench {
 
     /// What hovering here shows, and the place it belongs to.
     pub(super) fn tip_at(&self, p: Point) -> Option<(Rect, String)> {
+        // A change mark in the gutter: what the lines were.
+        if self.dialog.is_none() {
+            if let Some(t) = self.git_mark_tip(p) {
+                return Some(t);
+            }
+        }
         // The error or warning under the mouse in the front editor.
         if self.dialog.is_none() {
             if let Some(w) = self.windows.last().filter(|w| w.term.is_none() && w.win.inner().contains(p)) {
@@ -400,6 +406,13 @@ fn colour_line(line: &str, is_dir: bool, base: Style) -> Vec<(String, Style)> {
             out.push((part.to_string(), st));
         }
         return out;
+    }
+    // A change's old and new lines.
+    if let Some(v) = line.strip_prefix("- ") {
+        return vec![("- ".into(), fg(vga::LIGHT_RED)), (v.to_string(), fg(vga::LIGHT_RED))];
+    }
+    if let Some(v) = line.strip_prefix("+ ") {
+        return vec![("+ ".into(), fg(vga::LIGHT_GREEN)), (v.to_string(), fg(vga::LIGHT_GREEN))];
     }
     if let Some(v) = line.strip_prefix("Git: ") {
         let c = match v {
