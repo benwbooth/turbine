@@ -13,6 +13,7 @@ use turbine_ui::Canvas;
 mod explorer_ops;
 mod find;
 mod inline_ai;
+mod settings;
 mod shell;
 use find::FindBar;
 use shell::{Focus, Shell};
@@ -452,7 +453,7 @@ fn menus() -> Vec<Menu> {
                 sep(),
                 soon("~E~ditor...", "", "options.editor"),
                 soon("~D~irectories...", "", "options.dirs"),
-                soon("Se~t~tings File", "Ctrl+,", "options.settings"),
+                it("Se~t~tings...", "Ctrl+,", "options.settings"),
             ],
         ),
         Menu::new(
@@ -659,6 +660,7 @@ impl Workbench {
                     self.theme.scheme = sc;
                 }
                 self.apply_layout_json(&v["layout"]);
+                self.apply_settings_json(&v["settings"]);
                 // Started without a file or folder: the last project again.
                 if !self.shell.explicit_project {
                     if let Some(p) = v["project"].as_str().map(PathBuf::from).filter(|p| p.is_dir()) {
@@ -677,6 +679,7 @@ impl Workbench {
                 "style": self.theme.style.name,
                 "scheme": self.theme.scheme.name,
                 "layout": self.layout_json(),
+                "settings": self.settings_json(),
                 "project": self.shell.explorer.root.display().to_string(),
             });
             std::thread::spawn(move || {
@@ -746,7 +749,7 @@ impl Workbench {
         win.toggle_zoom(d);
         self.next_id += 1;
         let mut ed = EditorView::new(doc);
-        ed.line_numbers = self.theme.style.line_numbers;
+        ed.line_numbers = self.shell.line_numbers.unwrap_or(self.theme.style.line_numbers);
         let mut ew = EdWin { win, ed, vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: None, mirror: None };
         if self.keymap == Keymap::Vim {
             ew.vim = Some(vim::attach(&mut ew.ed));
@@ -2011,6 +2014,7 @@ impl Workbench {
                 }
             }
             "file.open" => self.open_dialog(std::env::current_dir().unwrap_or_default()),
+            "options.settings" => self.open_settings(),
             "file.open_folder" => {
                 let root = self.shell.explorer.root.clone();
                 let start = root.parent().map(Path::to_path_buf).unwrap_or(root.clone());
@@ -2462,7 +2466,29 @@ impl Workbench {
 
     /// What a dialog's key, click or paste did.
     fn dialog_result(&mut self, r: DialogResult) {
-        // (The overwrite question sits over the file dialog.)
+        // (The overwrite question sits over the file dialog; a setting's
+        // own little dialog over Settings.)
+        if self.overwrite_q.as_ref().is_some_and(|q| q.kind.starts_with("setting:")) {
+            match r {
+                DialogResult::Button(b) if b == "yes" => {
+                    let q = self.overwrite_q.take().unwrap();
+                    self.setting_answer(&q, true);
+                }
+                DialogResult::Activated(_) => {
+                    let q = self.overwrite_q.take().unwrap();
+                    self.setting_answer(&q, true);
+                }
+                DialogResult::Button(_) | DialogResult::Cancel => {
+                    let q = self.overwrite_q.take().unwrap();
+                    self.setting_answer(&q, false);
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.settings_event(&r) {
+            return;
+        }
         if self.overwrite_q.is_some() {
             match r {
                 DialogResult::Button(b) if b == "yes" => {
@@ -4545,6 +4571,51 @@ mod tests {
         wb.shell.extensions.list.select(i);
         keys(&mut wb, &["Enter"]);
         assert!(wb.message.as_ref().is_some_and(|(m, _)| m.starts_with("Rust:")), "{:?}", wb.message);
+    }
+
+    #[test]
+    fn settings_search_change_and_come_back_next_time() {
+        let (dir, mut wb) = project("settings");
+        let look = dir.join("look.json");
+        wb.set_look_path(look.clone());
+        keys(&mut wb, &["Ctrl+,"]);
+        assert_eq!(wb.dialog.as_ref().map(|d| d.kind.as_str()), Some("settings"));
+        // Search narrows the list; Enter on an on/off setting flips it.
+        run(&mut wb, json!({"cmd": "type", "text": "minimap"}));
+        let rows = |wb: &Workbench| wb.dialog.as_ref().unwrap().automation_node().find_target("dialog.items").unwrap().children.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+        assert_eq!(rows(&wb).len(), 1, "{:?}", rows(&wb));
+        assert!(rows(&wb)[0].ends_with("on"));
+        keys(&mut wb, &["Tab", "Enter"]);
+        assert!(rows(&wb)[0].ends_with("off"), "{:?}", rows(&wb));
+        assert_eq!(wb.shell.minimap, Some(false));
+        // A choice: its list comes up over Settings; picking applies it.
+        keys(&mut wb, &["Shift+Tab"]);
+        for _ in 0..7 {
+            keys(&mut wb, &["Backspace"]);
+        }
+        run(&mut wb, json!({"cmd": "type", "text": "control style"}));
+        keys(&mut wb, &["Tab", "Enter"]);
+        assert!(wb.overwrite_q.as_ref().is_some_and(|q| q.kind == "setting:style"));
+        run(&mut wb, json!({"cmd": "click", "target": "listitem:VB-DOS"}));
+        keys(&mut wb, &["Enter"]);
+        assert_eq!(wb.theme.style.name, "VB-DOS");
+        assert!(wb.dialog.as_ref().is_some_and(|d| d.kind == "settings"), "Settings stays open");
+        // A typed value: the agent's typing speed.
+        keys(&mut wb, &["Shift+Tab"]);
+        for _ in 0..13 {
+            keys(&mut wb, &["Backspace"]);
+        }
+        run(&mut wb, json!({"cmd": "type", "text": "typing speed"}));
+        keys(&mut wb, &["Tab", "Enter"]);
+        run(&mut wb, json!({"cmd": "type", "text": "120"}));
+        keys(&mut wb, &["Enter"]);
+        assert_eq!(wb.driver.cps, 120.0);
+        // Kept: a new start reads them back.
+        wait_until(&mut wb, "look.json", |_| std::fs::read_to_string(&look).is_ok_and(|t| t.contains("\"agent_speed\": 120")));
+        let mut wb2 = Workbench::new(&[dir.clone()]);
+        wb2.set_look_path(look);
+        assert_eq!((wb2.theme.style.name, wb2.shell.minimap, wb2.driver.cps), ("VB-DOS", Some(false), 120.0));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

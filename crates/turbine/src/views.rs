@@ -99,6 +99,8 @@ pub struct Explorer {
     refreshed: Instant,
     /// Select this path once its folder is listed.
     want: Option<PathBuf>,
+    /// List names starting with a dot.
+    pub show_hidden: bool,
 }
 
 impl Explorer {
@@ -115,6 +117,7 @@ impl Explorer {
             paths: Vec::new(),
             refreshed: Instant::now(),
             want: None,
+            show_hidden: true,
         };
         e.request(&root);
         e.rebuild();
@@ -123,7 +126,9 @@ impl Explorer {
 
     pub fn set_root(&mut self, root: PathBuf) {
         if root != self.root {
+            let hidden = self.show_hidden;
             *self = Explorer::new(root);
+            self.show_hidden = hidden;
         }
     }
 
@@ -196,6 +201,9 @@ impl Explorer {
             return;
         };
         for (name, is_dir) in kids {
+            if !self.show_hidden && name.starts_with('.') {
+                continue;
+            }
             let p = dir.join(name);
             let open = self.expanded.contains(&p);
             let icon = if *is_dir { if open { "▾" } else { "▸" } } else { " " };
@@ -215,6 +223,11 @@ impl Explorer {
 
     pub fn path_at(&self, i: usize) -> Option<&(PathBuf, bool)> {
         self.paths.get(i)
+    }
+
+    pub fn set_show_hidden(&mut self, on: bool) {
+        self.show_hidden = on;
+        self.rebuild();
     }
 
     /// Read every open folder again (after files changed).

@@ -60,6 +60,8 @@ pub(super) struct Shell {
     pub crumbs: Vec<(Rect, String, Crumb)>,
     /// Editors show a minimap (None: as the control style says).
     pub minimap: Option<bool>,
+    /// Editors number their lines (None: as the control style says).
+    pub line_numbers: Option<bool>,
 }
 
 /// Where a breadcrumb goes.
@@ -95,6 +97,7 @@ impl Shell {
             mirrored: HashMap::new(),
             crumbs: Vec::new(),
             minimap: None,
+            line_numbers: None,
         }
     }
 }
@@ -926,7 +929,9 @@ impl Workbench {
         if self.ex_key(k) {
             return true;
         }
-        let cmd = if k.is_ctrl('k') && !k.mods.shift && !vim_editor && self.shell.focus == Focus::Editors && self.windows.last().is_some_and(|w| w.dock.is_none()) {
+        let cmd = if k.mods.ctrl && !k.mods.alt && matches!(k.key, Key::Char(',')) {
+            Some("options.settings")
+        } else if k.is_ctrl('k') && !k.mods.shift && !vim_editor && self.shell.focus == Focus::Editors && self.windows.last().is_some_and(|w| w.dock.is_none()) {
             Some("ai.inline")
         } else if k.is_ctrl('f') && !k.mods.shift && !vim_editor && !self.windows.last().is_some_and(|w| w.is_terminal() && self.shell.focus == Focus::Editors) {
             Some("search.find")
