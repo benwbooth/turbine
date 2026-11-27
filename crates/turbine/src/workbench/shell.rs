@@ -72,6 +72,8 @@ pub(super) struct Shell {
     /// The cursor: "Block", "Underline" or "Bar", and whether it blinks.
     pub cursor_style: String,
     pub cursor_blink: bool,
+    /// Spaces, tabs and line ends shown faintly.
+    pub show_whitespace: bool,
     /// Each mirror group's document as last synced: (version, dirty, path).
     pub mirrored: HashMap<u32, (u64, bool, Option<PathBuf>)>,
     /// The breadcrumbs from the last layout: their places, labels and where
@@ -122,6 +124,7 @@ impl Shell {
             tab_menu: None,
             cursor_style: "Block".into(),
             cursor_blink: true,
+            show_whitespace: false,
             mirrored: HashMap::new(),
             crumbs: Vec::new(),
             minimap: None,

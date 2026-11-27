@@ -104,6 +104,8 @@ pub struct EditorView {
     pub column_mode: bool,
     /// Long lines wrap at the window's edge (View > Word Wrap).
     pub wrap: bool,
+    /// Spaces, tabs and line ends drawn faintly (· → ¶).
+    pub show_whitespace: bool,
     /// A help page: the scheme's help colours (QBasic's black, Borland's
     /// cyan), headings, links and their marks by highlight kind.
     pub help_look: bool,
@@ -198,6 +200,7 @@ impl EditorView {
             area: Rect::default(),
             dragging: false,
             clicks: None,
+            show_whitespace: false,
             unit_drag: None,
             longest: std::cell::Cell::new(None),
             minimap: false,
@@ -1050,8 +1053,15 @@ impl EditorView {
                     // Selected: the colours swapped, each character's own.
                     let st = if selected { Style { fg: st.bg, bg: st.fg, ..st } } else { st };
                     let g = &text[p.offset..p.offset + p.len];
+                    // (Whitespace shown: faint marks in the text's own background.)
+                    let ws = Style { fg: s.editor_ghost.fg, ..st };
                     if g == "\t" {
                         tc.fill(Rect::new(x, y, p.width as i32, 1), " ", st);
+                        if self.show_whitespace {
+                            tc.print(x, y, "→", ws);
+                        }
+                    } else if g == " " && self.show_whitespace && !selected {
+                        tc.print(x, y, "·", ws);
                     } else {
                         tc.print(x, y, g, st);
                     }
@@ -1065,6 +1075,16 @@ impl EditorView {
                 if self.folds.contains_key(&li) {
                     let x = text_x + total as i32 - sx as i32;
                     tc.print(x + 1, y, "⋯", s.editor_ghost);
+                }
+                // A wrapped row's end: ↩ in the column kept for it.
+                if wrap_w > 0 && sub + 1 < nrows {
+                    tc.print(text_x + wrap_w as i32, y, "↩", s.editor_ghost);
+                }
+                // The line's end, when whitespace shows (¶; ←¶ for CR LF files).
+                if self.show_whitespace && sub + 1 == nrows && li + 1 < self.doc.len_lines() {
+                    let x = text_x + total as i32 - sx as i32;
+                    let mark = if self.doc.line_ending == turbine_text::encoding::LineEnding::CrLf { "←¶" } else { "¶" };
+                    tc.print(x, y, mark, s.editor_ghost);
                 }
                 // Selected newline shows as one highlighted cell.
                 let eol = line_start + text.chars().count();

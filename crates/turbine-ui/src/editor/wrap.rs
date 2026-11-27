@@ -102,9 +102,9 @@ mod tests {
         ed.draw(&mut surf.canvas(), Rect::new(0, 0, 16, 6), &theme, true, true);
         let t = surf.to_text();
         let rows: Vec<&str> = t.lines().collect();
-        // 15 columns a row (one kept for the cursor at the end).
-        assert_eq!(rows[0].trim_end(), "abcdefghijabcde");
-        assert_eq!(rows[1].trim_end(), "fghijabcdefghij");
+        // 15 columns a row (one kept at the end: ↩ where a line goes on).
+        assert_eq!(rows[0].trim_end(), "abcdefghijabcde↩");
+        assert_eq!(rows[1].trim_end().trim_end_matches('↩'), "fghijabcdefghij");
         assert_eq!(rows[3].trim_end(), "short");
         // Down goes a row at a time; a click finds its char.
         let mut clip = String::new();
