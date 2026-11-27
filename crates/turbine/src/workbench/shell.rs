@@ -779,7 +779,13 @@ impl Workbench {
     fn view_key(&mut self, t: Tab, k: &KeyEvent) {
         let root = self.shell.explorer.root.clone();
         match t {
-            Tab::Explorer => match self.shell.explorer.list.key(k) {
+            Tab::Explorer => match {
+                let out = self.shell.explorer.list.key(k);
+                if out != ListOut::Ignored {
+                    self.shell.explorer.user_selected();
+                }
+                out
+            } {
                 ListOut::Activated(i) => {
                     if let Some(p) = self.shell.explorer.activate(i) {
                         self.goto_file(&p, None, 0);
@@ -1045,6 +1051,9 @@ impl Workbench {
         }
         let Some(list) = self.view_list(t) else { return };
         let out = list.mouse(m);
+        if t == Tab::Explorer && matches!(out, ListOut::Selected(_) | ListOut::Activated(_)) {
+            self.shell.explorer.user_selected();
+        }
         match (t, out) {
             (Tab::Explorer, ListOut::Activated(i)) => {
                 if let Some(p) = self.shell.explorer.activate(i) {

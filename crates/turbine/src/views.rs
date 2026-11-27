@@ -207,6 +207,12 @@ impl Explorer {
         }
     }
 
+    /// The person chose a row: forget a selection still waiting for its
+    /// folder's listing.
+    pub fn user_selected(&mut self) {
+        self.want = None;
+    }
+
     pub fn path_at(&self, i: usize) -> Option<&(PathBuf, bool)> {
         self.paths.get(i)
     }
@@ -488,6 +494,25 @@ impl Search {
 
     pub fn busy(&self) -> bool {
         self.rx.is_some()
+    }
+
+    /// Show places found elsewhere (Go to References) as results: each
+    /// line's text is read in the background.
+    pub fn show_places(&mut self, title: &str, places: Vec<(PathBuf, usize)>) {
+        let (tx, rx) = channel();
+        self.rx = Some(rx);
+        self.query.set(title);
+        self.in_field = false;
+        std::thread::spawn(move || {
+            let mut cache: HashMap<PathBuf, Vec<String>> = HashMap::new();
+            let mut hits = Vec::new();
+            for (p, line) in places {
+                let lines = cache.entry(p.clone()).or_insert_with(|| std::fs::read_to_string(&p).map(|t| t.lines().map(str::to_string).collect()).unwrap_or_default());
+                let text = lines.get(line).map(|l| l.trim().chars().take(200).collect()).unwrap_or_default();
+                hits.push((p, line, text));
+            }
+            let _ = tx.send(hits);
+        });
     }
 }
 

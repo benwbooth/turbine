@@ -169,6 +169,9 @@ pub enum LspEvent {
     Completion { id: i64, items: Vec<CompletionItem> },
     Hover { id: i64, text: String },
     Definition { id: i64, locations: Vec<Location> },
+    References { id: i64, locations: Vec<Location> },
+    /// A rename's edits: per file, (start, end, new text), in the order given.
+    Rename { id: i64, edits: Vec<(PathBuf, Vec<(Pos, Pos, String)>)> },
     /// A request failed (or got an error back).
     Failed { id: i64, message: String },
     Log(String),
@@ -181,6 +184,8 @@ enum Kind {
     Completion,
     Hover,
     Definition,
+    References,
+    Rename,
     Other,
 }
 
@@ -321,6 +326,18 @@ impl LspClient {
     }
 
     /// Requests sent and not answered yet.
+    pub fn references(&mut self, path: &Path, pos: Pos) -> i64 {
+        let mut p = Self::at(path, pos);
+        p["context"] = json!({"includeDeclaration": true});
+        self.request_kind(Kind::References, "textDocument/references", p)
+    }
+
+    pub fn rename(&mut self, path: &Path, pos: Pos, new_name: &str) -> i64 {
+        let mut p = Self::at(path, pos);
+        p["newName"] = json!(new_name);
+        self.request_kind(Kind::Rename, "textDocument/rename", p)
+    }
+
     pub fn waiting(&self) -> usize {
         self.pending.len()
     }
@@ -444,6 +461,37 @@ impl LspClient {
                     })
                     .collect();
                 evs.push(LspEvent::Definition { id, locations });
+            }
+            Kind::References => {
+                let locations = r
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|l| Some(Location { path: uri_to_path(l["uri"].as_str()?)?, start: pos(&l["range"]["start"]) })).collect())
+                    .unwrap_or_default();
+                evs.push(LspEvent::References { id, locations });
+            }
+            Kind::Rename => {
+                // A WorkspaceEdit: `changes` {uri: [TextEdit]}, or `documentChanges`.
+                let mut edits: Vec<(PathBuf, Vec<(Pos, Pos, String)>)> = Vec::new();
+                let text_edits = |a: &Value| -> Vec<(Pos, Pos, String)> {
+                    a.as_array()
+                        .map(|v| v.iter().map(|e| (pos(&e["range"]["start"]), pos(&e["range"]["end"]), e["newText"].as_str().unwrap_or("").to_string())).collect())
+                        .unwrap_or_default()
+                };
+                if let Some(ch) = r["changes"].as_object() {
+                    for (uri, a) in ch {
+                        if let Some(p) = uri_to_path(uri) {
+                            edits.push((p, text_edits(a)));
+                        }
+                    }
+                }
+                if let Some(dc) = r["documentChanges"].as_array() {
+                    for d in dc {
+                        if let Some(p) = d["textDocument"]["uri"].as_str().and_then(uri_to_path) {
+                            edits.push((p, text_edits(&d["edits"])));
+                        }
+                    }
+                }
+                evs.push(LspEvent::Rename { id, edits });
             }
             Kind::Other => {}
         }

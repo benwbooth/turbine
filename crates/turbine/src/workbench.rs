@@ -33,6 +33,8 @@ type LspKey = (String, PathBuf);
 enum LspReq {
     Hover,
     Definition,
+    References,
+    Rename,
 }
 
 /// An open (or about to open) completion list.
@@ -312,6 +314,7 @@ fn menus() -> Vec<Menu> {
                 soon("~F~ormat Document", "Ctrl+Shift+I", "edit.format"),
                 sep(),
                 it("Trigger ~S~uggest", "Ctrl+Space", "lsp.complete"),
+                it("Re~n~ame Symbol...", "Shift+F2", "edit.rename"),
             ],
         ),
         Menu::new(
@@ -383,7 +386,7 @@ fn menus() -> Vec<Menu> {
                 it("Go to ~F~ile...", "Ctrl+P", "go.file"),
                 it("Go to ~S~ymbol...", "Ctrl+Shift+O", "go.symbol"),
                 it("Go to ~D~efinition", "F12", "go.definition"),
-                soon("Go to ~R~eferences", "Shift+F12", "go.references"),
+                it("Go to ~R~eferences", "Shift+F12", "go.references"),
                 it("Go to ~L~ine...", "Ctrl+G", "search.goto"),
                 soon("Go to ~B~racket", "Ctrl+Shift+\\", "go.bracket"),
             ],
@@ -1649,6 +1652,26 @@ impl Workbench {
                     w.ed.anchor = None;
                 }
             }
+            LspEvent::References { id, locations } => {
+                if self.lsp_requests.remove(&(key, id)).is_none() {
+                    return;
+                }
+                if locations.is_empty() {
+                    self.say("No references found");
+                    return;
+                }
+                let word = self.word_at_cursor();
+                let places = locations.into_iter().map(|l| (l.path, l.start.line as usize)).collect();
+                self.shell.search.show_places(&format!("References: {word}"), places);
+                self.run_command("view.search");
+                self.shell.search.in_field = false;
+            }
+            LspEvent::Rename { id, edits } => {
+                if self.lsp_requests.remove(&(key, id)).is_none() {
+                    return;
+                }
+                self.apply_rename(edits);
+            }
             LspEvent::Failed { id, message } => {
                 let ours = self.lsp_requests.remove(&(key.clone(), id)).is_some()
                     || self.completion.as_ref().is_some_and(|c| c.waiting.as_ref() == Some(&(key.clone(), id)));
@@ -1687,9 +1710,83 @@ impl Workbench {
         let id = match what {
             LspReq::Hover => c.hover(&path, pos),
             LspReq::Definition => c.definition(&path, pos),
+            LspReq::References => c.references(&path, pos),
+            // (Rename goes through lsp_rename, with the new name.)
+            LspReq::Rename => return,
         };
         let win = self.windows.last().map(|w| w.win.id).unwrap_or(0);
         self.lsp_requests.insert((key, id), (what, win));
+    }
+
+    /// Rename the symbol at the cursor everywhere (the language server's edits).
+    fn lsp_rename(&mut self, new_name: &str) {
+        let Some((key, path, pos)) = self.lsp_here() else {
+            self.say("No language server for this file");
+            return;
+        };
+        let Some(c) = self.lsp.get_mut(&key) else { return };
+        let id = c.rename(&path, pos, new_name);
+        let win = self.windows.last().map(|w| w.win.id).unwrap_or(0);
+        self.lsp_requests.insert((key, id), (LspReq::Rename, win));
+    }
+
+    /// The word at the cursor (for Rename's field).
+    fn word_at_cursor(&self) -> String {
+        let Some(w) = self.windows.last() else { return String::new() };
+        let rope = &w.ed.doc.rope;
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let (mut a, mut b) = (w.ed.cursor, w.ed.cursor);
+        while a > 0 && is_word(rope.char(a - 1)) {
+            a -= 1;
+        }
+        while b < rope.len_chars() && is_word(rope.char(b)) {
+            b += 1;
+        }
+        rope.slice(a..b).to_string()
+    }
+
+    /// Apply a rename's edits: open files get them, others open (in the
+    /// background) with them, all left unsaved to look over.
+    fn apply_rename(&mut self, edits: Vec<(PathBuf, Vec<(Pos, Pos, String)>)>) {
+        let front = self.windows.last().map(|w| w.win.id);
+        let mut files = 0;
+        let mut n = 0;
+        for (path, mut list) in edits {
+            let want = Self::canon(&path);
+            let i = match self.windows.iter().position(|w| w.dock.is_none() && w.ed.doc.path.as_ref().is_some_and(|q| Self::canon(q) == want)) {
+                Some(i) => i,
+                None => {
+                    self.open_path(&path);
+                    self.windows.len() - 1
+                }
+            };
+            let ed = &mut self.windows[i].ed;
+            // Last first, so earlier places stay put.
+            list.sort_by(|a, b| (b.0.line, b.0.character).cmp(&(a.0.line, a.0.character)));
+            let to_char = |ed: &EditorView, p: Pos| {
+                let line = (p.line as usize).min(ed.doc.len_lines().saturating_sub(1));
+                let text = ed.doc.line(line);
+                ed.doc.line_byte_to_char(line, lsp::byte_of_utf16(&text, p.character))
+            };
+            ed.doc.break_undo_group();
+            for (s, e, t) in list {
+                let (a, b) = (to_char(ed, s), to_char(ed, e));
+                ed.doc.remove(a, b, ed.cursor);
+                ed.doc.insert(a, &t, a);
+                n += 1;
+            }
+            ed.doc.break_undo_group();
+            ed.cursor = ed.cursor.min(ed.doc.rope.len_chars());
+            files += 1;
+        }
+        if let Some(id) = front {
+            if let Some(i) = self.windows.iter().position(|w| w.win.id == id) {
+                let w = self.windows.remove(i);
+                self.windows.push(w);
+            }
+        }
+        self.renumber();
+        self.say(if n == 0 { "Nothing to rename here".to_string() } else { format!("Renamed {n} places in {files} files (save to keep them)") });
     }
 
     fn start_completion(&mut self) {
@@ -1989,6 +2086,18 @@ impl Workbench {
             "run.arguments" => self.arguments_dialog(),
             "lsp.hover" => self.lsp_request(LspReq::Hover),
             "go.definition" => self.lsp_request(LspReq::Definition),
+            "go.references" => self.lsp_request(LspReq::References),
+            "edit.rename" => {
+                let word = self.word_at_cursor();
+                if word.is_empty() {
+                    self.say("Put the cursor on a name to rename it");
+                } else {
+                    let d = Dialog::new("rename_symbol", "Rename Symbol")
+                        .body(ui::input("name", "New ~n~ame:", &word).chars(30))
+                        .buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
+                    self.dialog = Some(d);
+                }
+            }
             "go.next_problem" | "go.prev_problem" => {
                 let fwd = cmd == "go.next_problem";
                 let msg = self.windows.last_mut().and_then(|w| w.ed.goto_diagnostic(fwd));
@@ -2419,6 +2528,13 @@ impl Workbench {
         if self.ex_dialog_done(&kind, &d) {
             return;
         }
+        if kind == "rename_symbol" {
+            let name = d.value("name").unwrap_or_default().trim().to_string();
+            if !name.is_empty() {
+                self.lsp_rename(&name);
+            }
+            return;
+        }
         if kind == "agent" {
             let t = d.value("task").unwrap_or_default();
             if !t.trim().is_empty() {
@@ -2711,6 +2827,10 @@ impl Workbench {
             Some("lsp.complete")
         } else if k.is(Key::F(12), Mods::NONE) {
             Some("go.definition")
+        } else if k.is(Key::F(12), Mods::SHIFT) {
+            Some("go.references")
+        } else if k.is(Key::F(2), Mods::SHIFT) {
+            Some("edit.rename")
         } else if k.is(Key::F(1), Mods::CTRL) {
             Some("lsp.hover")
         } else if k.is(Key::F(9), Mods::CTRL) {
@@ -4283,7 +4403,7 @@ mod tests {
         keys(&mut wb, &["Enter"]);
         wait_until(&mut wb, "the new folder", |_| dir.join("docs").is_dir());
         // Rename new.txt (F2): the open editor follows the file.
-        wait_until(&mut wb, "new.txt listed", |wb| wb.shell.explorer.list.rows.iter().any(|r| r.text == "new.txt"));
+        wait_until(&mut wb, "new.txt and docs listed", |wb| ["new.txt", "docs"].iter().all(|n| wb.shell.explorer.list.rows.iter().any(|r| r.text == *n)));
         let i = wb.shell.explorer.list.rows.iter().position(|r| r.text == "new.txt").unwrap();
         wb.shell.explorer.list.select(i);
         // (The old name is highlighted: typing replaces it.)
@@ -4312,7 +4432,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("main.rs");
         std::fs::write(&f, "fn main() {\n    BAD;\n    pr\n}\n").unwrap();
-        let mut wb = Workbench::new(&[f]);
+        let mut wb = Workbench::new(&[f.clone()]);
         wb.set_lsp_spawner(Box::new(|lang, root| {
             Some(turbine_services::fake::fake_server().map(|rpc| LspClient::with_rpc(rpc, root, lang)))
         }));
@@ -4352,6 +4472,20 @@ mod tests {
         wait_until(&mut wb, "hover", |wb| wb.dialog.as_ref().is_some_and(|d| d.kind == "hover"));
         let text = wb.dialog.as_ref().unwrap().value("text").unwrap_or_default();
         assert!(text.contains("fake hover: println"), "{text}");
+        keys(&mut wb, &["Esc"]);
+
+        // Shift+F12 on "println!": its uses, in the Search view.
+        keys(&mut wb, &["Shift+F12"]);
+        wait_until(&mut wb, "references", |wb| !wb.shell.search.busy() && wb.shell.search.hits.iter().flatten().count() == 1);
+        assert!(wb.shell.search.query.text.starts_with("References: println"));
+
+        // Shift+F2 renames "main" (line 0) everywhere it's used.
+        wb.goto_file(&f, Some(0), 3);
+        keys(&mut wb, &["Shift+F2"]);
+        assert_eq!(wb.dialog.as_ref().map(|d| d.kind.as_str()), Some("rename_symbol"));
+        run(&mut wb, json!({"cmd": "type", "text": "start"}));
+        keys(&mut wb, &["Enter"]);
+        wait_until(&mut wb, "the rename", |wb| wb.windows.iter().any(|w| w.ed.doc.line(0).starts_with("fn start")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

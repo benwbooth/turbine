@@ -80,6 +80,30 @@ pub fn fake_server() -> std::io::Result<RpcProcess> {
                         _ => reply(&mut w, Value::Null),
                     }
                 }
+                "textDocument/references" | "textDocument/rename" => {
+                    // Every whole-word use of the name in the file.
+                    let text = docs.get(&uri).cloned().unwrap_or_default();
+                    let word = word_at(&text, p["position"]["line"].as_u64().unwrap_or(0) as u32, p["position"]["character"].as_u64().unwrap_or(0) as u32);
+                    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+                    let mut ranges = Vec::new();
+                    for (i, l) in text.lines().enumerate() {
+                        for (b, _) in l.match_indices(&word) {
+                            let before = l[..b].chars().next_back();
+                            let after = l[b + word.len()..].chars().next();
+                            if !word.is_empty() && !before.is_some_and(is_word) && !after.is_some_and(is_word) {
+                                let c = crate::lsp::utf16_col(l, b);
+                                ranges.push(json!({"start": {"line": i, "character": c}, "end": {"line": i, "character": c + word.encode_utf16().count() as u32}}));
+                            }
+                        }
+                    }
+                    if method == "textDocument/references" {
+                        reply(&mut w, Value::Array(ranges.into_iter().map(|r| json!({"uri": uri, "range": r})).collect()));
+                    } else {
+                        let new = p["newName"].as_str().unwrap_or("").to_string();
+                        let edits: Vec<Value> = ranges.into_iter().map(|r| json!({"range": r, "newText": new})).collect();
+                        reply(&mut w, json!({"changes": {uri.clone(): edits}}));
+                    }
+                }
                 "shutdown" => reply(&mut w, Value::Null),
                 "exit" => return,
                 _ if id.is_some() => reply(&mut w, Value::Null),
