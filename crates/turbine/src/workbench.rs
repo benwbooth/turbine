@@ -360,9 +360,10 @@ fn menus() -> Vec<Menu> {
                 it("Mo~v~e Line Up", "Alt+Up", "selection.move_up"),
                 it("Move Line Do~w~n", "Alt+Down", "selection.move_down"),
                 sep(),
-                soon("Add Cursor A~b~ove", "Ctrl+Alt+Up", "selection.cursor_above"),
-                soon("Add Cursor Be~l~ow", "Ctrl+Alt+Down", "selection.cursor_below"),
-                soon("~C~olumn Selection Mode", "", "selection.column"),
+                it("Add Cursor A~b~ove", "Ctrl+Alt+Up", "selection.cursor_above"),
+                it("Add Cursor Be~l~ow", "Ctrl+Alt+Down", "selection.cursor_below"),
+                it("Add ~N~ext Match", "Ctrl+D", "selection.add_next"),
+                it("~C~olumn Selection Mode", "", "selection.column"),
             ],
         ),
         Menu::new(
@@ -2151,6 +2152,7 @@ impl Workbench {
                     "view.editor_tabs" => it.checked = Some(self.shell.dock.editor_tabs),
                     "view.breadcrumbs" => it.checked = Some(self.shell.dock.breadcrumbs),
                     "view.minimap" => it.checked = Some(self.shell.minimap.unwrap_or(self.theme.style.icons)),
+                    "selection.column" => it.checked = Some(self.windows.last().is_some_and(|w| w.ed.column_mode)),
                     _ => {}
                 }
             }
@@ -2323,7 +2325,8 @@ impl Workbench {
             c if self.extras_command(c) => {}
             "run.watch" => self.add_watch_dialog(),
             "edit.comment" | "selection.expand" | "selection.shrink" | "selection.copy_up" | "selection.copy_down" | "selection.move_up" | "selection.move_down" | "go.bracket"
-            | "go.next_def" | "go.prev_def" | "view.fold" | "view.unfold" | "view.fold_all" | "view.unfold_all" => {
+            | "go.next_def" | "go.prev_def" | "view.fold" | "view.unfold" | "view.fold_all" | "view.unfold_all" | "selection.cursor_above" | "selection.cursor_below"
+            | "selection.add_next" | "selection.column" => {
                 let Some(w) = self.windows.last_mut().filter(|w| w.term.is_none()) else { return };
                 let ed = &mut w.ed;
                 let editable = w.special.is_none() || w.special == Some("immediate");
@@ -2338,6 +2341,22 @@ impl Workbench {
                     "go.bracket" => ed.goto_bracket(),
                     "go.next_def" => ed.goto_definition_line(true),
                     "go.prev_def" => ed.goto_definition_line(false),
+                    "selection.cursor_above" => {
+                        ed.add_cursor_line(false);
+                        true
+                    }
+                    "selection.cursor_below" => {
+                        ed.add_cursor_line(true);
+                        true
+                    }
+                    "selection.add_next" => {
+                        ed.add_next_match();
+                        true
+                    }
+                    "selection.column" => {
+                        ed.column_mode = !ed.column_mode;
+                        true
+                    }
                     "view.fold" => ed.fold(true),
                     "view.unfold" => ed.fold(false),
                     "view.fold_all" => {

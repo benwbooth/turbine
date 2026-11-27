@@ -57,6 +57,7 @@ pub struct DiagMark {
 
 /// The minimap's width in cells (eight chars of text each, as braille
 /// dots), and the lines in each of its rows.
+mod multi;
 mod structure;
 pub use structure::Structure;
 
@@ -93,6 +94,10 @@ pub struct EditorView {
     /// removed, 3 a hunk's header; and per line the byte ranges changed.
     pub line_bg: Vec<u8>,
     pub words: Vec<Vec<(u32, u32)>>,
+    /// The other cursors (and their selections' anchors), when there are
+    /// several; column selection mode (Shift+Up/Down add cursors).
+    pub cursors: Vec<(usize, Option<usize>)>,
+    pub column_mode: bool,
     /// Extra selected char ranges (vim's visual block).
     pub block: Vec<(usize, usize)>,
     /// Inlay hints from the language server, per line: (byte, text), shown
@@ -155,6 +160,8 @@ impl EditorView {
             line_bg: Vec::new(),
             words: Vec::new(),
             block: Vec::new(),
+            cursors: Vec::new(),
+            column_mode: false,
             found: Vec::new(),
             found_current: None,
             structure: Structure::default(),
@@ -397,7 +404,7 @@ impl EditorView {
     }
 
     /// Handle a key. Returns true if the editor used it.
-    pub fn handle_key(&mut self, ev: &KeyEvent, clipboard: &mut String) -> bool {
+    fn handle_key_one(&mut self, ev: &KeyEvent, clipboard: &mut String) -> bool {
         if ev.kind == KeyKind::Release {
             return false;
         }
@@ -765,7 +772,8 @@ impl EditorView {
                 }
                 let ch = line_start + p.char_off;
                 let selected = sel.is_some_and(|(a, b)| ch >= a && ch < b)
-                    || self.block.iter().any(|&(a, b)| ch >= a && ch < b);
+                    || self.block.iter().any(|&(a, b)| ch >= a && ch < b)
+                    || (!self.cursors.is_empty() && self.in_extra_selection(ch));
                 // (Find's matches: the current one, then the others.)
                 let found = if self.found.is_empty() {
                     None
@@ -852,6 +860,24 @@ impl EditorView {
                     let x = text_x + cur_col as i32 - self.scroll_x as i32;
                     tc.print(x, y, first, s.editor_ghost);
                 }
+            }
+        }
+        // The other cursors: a cell each, reversed.
+        for &(cur, _) in &self.cursors {
+            let (l, b) = self.doc.char_to_line_byte(cur.min(self.doc.rope.len_chars()));
+            if self.hidden(l) || l < self.scroll_y {
+                continue;
+            }
+            let row = self.rows_between(self.scroll_y, l);
+            if row >= area.h {
+                continue;
+            }
+            let x = text_x + self.col_of(l, b) as i32 - self.scroll_x as i32;
+            if x >= text_x && x < area.right() {
+                let st = Style { fg: s.editor.bg, bg: s.editor.fg, ..s.editor };
+                let t = self.doc.line(l);
+                let g = t[b.min(t.len())..].chars().next().filter(|c| *c != '\n').map(|c| c.to_string()).unwrap_or_else(|| " ".into());
+                c.print(x, area.y + row, &g, st);
             }
         }
         if focused {
