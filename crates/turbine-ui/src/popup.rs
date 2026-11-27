@@ -73,6 +73,13 @@ impl ListPopup {
                 }
                 PopupResult::Consumed
             }
+            // (The highlight follows the mouse, as menus' does.)
+            MouseKind::Moved | MouseKind::Drag(_) => {
+                if let Some(i) = (0..self.items.len()).find(|&i| self.item_rect(i).is_some_and(|r| r.contains(ev.pos))) {
+                    self.sel = i;
+                }
+                PopupResult::Consumed
+            }
             MouseKind::ScrollUp => {
                 self.sel = self.sel.saturating_sub(1);
                 PopupResult::Consumed
@@ -146,5 +153,20 @@ impl ListPopup {
         if self.items.len() > rows as usize {
             crate::frame::draw_vscroll(c, self.rect.right() - 1, y + 1, rows, self.sel, self.items.len(), s.menu, theme.style.scroll);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hovering_moves_the_highlight() {
+        let mut p = ListPopup::new(vec![("One".into(), String::new()), ("Two".into(), String::new()), ("Three".into(), String::new())]);
+        p.place(Point::new(5, 5), Rect::new(0, 0, 80, 25));
+        let r = p.item_rect(2).unwrap();
+        let ev = MouseEvent { kind: MouseKind::Moved, pos: Point::new(r.x + 1, r.y), mods: crate::event::Mods::NONE };
+        p.handle_mouse(&ev);
+        assert_eq!(p.sel, 2);
     }
 }

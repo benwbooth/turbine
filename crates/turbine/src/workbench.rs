@@ -5060,6 +5060,19 @@ mod tests {
     }
 
     #[test]
+    fn hovering_a_right_click_menu_moves_its_highlight() {
+        let (dir, mut wb) = project("menuhover");
+        wait_until(&mut wb, "the listing", |wb| wb.shell.explorer.list.rows.len() >= 4);
+        keys(&mut wb, &["Ctrl+Shift+E", "Shift+F10"]);
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let r = wb.ex.menu.as_ref().and_then(|m| m.popup.item_rect(2)).expect("the menu");
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Moved, pos: Point::new(r.x + 2, r.y), mods: Mods::NONE }));
+        assert_eq!(wb.ex.menu.as_ref().map(|m| m.popup.sel), Some(2));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn tooltips_name_icons_and_show_cut_names_whole() {
         let (dir, mut wb) = project("tips");
         std::fs::write(dir.join("a_very_long_file_name_that_will_not_fit_in_the_side_bar.txt"), "").unwrap();
