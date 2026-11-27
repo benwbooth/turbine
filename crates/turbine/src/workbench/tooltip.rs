@@ -22,11 +22,22 @@ pub(super) struct TipState {
     pub hover: Option<((String, PathBuf), i64, Rect)>,
     /// The tip's lines already in colours (code: an Outline item's lines).
     pub rich: Option<Vec<Vec<(String, Style)>>>,
+    /// Where the tip was drawn: the pointer may cross onto it (to scroll
+    /// or copy) without it going.
+    pub drawn: std::cell::Cell<Option<Rect>>,
+    /// Lines scrolled past in a long tip.
+    pub scroll: std::cell::Cell<usize>,
 }
 
 impl Workbench {
     /// Every event: moving rests the mouse anew; keys and clicks hide it.
     pub(super) fn tip_event(&mut self, ev: &Event) {
+        // (On the tip itself: it stays, the pointer resting there.)
+        if let Event::Mouse(m) = ev {
+            if self.tip.shown.is_some() && self.tip.drawn.get().is_some_and(|r| r.contains(m.pos)) {
+                return;
+            }
+        }
         match ev {
             Event::Mouse(m) if matches!(m.kind, MouseKind::Moved) => {
                 if m.pos.x < 0 || m.pos.y < 0 {
@@ -47,6 +58,24 @@ impl Workbench {
             }
             _ => {}
         }
+    }
+
+    /// The mouse on a shown tip: the wheel scrolls it, a click copies its
+    /// text. True when it was on the tip.
+    pub(super) fn tip_mouse(&mut self, m: &MouseEvent) -> bool {
+        let Some(r) = self.tip.drawn.get().filter(|r| r.contains(m.pos) && self.tip.shown.is_some()) else { return false };
+        let _ = r;
+        match m.kind {
+            MouseKind::ScrollDown => self.tip.scroll.set(self.tip.scroll.get() + 1),
+            MouseKind::ScrollUp => self.tip.scroll.set(self.tip.scroll.get().saturating_sub(1)),
+            MouseKind::Down(Button::Left) => {
+                let text = self.tip.shown.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
+                self.copy(text);
+                self.say("Copied the tooltip's text");
+            }
+            _ => {}
+        }
+        true
     }
 
     /// When the mouse has rested long enough: the tip. Returns when to
@@ -267,16 +296,20 @@ impl Workbench {
                 }
             }
             lines.push(cur);
-            if lines.len() >= 16 {
+            if lines.len() >= 400 {
                 break;
             }
         }
-        lines.truncate(16);
+        // (A long one scrolls with the wheel over it.)
+        let skip = self.tip.scroll.get().min(lines.len().saturating_sub(1));
+        self.tip.scroll.set(skip);
+        let lines: Vec<Vec<(String, Style)>> = lines.into_iter().skip(skip).take(16).collect();
         let w = lines.iter().map(|l| l.iter().map(|(t, _)| str_width(t)).sum::<usize>()).max().unwrap_or(0) as i32 + 2;
         let h = lines.len() as i32;
         let x = p.x.min(screen.right() - w).max(0);
         let y = if p.y + 1 + h <= screen.bottom() { p.y + 1 } else { (p.y - h).max(0) };
         let r = Rect::new(x, y, w, h);
+        self.tip.drawn.set(Some(r));
         c.fill(r, " ", base);
         for (i, l) in lines.iter().enumerate() {
             let mut cx = x + 1;

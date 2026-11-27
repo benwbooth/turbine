@@ -4709,6 +4709,12 @@ impl Workbench {
 impl Workbench {
     fn event_inner(&mut self, ev: Event) {
         self.last_input = Some(Instant::now());
+        // (A tooltip the pointer is on takes its wheel and clicks.)
+        if let Event::Mouse(m) = &ev {
+            if self.tip_mouse(m) {
+                return;
+            }
+        }
         // (The mouse leaving the window: only the tooltip cares.)
         if matches!(&ev, Event::Mouse(m) if m.pos.x < 0 || m.pos.y < 0) {
             self.tip_event(&ev);
@@ -6259,6 +6265,12 @@ mod tests {
         assert!(tip.contains("a_very_long_file_name_that_will_not_fit_in_the_side_bar.txt"), "{tip}");
         wb.render(&mut surf);
         assert!(surf.to_text().contains("rw-r--r--"), "drawn");
+        // The pointer can cross onto it (it stays); a click there copies it.
+        let tr = wb.tip.drawn.get().expect("drawn");
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Moved, pos: Point::new(tr.x + 1, tr.y), mods: Mods::NONE }));
+        assert!(wb.tip.shown.is_some(), "still shown with the pointer on it");
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(tr.x + 1, tr.y), mods: Mods::NONE }));
+        assert!(wb.clipboard.contains("a_very_long_file_name"));
         // A key hides it.
         keys(&mut wb, &["Down"]);
         assert!(wb.tip.shown.is_none());
