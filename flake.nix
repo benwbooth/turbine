@@ -79,6 +79,16 @@
                   rm -rf "$d" "$workDir/target/release/.fingerprint/$(basename "$d")"
                 fi
               done
+              # fs::copy also sets the copy's permissions, which only its owner
+              # may do: a build script copying over a file another nixbld user
+              # left (tree-sitter's stdlib-symbols.txt) fails even though the
+              # file is writable. Copy such files over themselves (mode and
+              # times kept) so this user owns them; cheaper than rerunning
+              # every build script.
+              find "$workDir"/target/release/build -path '*/out/*' -type f ! -user "$(id -u)" -print0 2>/dev/null |
+                while IFS= read -r -d "" f; do
+                  cp -p "$f" "$f.own" 2>/dev/null && mv -f "$f.own" "$f" || rm -f "$f.own"
+                done
               CARGO_HOME="$NIX_BUILD_TOP/.cargo" CARGO_TARGET_DIR="$workDir/target" \
                 cargo build ${cargoArgs} --offline --locked -j "$NIX_BUILD_CORES"
               find "$workDir/target" -mindepth 1 -user "$(id -u)" ! -perm -o+w -exec chmod a+rwX {} + 2>/dev/null || true
