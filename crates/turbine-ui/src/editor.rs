@@ -978,6 +978,8 @@ impl EditorView {
                         Some(1) => Some(s.diff_add),
                         Some(2) => Some(s.diff_del),
                         Some(3) => Some(s.diff_hunk),
+                        // (A chat's own words: a bubble apart from the answers.)
+                        Some(4) => Some(chat_bubble(s)),
                         _ => None,
                     }
                 };
@@ -1257,4 +1259,13 @@ mod tests {
         ed.handle_key(&KeyEvent::new(Key::Char('v'), Mods::CTRL), &mut clip);
         assert_eq!(ed.doc.rope.to_string(), "worldhello ");
     }
+}
+
+/// The colours of the user's lines in a chat: darker than a dark page,
+/// greyer than a light one.
+fn chat_bubble(s: &crate::theme::Scheme) -> Style {
+    use crate::theme::vga;
+    let bg = s.editor.bg;
+    let light = (bg.0 as u32 * 3 + bg.1 as u32 * 6 + bg.2 as u32) / 10 > 110;
+    if light { Style::new(vga::BLACK, vga::LIGHT_GRAY) } else { Style::new(vga::WHITE, vga::BLACK) }
 }

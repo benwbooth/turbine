@@ -287,6 +287,8 @@ pub struct Workbench {
     chat_streaming: Option<(u64, String)>,
     /// The chat model the person picked (else the hub's loaded one).
     chat_model: Option<String>,
+    /// Where the chat's "thinking…" stands until the answer's first words.
+    chat_wait: Option<usize>,
     /// A question asked before the model list arrived.
     pending_question: Option<String>,
     agent: Option<AgentRun>,
@@ -680,6 +682,7 @@ impl Workbench {
             chat_history: Vec::new(),
             chat_streaming: None,
             chat_model: None,
+            chat_wait: None,
             pending_question: None,
             agent: None,
             pending_task: None,
@@ -1505,9 +1508,24 @@ impl Workbench {
         let ctx = self.chat_context();
         self.chat_history.push(ChatMessage { role: "user".into(), content: format!("{q}\n\n{ctx}") });
         self.append_chat(&format!("\n## You\n\n{q}\n\n## {}\n\n", model.name));
+        // (A model starting, or thinking first, takes a while: say so.)
+        self.chat_wait = self.windows.iter().find(|w| w.special == Some("chat")).map(|w| w.ed.doc.rope.len_chars());
+        self.append_chat(CHAT_WAIT);
         let msgs = self.chat_history.clone();
         let id = self.ai.as_mut().unwrap().chat(&model, msgs);
         self.chat_streaming = Some((id, String::new()));
+    }
+
+    /// Take the chat's "thinking…" away (its answer is coming, or failed).
+    fn clear_chat_wait(&mut self) {
+        let Some(at) = self.chat_wait.take() else { return };
+        let Some(w) = self.windows.iter_mut().find(|w| w.special == Some("chat")) else { return };
+        let end = w.ed.doc.rope.len_chars();
+        if at <= end && w.ed.doc.rope.slice(at..end).to_string() == CHAT_WAIT {
+            w.ed.doc.remove(at, end, end);
+            w.ed.doc.dirty = false;
+            w.ed.cursor = w.ed.doc.rope.len_chars();
+        }
     }
 
     fn append_chat(&mut self, text: &str) {
@@ -1520,6 +1538,8 @@ impl Workbench {
                 self.next_id += 1;
                 let mut ed = EditorView::new(Document::from_str("# AI Chat\n"));
                 ed.line_numbers = false;
+                // (Answers are prose: wrapped to the side bar.)
+                ed.wrap = true;
                 self.windows.push(EdWin {
                     win,
                     ed,
@@ -1551,6 +1571,7 @@ impl Workbench {
         ed.doc.insert(end, text, end);
         ed.doc.dirty = false;
         ed.cursor = ed.doc.rope.len_chars();
+        ed.line_bg = chat_line_colours(&ed.doc);
     }
 
     fn agent_dialog(&mut self) {
@@ -1745,6 +1766,7 @@ impl Workbench {
                 AiEvent::Error { id, ref message } if self.inline_error(id, message) => {}
                 AiEvent::Chunk { id, text } => {
                     if self.chat_streaming.as_ref().is_some_and(|(i, _)| *i == id) {
+                        self.clear_chat_wait();
                         self.chat_streaming.as_mut().unwrap().1.push_str(&text);
                         self.append_chat(&text);
                     }
@@ -1752,6 +1774,7 @@ impl Workbench {
                 AiEvent::Done { id } => {
                     if let Some((i, answer)) = self.chat_streaming.take() {
                         if i == id {
+                            self.clear_chat_wait();
                             self.chat_history.push(ChatMessage { role: "assistant".into(), content: answer });
                             self.append_chat("\n");
                         } else {
@@ -1769,6 +1792,7 @@ impl Workbench {
                     }
                     if self.chat_streaming.as_ref().is_some_and(|(i, _)| *i == id) {
                         self.chat_streaming = None;
+                        self.clear_chat_wait();
                         self.append_chat(&format!("\n*(The model didn't answer: {message})*\n"));
                     } else if self.fim_pending.as_ref().is_some_and(|p| p.0 == id) {
                         self.fim_pending = None;
@@ -5283,6 +5307,26 @@ fn bar_drag(w: &mut EdWin, horizontal: bool, inside: bool, skip: i32, p: Point, 
     set_bar_first(w, horizontal, (at * span + room / 2) / room);
 }
 
+/// The chat's placeholder while the model starts or thinks.
+const CHAT_WAIT: &str = "*thinking…*";
+
+/// A chat's line colours: the user's turns (from a "## You" heading to the
+/// next heading) as a bubble (4), each answer's heading a bar (3).
+fn chat_line_colours(doc: &Document) -> Vec<u8> {
+    let mut out = Vec::with_capacity(doc.len_lines());
+    let mut mine = false;
+    for i in 0..doc.len_lines() {
+        let l = doc.line(i);
+        if let Some(h) = l.strip_prefix("## ") {
+            mine = h.starts_with("You");
+            out.push(if mine { 4 } else { 3 });
+        } else {
+            out.push(if mine { 4 } else { 0 });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5727,6 +5771,12 @@ mod tests {
         assert!(["▒", "░", "█", "▓"].contains(&col(right.x).as_str()), "{:?}", col(right.x));
         assert!(!["│", "║"].contains(&col(right.x + 1).as_str()) && !["│", "║"].contains(&col(right.x - 1).as_str()));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_chat_tells_you_from_the_ai() {
+        let doc = Document::from_str("# AI Chat\n\n## You\n\nwhy?\n\n## inkling-2-mini\n\nbecause\n");
+        assert_eq!(chat_line_colours(&doc), vec![0, 0, 4, 4, 4, 4, 3, 0, 0, 0]);
     }
 
     #[test]

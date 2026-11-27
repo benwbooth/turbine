@@ -64,7 +64,10 @@ fn api_base(url: &str) -> String {
 pub fn models_from_state(st: &Value) -> Vec<Model> {
     let mut out = Vec::new();
     for p in st["providers"].as_array().cloned().unwrap_or_default() {
-        if p["kind"] != "local" || p["running"] != true {
+        // (A service the hub knows starts when asked, socket-activated:
+        // its models count while it's stopped.)
+        let service = p["service"] == true;
+        if p["kind"] != "local" || (p["running"] != true && !service) {
             continue;
         }
         let id = p["id"].as_str().unwrap_or("").to_string();
@@ -85,9 +88,19 @@ pub fn models_from_state(st: &Value) -> Vec<Model> {
     out
 }
 
-/// Pick the chat model: one already loaded, then the smallest-looking one.
+/// Chat models best first: the hub's own (Inkling), then other dedicated
+/// services; anything Ollama has after.
+const PREFERRED: [&str; 2] = ["inkling", "qwen3.8"];
+
+/// Pick the chat model: a preferred one (Inkling first), then a dedicated
+/// service, then one already loaded, then the smallest-looking one.
 pub fn pick_chat(models: &[Model]) -> Option<&Model> {
-    models.iter().filter(|m| m.chat).max_by_key(|m| (m.loaded, std::cmp::Reverse(m.name.len())))
+    let rank = |m: &Model| {
+        let lower = m.name.to_lowercase();
+        let pref = PREFERRED.iter().position(|p| lower.contains(p)).map_or(0, |i| PREFERRED.len() - i);
+        (pref, m.provider.starts_with("service:"), m.loaded, std::cmp::Reverse(m.name.len()))
+    };
+    models.iter().filter(|m| m.chat).max_by_key(|m| rank(m))
 }
 
 /// Whether a suggestion is in the text's own scripts: one with CJK,
@@ -237,7 +250,8 @@ impl Ai {
 
     /// Before using a model: through the hub, so it can make room for it.
     pub fn prepare(&mut self, m: &Model) {
-        if !m.loaded && self.hub.is_some() {
+        // (A service starts itself on the first request: its socket.)
+        if !m.loaded && self.hub.is_some() && !m.provider.starts_with("service:") {
             let (p, n) = (m.provider.clone(), m.name.clone());
             self.hub_send(json!({"cmd": "load", "provider": p, "model": n}));
         }
@@ -464,5 +478,12 @@ mod tests {
         assert_eq!(pick_fim(&ms).unwrap().name, "qwen2.5-coder:1.5b-base");
         assert_eq!(pick_chat(&ms).unwrap().name, "qwen3.5:4b");
         assert!(!ms.iter().any(|m| m.name == "big"));
+        // A stopped service (socket-activated) still counts, and Inkling wins.
+        let mut st = st;
+        st["providers"].as_array_mut().unwrap().push(json!({"id": "service:inkling-2-mini.service", "kind": "local", "url": "http://127.0.0.1:11438",
+            "running": false, "service": true, "installed": [{"name": "inkling-2-mini", "label": "Inkling 2 Mini"}], "loaded": []}));
+        let ms = models_from_state(&st);
+        let m = pick_chat(&ms).unwrap();
+        assert_eq!((m.name.as_str(), m.base.as_str()), ("inkling-2-mini", "http://127.0.0.1:11438/v1"));
     }
 }
