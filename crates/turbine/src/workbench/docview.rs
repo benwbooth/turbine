@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::structview::{self, StructView};
+use turbine_ui::popup::{ListPopup, PopupResult};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Mode {
@@ -24,6 +25,10 @@ pub(super) struct DocView {
     /// The preview wraps at the window's width (else lines run on, and it
     /// scrolls sideways).
     pub preview_wrap: bool,
+    /// The preview on white (else the guide's black).
+    pub light: bool,
+    /// The tree's right-click menu: its list, where, and each item's action.
+    pub menu: Option<(ListPopup, Point, Vec<&'static str>)>,
 }
 
 /// In-place previews go by an id of their own (not a window's).
@@ -47,7 +52,8 @@ impl Workbench {
 
     /// The toolbar's controls in a window: (place, action, label, on, tip).
     pub(super) fn doc_buttons(&self, w: &EdWin) -> Vec<(Rect, &'static str, String, &'static str)> {
-        buttons(w, self.doc_mode(w.win.id), self.docviews.get(&w.win.id).is_none_or(|d| d.preview_wrap))
+        let dv = self.docviews.get(&w.win.id);
+        buttons(w, self.doc_mode(w.win.id), dv.is_none_or(|d| d.preview_wrap), dv.is_some_and(|d| d.light))
     }
 
     /// Where a window's text goes: under the toolbar when it has one.
@@ -76,6 +82,16 @@ impl Workbench {
                 w.ed.wrap = !w.ed.wrap;
                 return;
             }
+            "light" => {
+                if let Some(dv) = self.docviews.get_mut(&id) {
+                    dv.light = !dv.light;
+                }
+            }
+            "expand" | "collapse" => {
+                if let Some(t) = self.docviews.get_mut(&id).and_then(|d| d.tree.as_mut()) {
+                    t.expand_all(action == "expand");
+                }
+            }
             "source" => self.set_doc_mode(id, Mode::Source),
             "preview" => self.set_doc_mode(id, Mode::Preview),
             "tree" => self.set_doc_mode(id, Mode::Tree),
@@ -92,7 +108,7 @@ impl Workbench {
             // (Drawn as the guide is: black, its headings, links, code and
             // keys in their colours.)
             alt.help_look = true;
-            DocView { mode: Mode::Source, alt, tree: None, tree_version: u64::MAX, preview_wrap: true }
+            DocView { mode: Mode::Source, alt, tree: None, tree_version: u64::MAX, preview_wrap: true, light: false, menu: None }
         });
         dv.mode = mode;
         let pid = PREVIEW_ID | id;
@@ -130,6 +146,30 @@ impl Workbench {
         if k.is(Key::Char('z'), Mods::ALT) && self.doc_mode(id) != Mode::Tree {
             self.doc_action(id, "wrap");
             return true;
+        }
+        // The tree's menu has the keys while it's open.
+        if let Some((popup, _, actions)) = self.docviews.get_mut(&id).and_then(|d| d.menu.as_mut()) {
+            let actions = actions.clone();
+            match popup.handle_key(k) {
+                PopupResult::Accept(i) => {
+                    self.docviews.get_mut(&id).unwrap().menu = None;
+                    self.tree_action(id, actions[i]);
+                }
+                PopupResult::Close => self.docviews.get_mut(&id).unwrap().menu = None,
+                _ => {}
+            }
+            return true;
+        }
+        if self.doc_mode(id) == Mode::Tree {
+            if k.is(Key::F(2), Mods::NONE) {
+                self.tree_action(id, "edit");
+                return true;
+            }
+            if k.is(Key::F(10), Mods::SHIFT) {
+                let at = self.docviews.get(&id).and_then(|d| d.tree.as_ref()).map(|t| Point::new(t.area.x + 4, t.area.y + 1 + (t.selected.saturating_sub(t.scroll)) as i32)).unwrap_or_default();
+                self.open_tree_menu(id, at);
+                return true;
+            }
         }
         let Some(dv) = self.docviews.get_mut(&id) else { return false };
         match dv.mode {
@@ -173,6 +213,101 @@ impl Workbench {
         }
     }
 
+    fn open_tree_menu(&mut self, id: u32, at: Point) {
+        let Some(t) = self.docviews.get(&id).and_then(|d| d.tree.as_ref()) else { return };
+        let Some(n) = t.selected_node() else { return };
+        let mut items: Vec<(&str, &str, &'static str)> = Vec::new();
+        if n.span.is_some() {
+            items.push(("Edit Value...", "F2", "edit"));
+        }
+        if n.value.is_some() {
+            items.push(("Copy Value", "", "copy_value"));
+        }
+        if n.key.is_some() {
+            items.push(("Copy Key", "", "copy_key"));
+        }
+        items.push(("Copy Path", "", "copy_path"));
+        if n.line.is_some() {
+            items.push(("Go to Source", "Ctrl+Enter", "source"));
+        }
+        if n.is_branch() {
+            items.push(("Expand Branch", "*", "expand_branch"));
+        }
+        items.push(("Expand All", "", "expand"));
+        items.push(("Collapse All", "-", "collapse"));
+        let mut popup = ListPopup::new(items.iter().map(|(l, k, _)| (l.to_string(), k.to_string())).collect());
+        popup.max_rows = 12;
+        popup.place(at, self.screen());
+        if let Some(dv) = self.docviews.get_mut(&id) {
+            dv.menu = Some((popup, at, items.iter().map(|i| i.2).collect()));
+        }
+    }
+
+    /// A tree menu's action on the selected row.
+    pub(super) fn tree_action(&mut self, id: u32, action: &str) {
+        let Some(t) = self.docviews.get(&id).and_then(|d| d.tree.as_ref()) else { return };
+        let Some(n) = t.selected_node().cloned() else { return };
+        let path = t.selected_path();
+        match action {
+            "copy_value" => self.copy(n.value.unwrap_or_default()),
+            "copy_key" => self.copy(n.key.unwrap_or_default()),
+            "copy_path" => self.copy(path),
+            "source" => {
+                if let Some(l) = n.line {
+                    self.set_doc_mode(id, Mode::Source);
+                    self.goto_line_in(id, l);
+                }
+            }
+            "expand_branch" => {
+                if let Some(t) = self.docviews.get_mut(&id).and_then(|d| d.tree.as_mut()) {
+                    t.key(&KeyEvent::plain(Key::Char('*')));
+                }
+            }
+            "expand" | "collapse" => self.doc_action(id, action),
+            "edit" => {
+                let Some((a, b)) = n.span else {
+                    self.say("This value can be changed in Source (the format doesn't say where it is)");
+                    return;
+                };
+                let Some(w) = self.windows.iter().find(|w| w.win.id == id) else { return };
+                let raw = w.ed.doc.rope.to_string().get(a..b).unwrap_or("").to_string();
+                let d = Dialog::new(&format!("tree_edit:{id}:{a}:{b}"), "Edit Value")
+                    .body(ui::input("value", &format!("{} ~=~ ", if path.len() > 30 { &path[path.len() - 30..] } else { &path }), &raw).chars(50))
+                    .buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
+                self.dialog = Some(d);
+            }
+            _ => {}
+        }
+    }
+
+    /// The Edit Value dialog's answer: the value replaced in the text (one
+    /// undoable edit). True when it was this dialog.
+    pub(super) fn tree_edit_done(&mut self, kind: &str, d: &Dialog) -> bool {
+        let Some(rest) = kind.strip_prefix("tree_edit:") else { return false };
+        let mut it = rest.split(':').filter_map(|x| x.parse::<usize>().ok());
+        let (Some(id), Some(a), Some(b)) = (it.next(), it.next(), it.next()) else { return true };
+        let new = d.value("value").unwrap_or_default();
+        if let Some(w) = self.windows.iter_mut().find(|w| w.win.id == id as u32) {
+            let r = &w.ed.doc.rope;
+            if b <= r.len_bytes() {
+                let (ca, cb) = (r.byte_to_char(a), r.byte_to_char(b));
+                let cur = w.ed.cursor;
+                w.ed.doc.replace(ca, cb, &new, cur);
+            }
+        }
+        true
+    }
+
+    /// Draw the tree's menu (over everything else in the window).
+    pub(super) fn draw_docview_menu(&mut self, c: &mut Canvas, theme: &Theme) {
+        let screen = self.screen();
+        let Some(id) = self.windows.last().map(|w| w.win.id) else { return };
+        if let Some((popup, at, _)) = self.docviews.get_mut(&id).and_then(|d| d.menu.as_mut()) {
+            let at = *at;
+            popup.draw(c, at, screen, theme);
+        }
+    }
+
     /// Scroll a window's Preview to a heading (from the Outline).
     pub(super) fn preview_to_heading(&mut self, id: u32, heading: &str) {
         let Some(line) = self.preview.previews.get(&(PREVIEW_ID | id)).and_then(|p| p.rendered.as_ref()).and_then(|r| r.headings.iter().find(|(_, _, t)| t.trim() == heading).map(|h| h.0)) else { return };
@@ -195,6 +330,22 @@ impl Workbench {
     /// The mouse on a window with a toolbar: its buttons, and the views.
     /// True when used.
     pub(super) fn docview_mouse(&mut self, m: &MouseEvent) -> bool {
+        // The tree's menu first.
+        if let Some(id) = self.windows.last().map(|w| w.win.id) {
+            if let Some((popup, _, actions)) = self.docviews.get_mut(&id).and_then(|d| d.menu.as_mut()) {
+                let actions = actions.clone();
+                match popup.handle_mouse(m) {
+                    PopupResult::Accept(i) => {
+                        self.docviews.get_mut(&id).unwrap().menu = None;
+                        self.tree_action(id, actions[i]);
+                    }
+                    PopupResult::Close => self.docviews.get_mut(&id).unwrap().menu = None,
+                    PopupResult::Ignored if matches!(m.kind, MouseKind::Down(_)) => self.docviews.get_mut(&id).unwrap().menu = None,
+                    _ => {}
+                }
+                return true;
+            }
+        }
         let Some(w) = self.windows.last().filter(|w| Self::doc_kind(w).is_some() && w.win.inner().contains(m.pos)) else { return false };
         let id = w.win.id;
         if m.pos.y == w.win.inner().y {
@@ -209,6 +360,12 @@ impl Workbench {
         match dv.mode {
             Mode::Source => false,
             Mode::Tree => {
+                if matches!(m.kind, MouseKind::Down(Button::Right)) {
+                    if dv.tree.as_mut().is_some_and(|t| t.select_at(m.pos)) {
+                        self.open_tree_menu(id, m.pos);
+                    }
+                    return true;
+                }
                 if let Some(t) = &mut dv.tree {
                     if let structview::Out::Line(l) = t.mouse(m) {
                         self.set_doc_mode(id, Mode::Source);
@@ -249,7 +406,7 @@ impl Workbench {
 }
 
 /// The toolbar's controls: (place, action, label, tooltip).
-fn buttons(w: &EdWin, mode: Mode, preview_wrap: bool) -> Vec<(Rect, &'static str, String, &'static str)> {
+fn buttons(w: &EdWin, mode: Mode, preview_wrap: bool, light: bool) -> Vec<(Rect, &'static str, String, &'static str)> {
     let Some(kind) = Workbench::doc_kind(w) else { return Vec::new() };
     let inner = w.win.inner();
         let other = if kind == "markdown" { ("preview", "Preview", Mode::Preview, "Show it rendered (Ctrl+Shift+V beside it)") } else { ("tree", "Tree", Mode::Tree, "Show it as a tree to fold and search") };
@@ -260,8 +417,14 @@ fn buttons(w: &EdWin, mode: Mode, preview_wrap: bool) -> Vec<(Rect, &'static str
         ];
         match mode {
             Mode::Source => items.push(("wrap", format!("[{}] Word Wrap", if w.ed.wrap { "X" } else { " " }), "Wrap long lines at the window's edge (Alt+Z)")),
-            Mode::Preview => items.push(("wrap", format!("[{}] Word Wrap", if preview_wrap { "X" } else { " " }), "Wrap the page at the window's edge, or let lines run on (Alt+Z)")),
-            Mode::Tree => {}
+            Mode::Preview => {
+                items.push(("wrap", format!("[{}] Word Wrap", if preview_wrap { "X" } else { " " }), "Wrap the page at the window's edge, or let lines run on (Alt+Z)"));
+                items.push(("light", format!("[{}] White Page", if light { "X" } else { " " }), "Black text on white, or the guide's black page"));
+            }
+            Mode::Tree => {
+                items.push(("expand", "[+] Expand All".into(), "Open every branch (*)"));
+                items.push(("collapse", "[-] Collapse All".into(), "Close every branch (-)"));
+            }
         }
         let mut x = inner.x + 1;
         let mut out = Vec::new();
@@ -292,7 +455,8 @@ pub(super) fn draw(w: &mut EdWin, dv: Option<&mut DocView>, c: &mut Canvas, them
     c.fill(bar, " ", bs);
     let mode = dv.as_ref().map_or(Mode::Source, |d| d.mode);
     let pw = dv.as_ref().is_none_or(|d| d.preview_wrap);
-    for (r, _, label, _) in buttons(w, mode, pw) {
+    let light = dv.as_ref().is_some_and(|d| d.light);
+    for (r, _, label, _) in buttons(w, mode, pw, light) {
         let on = label.starts_with("(•)") || label.starts_with("[X]");
         let st = if on { Style { fg: s.frame_active.fg, ..bs } } else { bs };
         c.print(r.x, r.y, &label, st);
@@ -312,7 +476,23 @@ pub(super) fn draw(w: &mut EdWin, dv: Option<&mut DocView>, c: &mut Canvas, them
             true
         }
         Mode::Preview => {
-            dv.alt.draw(c, body, theme, focused, false);
+            if dv.light {
+                // (Black on white, the page's marks in dark colours.)
+                use turbine_ui::theme::vga::*;
+                let mut t = theme.clone();
+                let sc = &mut t.scheme;
+                sc.help = Style::new(BLACK, WHITE);
+                sc.help_heading = Style::new(BLUE, WHITE);
+                sc.help_link = Style::new(MAGENTA, WHITE);
+                sc.help_mark = Style::new(RED, WHITE);
+                sc.help_code = Style::new(GREEN, WHITE);
+                sc.help_key = Style::new(WHITE, BLUE);
+                dv.alt.draw(c, body, &t, focused, false);
+            } else {
+                dv.alt.draw(c, body, theme, focused, false);
+            }
+            // (Its scroll bars on the window's edges.)
+            dv.alt.draw_scrollbars(c, w.win.rect, theme);
             true
         }
     }

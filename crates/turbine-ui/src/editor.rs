@@ -915,7 +915,8 @@ impl EditorView {
                             Some(k) => {
                                 let mut st = base;
                                 if let Some(Some(c)) = s.syntax.get(k) {
-                                    st.fg = *c;
+                                    // (On a light page, light colours darkened to read.)
+                                    st.fg = crate::list::readable(*c, st.bg);
                                 }
                                 if k == 0 && s.bold_keywords {
                                     st.attrs.bold = true;

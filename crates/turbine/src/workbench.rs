@@ -705,6 +705,21 @@ impl Workbench {
         }
     }
 
+    /// Run a scroll bar action on window `i`'s view: its text, or the
+    /// rendered page when it shows its Preview.
+    fn bar_at<T>(&mut self, i: usize, f: impl FnOnce(&mut EdWin) -> T) -> T {
+        let id = self.windows[i].win.id;
+        let page = self.doc_mode(id) == docview::Mode::Preview && self.docviews.contains_key(&id);
+        if page {
+            std::mem::swap(&mut self.windows[i].ed, &mut self.docviews.get_mut(&id).unwrap().alt);
+        }
+        let out = f(&mut self.windows[i]);
+        if page {
+            std::mem::swap(&mut self.windows[i].ed, &mut self.docviews.get_mut(&id).unwrap().alt);
+        }
+        out
+    }
+
     /// The Borland line:column cells before the sideways bar in a window's bottom edge.
     fn hbar_skip(&self) -> i32 {
         if self.theme.style.window_numbers { 13 } else { 2 }
@@ -2927,7 +2942,7 @@ impl Workbench {
             return;
         }
         let kind = d.kind.clone();
-        if self.ex_dialog_done(&kind, &d) {
+        if self.ex_dialog_done(&kind, &d) || self.tree_edit_done(&kind, &d) {
             return;
         }
         if let Some(rest) = kind.strip_prefix("install:") {
@@ -3822,7 +3837,7 @@ impl Workbench {
                 MouseKind::Drag(Button::Left) if i < self.windows.len() => {
                     let skip = self.hbar_skip();
                     let inside = self.hbar_inside(i);
-                    bar_drag(&mut self.windows[i], horizontal, inside, skip, m.pos, grab);
+                    self.bar_at(i, |w| bar_drag(w, horizontal, inside, skip, m.pos, grab));
                 }
                 MouseKind::Drag(_) => {}
                 _ => self.scroll_drag = None,
@@ -3917,13 +3932,13 @@ impl Workbench {
                     }
                     Hit::VScroll | Hit::HScroll if w.term.is_none() || hit == Hit::VScroll => {
                         let horizontal = hit == Hit::HScroll;
-                        if let Some(grab) = bar_press(w, horizontal, false, skip, m.pos) {
+                        if let Some(grab) = self.bar_at(i, |w| bar_press(w, horizontal, false, skip, m.pos)) {
                             self.scroll_drag = Some((i, horizontal, grab));
                         }
                     }
                     // The sideways bar over the last row (the panel under it).
                     Hit::Inside if on_inside_bar => {
-                        if let Some(grab) = bar_press(w, true, true, skip, m.pos) {
+                        if let Some(grab) = self.bar_at(i, |w| bar_press(w, true, true, skip, m.pos)) {
                             self.scroll_drag = Some((i, true, grab));
                         }
                     }
@@ -4590,6 +4605,7 @@ impl App for Workbench {
             popup.draw(&mut c, at, screen, &theme);
         }
         self.draw_ex(&mut c, &theme);
+        self.draw_docview_menu(&mut c, &theme);
         self.draw_find(&mut c, &theme);
         self.draw_inline(&mut c, &theme);
         self.draw_palette(&mut c, &theme);
@@ -5409,6 +5425,41 @@ mod tests {
         wb.outline_goto_pub(i, true);
         let alt = &wb.docviews[&id].alt;
         assert!(alt.doc.line(alt.scroll_y).contains("Three"), "{}", alt.doc.line(alt.scroll_y));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_data_tree_edits_values_and_has_a_menu() {
+        let (dir, mut wb) = project("treeedit");
+        std::fs::write(dir.join("d.json"), "{\n  \"name\": \"old\",\n  \"n\": [1, 2]\n}\n").unwrap();
+        wb.goto_file(&dir.join("d.json"), Some(0), 0);
+        wait_until(&mut wb, "json", |wb| wb.windows.last().unwrap().lang.as_deref() == Some("json"));
+        let id = wb.windows.last().unwrap().win.id;
+        wb.set_doc_mode(id, docview::Mode::Tree);
+        wait_until(&mut wb, "the tree", |wb| wb.docviews[&id].tree.as_ref().is_some_and(|t| t.rows() >= 2));
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        // Right-click "name": the menu; Copy Path.
+        let a = wb.docviews[&id].tree.as_ref().unwrap().area;
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Right), pos: Point::new(a.x + 4, a.y + 1), mods: Mods::NONE }));
+        assert!(wb.docviews[&id].menu.is_some());
+        let r = run(&mut wb, json!({"cmd": "click", "target": "menuitem:Copy Path"}));
+        if r["ok"] != true {
+            // (The menu's items aren't agent nodes: the action itself.)
+            wb.tree_action(id, "copy_path");
+        }
+        assert_eq!(wb.clipboard, ".name");
+        // F2: edit its value; the file's text changes (undoably).
+        wb.docviews.get_mut(&id).unwrap().menu = None;
+        keys(&mut wb, &["F2"]);
+        assert_eq!(wb.dialog.as_ref().map(|d| d.title.as_str()), Some("Edit Value"));
+        assert_eq!(wb.dialog.as_ref().and_then(|d| d.value("value")).as_deref(), Some("\"old\""));
+        // (The old value is selected: typing replaces it.)
+        run(&mut wb, json!({"cmd": "type", "text": "\"new\""}));
+        keys(&mut wb, &["Enter"]);
+        let text = wb.windows.iter().find(|w| w.win.id == id).unwrap().ed.doc.rope.to_string();
+        assert!(text.contains("\"name\": \"new\""), "{text}");
+        wait_until(&mut wb, "the tree again", |wb| wb.docviews[&id].tree.as_ref().and_then(|t| t.node(&[0]).and_then(|n| n.value.clone())).as_deref() == Some("new"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -32,15 +32,22 @@ pub struct Node {
     pub kind: Kind,
     /// Where it starts in the source (0-based), when the format tells.
     pub line: Option<usize>,
+    /// A value's bytes in the source (JSON's literals, XML's attribute
+    /// values and text), so it can be edited in place.
+    pub span: Option<(usize, usize)>,
     pub children: Vec<Node>,
 }
 
 impl Node {
     fn leaf(key: Option<String>, kind: Kind, value: String, line: Option<usize>) -> Node {
-        Node { key, value: Some(value), kind, line, children: Vec::new() }
+        Node { key, value: Some(value), kind, line, span: None, children: Vec::new() }
     }
     fn branch(key: Option<String>, kind: Kind, line: Option<usize>, children: Vec<Node>) -> Node {
-        Node { key, value: None, kind, line, children }
+        Node { key, value: None, kind, line, span: None, children }
+    }
+    fn at(mut self, span: (usize, usize)) -> Node {
+        self.span = Some(span);
+        self
     }
     pub fn is_branch(&self) -> bool {
         !self.children.is_empty() || matches!(self.kind, Kind::Object | Kind::Array | Kind::Element)
@@ -118,7 +125,7 @@ fn from_yaml(key: Option<String>, v: &yaml_rust2::Yaml) -> Node {
 
 fn from_xml(doc: &roxmltree::Document, n: roxmltree::Node) -> Node {
     let line = Some(doc.text_pos_at(n.range().start).row.saturating_sub(1) as usize);
-    let mut kids: Vec<Node> = n.attributes().map(|a| Node::leaf(Some(format!("@{}", a.name())), Kind::Attr, a.value().to_string(), line)).collect();
+    let mut kids: Vec<Node> = n.attributes().map(|a| Node::leaf(Some(format!("@{}", a.name())), Kind::Attr, a.value().to_string(), line).at((a.range_value().start, a.range_value().end))).collect();
     for c in n.children() {
         if c.is_element() {
             kids.push(from_xml(doc, c));
@@ -126,14 +133,19 @@ fn from_xml(doc: &roxmltree::Document, n: roxmltree::Node) -> Node {
             let t = c.text().unwrap_or("").trim();
             if !t.is_empty() {
                 let l = Some(doc.text_pos_at(c.range().start).row.saturating_sub(1) as usize);
-                kids.push(Node::leaf(None, Kind::Text, t.to_string(), l));
+                let r = c.range();
+                // (The text without the whitespace around it.)
+                let raw = &doc.input_text()[r.clone()];
+                let lead = raw.len() - raw.trim_start().len();
+                let trail = raw.len() - raw.trim_end().len();
+                kids.push(Node::leaf(None, Kind::Text, t.to_string(), l).at((r.start + lead, r.end - trail)));
             }
         }
     }
     // (An element with only text: the text as its value, as one row.)
     if kids.len() == 1 && kids[0].kind == Kind::Text {
         let t = kids.pop().unwrap();
-        return Node { key: Some(n.tag_name().name().to_string()), value: t.value, kind: Kind::Element, line, children: Vec::new() };
+        return Node { key: Some(n.tag_name().name().to_string()), value: t.value, kind: Kind::Element, line, span: t.span, children: Vec::new() };
     }
     Node::branch(Some(n.tag_name().name().to_string()), Kind::Element, line, kids)
 }
@@ -244,8 +256,9 @@ mod json {
                     Ok(Node::branch(key, Kind::Array, line, kids))
                 }
                 Some(b'"') => {
+                    let start = self.i;
                     let s = self.string()?;
-                    Ok(Node::leaf(key, Kind::Str, s, line))
+                    Ok(Node::leaf(key, Kind::Str, s, line).at((start, self.i)))
                 }
                 Some(_) => {
                     let start = self.i;
@@ -259,7 +272,7 @@ mod json {
                         _ if w.parse::<f64>().is_ok() => Kind::Num,
                         _ => return Err(self.err(&format!("unexpected {w:?}"))),
                     };
-                    Ok(Node::leaf(key, kind, w.to_string(), line))
+                    Ok(Node::leaf(key, kind, w.to_string(), line).at((start, self.i)))
                 }
                 None => Err(self.err("a value expected")),
             }
@@ -334,11 +347,13 @@ pub struct StructView {
     pub matches: usize,
     pub area: Rect,
     last_click: Option<(usize, std::time::Instant)>,
+    /// The scroll bar's thumb held: where in it.
+    bar_grab: Option<usize>,
 }
 
 impl StructView {
     pub fn new(root: Result<Node, String>) -> StructView {
-        let mut v = StructView { root, open: HashSet::new(), rows: Vec::new(), selected: 0, scroll: 0, query: String::new(), in_search: false, matches: 0, area: Rect::default(), last_click: None };
+        let mut v = StructView { root, open: HashSet::new(), rows: Vec::new(), selected: 0, scroll: 0, query: String::new(), in_search: false, matches: 0, area: Rect::default(), last_click: None, bar_grab: None };
         // The top two levels open to start with.
         v.open.insert(Vec::new());
         if let Ok(r) = &v.root {
@@ -411,6 +426,48 @@ impl StructView {
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
     }
 
+    /// The selected row's node.
+    pub fn selected_node(&self) -> Option<&Node> {
+        self.node(self.rows.get(self.selected)?)
+    }
+
+    /// The selected row's path, as jq writes it: .a.b[2]
+    pub fn selected_path(&self) -> String {
+        let Some(p) = self.rows.get(self.selected) else { return String::new() };
+        let mut out = String::new();
+        let mut n = match &self.root {
+            Ok(r) => r,
+            Err(_) => return out,
+        };
+        for &i in p {
+            let parent_kind = n.kind;
+            let Some(c) = n.children.get(i) else { break };
+            match (&c.key, parent_kind) {
+                (_, Kind::Array) => out.push_str(&format!("[{i}]")),
+                (Some(k), _) if k.chars().all(|ch| ch.is_alphanumeric() || ch == '_') && !k.is_empty() => out.push_str(&format!(".{k}")),
+                (Some(k), _) => out.push_str(&format!(".{k:?}")),
+                (None, _) => out.push_str(&format!("[{i}]")),
+            }
+            n = c;
+        }
+        if out.is_empty() { ".".into() } else { out }
+    }
+
+    /// Select the row under a point (for a right-click), true when one is.
+    pub fn select_at(&mut self, p: Point) -> bool {
+        let a = self.area;
+        if !a.contains(p) || p.y == a.y {
+            return false;
+        }
+        let i = self.scroll + (p.y - a.y - 1) as usize;
+        if i < self.rows.len() {
+            self.selected = i;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn rows(&self) -> usize {
         self.rows.len()
     }
@@ -431,6 +488,18 @@ impl StructView {
     }
 
     /// Open everything under the selected row (or all, from the top).
+    /// Everything open (Expand All), or only the top (Collapse All).
+    pub fn expand_all(&mut self, open: bool) {
+        if open {
+            self.open_all(None);
+        } else {
+            self.open.retain(|p| p.is_empty());
+            self.rebuild();
+            self.selected = 0;
+            self.scroll = 0;
+        }
+    }
+
     fn open_all(&mut self, from: Option<Vec<usize>>) {
         fn walk(n: &Node, p: Vec<usize>, open: &mut HashSet<Vec<usize>>) {
             if n.is_branch() {
@@ -545,6 +614,40 @@ impl StructView {
 
     pub fn mouse(&mut self, m: &MouseEvent) -> Out {
         let a = self.area;
+        // The scroll bar: a press scrolls there at once and drags on.
+        let body_h = (a.h - 1).max(0) as usize;
+        let track = (body_h as i32 - 2).max(0) as usize;
+        let bar_x = a.right() - 1;
+        let set_from = |v: &mut StructView, y: i32, grab: usize| {
+            let (_, len) = turbine_ui::frame::thumb(track, 0, body_h, v.rows.len());
+            let room = track.saturating_sub(len);
+            let span = v.rows.len().saturating_sub(body_h);
+            if room > 0 && span > 0 {
+                let at = (y - (a.y + 2) - grab as i32).clamp(0, room as i32) as usize;
+                v.scroll = (at * span + room / 2) / room;
+            }
+        };
+        if let Some(grab) = self.bar_grab {
+            match m.kind {
+                MouseKind::Drag(Button::Left) => set_from(self, m.pos.y, grab),
+                _ => self.bar_grab = None,
+            }
+            return Out::Used;
+        }
+        if self.rows.len() > body_h && m.pos.x == bar_x && m.pos.y > a.y && m.pos.y < a.bottom() && matches!(m.kind, MouseKind::Down(Button::Left)) {
+            if m.pos.y == a.y + 1 {
+                self.scroll = self.scroll.saturating_sub(1);
+            } else if m.pos.y == a.bottom() - 1 {
+                self.scroll = (self.scroll + 1).min(self.rows.len().saturating_sub(body_h));
+            } else {
+                let (t_at, t_len) = turbine_ui::frame::thumb(track, self.scroll, body_h, self.rows.len());
+                let off = (m.pos.y - (a.y + 2)).max(0) as usize;
+                let grab = if off >= t_at && off < t_at + t_len { off - t_at } else { t_len / 2 };
+                set_from(self, m.pos.y, grab);
+                self.bar_grab = Some(grab);
+            }
+            return Out::Used;
+        }
         if !a.contains(m.pos) {
             return Out::Ignored;
         }
@@ -680,6 +783,10 @@ impl StructView {
                 lc.print(x, y, t, st);
                 x += str_width(t) as i32;
             }
+        }
+        // (A scroll bar when the rows don't all fit.)
+        if self.rows.len() > h && h >= 3 {
+            turbine_ui::frame::draw_vscroll(c, r.right() - 1, body.y, body.h, self.scroll, h, self.rows.len(), s.scrollbar, theme.style.scroll);
         }
         if focused && self.in_search {
             c.set_cursor(Point::new((r.x + 9 + str_width(&self.query) as i32).min(r.right() - 1), r.y), turbine_ui::CursorShape::Bar);
