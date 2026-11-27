@@ -8,7 +8,7 @@ use crate::event::{Button, Key, KeyEvent, MouseEvent, MouseKind};
 use crate::frame::draw_vscroll;
 use crate::geom::{Point, Rect};
 use crate::surface::{Canvas, CursorShape};
-use crate::theme::{Style, Theme};
+use crate::theme::{Style, Theme, vga};
 use std::time::{Duration, Instant};
 use turbine_text::unicode::str_width;
 
@@ -33,6 +33,11 @@ pub struct Row {
     pub badge: Option<(String, crate::theme::Color)>,
     /// Drawn bold (folders, to stand out).
     pub bold: bool,
+    /// Syntax colours in the text: (byte from, byte to, kind), the kinds
+    /// the theme's syntax colours (code in search results).
+    pub syntax: Vec<(u32, u32, u8)>,
+    /// Parts of the text marked (a search's matches): byte ranges.
+    pub marks: Vec<(u32, u32)>,
 }
 
 /// A colour readable on a background: the EGA light colours become their
@@ -92,6 +97,14 @@ impl Row {
     }
     pub fn bold(mut self) -> Row {
         self.bold = true;
+        self
+    }
+    pub fn syntax(mut self, spans: Vec<(u32, u32, u8)>) -> Row {
+        self.syntax = spans;
+        self
+    }
+    pub fn marks(mut self, m: Vec<(u32, u32)>) -> Row {
+        self.marks = m;
         self
     }
 }
@@ -349,7 +362,30 @@ impl ListView {
                 }
                 t.push('…');
             }
-            lc.print(x, y, &t, stl);
+            if row.syntax.is_empty() && row.marks.is_empty() {
+                lc.print(x, y, &t, stl);
+            } else {
+                // (Each character its token's colour; matches marked, as
+                // VS Code's search results.)
+                let lit = sel && focused;
+                let mut cx = x;
+                let mut buf = [0u8; 4];
+                for (b, ch) in t.char_indices() {
+                    let b = b as u32;
+                    let mut st = stl;
+                    if !lit {
+                        if let Some(col) = row.syntax.iter().rev().find(|(a, e, _)| *a <= b && b < *e).and_then(|x| s.syntax.get(x.2 as usize).copied().flatten()) {
+                            st.fg = readable(col, st.bg);
+                        }
+                    }
+                    if row.marks.iter().any(|(a, e)| *a <= b && b < *e) {
+                        st = Style { fg: vga::WHITE, bg: vga::BROWN, attrs: crate::theme::Attrs { bold: true, ..st.attrs } };
+                    }
+                    let cs = ch.encode_utf8(&mut buf);
+                    lc.print(cx, y, cs, st);
+                    cx += str_width(cs) as i32;
+                }
+            }
             if dw > 0 {
                 let ds = if sel { stl } else { dim };
                 lc.print(r.x + text_w - 1 - dw, y, &detail, ds);

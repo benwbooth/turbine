@@ -787,8 +787,60 @@ pub struct Search {
     /// Typing goes to the field (else to the results).
     pub in_field: bool,
     pub status: String,
-    rx: Option<Receiver<Vec<(PathBuf, usize, String)>>>,
+    rx: Option<Receiver<Vec<Hit>>>,
     started: Option<Instant>,
+}
+
+/// A search result: the file, its line, the line's text, its syntax
+/// colours and where the query is in it (byte ranges).
+type Hit = (PathBuf, usize, String, Vec<(u32, u32, u8)>, Vec<(u32, u32)>);
+
+/// Results coloured as the editor colours code, and the query marked in
+/// them (case-insensitively). Runs on the search's thread.
+fn colour_hits(found: Vec<(PathBuf, usize, String)>, query: Option<&str>) -> Vec<Hit> {
+    let mut langs: HashMap<PathBuf, Option<String>> = HashMap::new();
+    let q = query.map(str::to_lowercase).filter(|q| !q.is_empty());
+    found
+        .into_iter()
+        .enumerate()
+        .map(|(n, (p, line, text))| {
+            let lang = langs.entry(p.clone()).or_insert_with(|| turbine_syntax::detect(Some(&p), "")).clone();
+            // (A few hundred: past that, plain, so a big search stays quick.)
+            let syntax = match lang {
+                Some(l) if n < 600 => turbine_syntax::highlight(&l, &text, Duration::from_millis(10)).and_then(|v| v.into_iter().next()).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let mut marks = Vec::new();
+            if let Some(q) = &q {
+                let lower = text.to_lowercase();
+                // (Lowercasing kept the bytes where they were: mark them.)
+                if lower.len() == text.len() {
+                    let mut from = 0;
+                    while let Some(i) = lower[from..].find(q.as_str()) {
+                        let a = from + i;
+                        marks.push((a as u32, (a + q.len()) as u32));
+                        from = a + q.len().max(1);
+                    }
+                }
+            }
+            // (A match far along the line: the start cut, so it shows in a
+            // narrow side bar, as VS Code's results do.)
+            const KEEP: usize = 10;
+            if let Some(&(first, _)) = marks.first() {
+                let first = first as usize;
+                if text[..first].chars().count() > KEEP + 4 {
+                    let cut = text[..first].char_indices().rev().nth(KEEP - 1).map_or(0, |(i, _)| i);
+                    let shift = cut as u32;
+                    let ell = '…'.len_utf8() as u32;
+                    let text = format!("…{}", &text[cut..]);
+                    let syntax = syntax.into_iter().filter(|x| x.1 > shift).map(|(a, b, k)| (a.max(shift) - shift + ell, b - shift + ell, k)).collect();
+                    let marks = marks.into_iter().map(|(a, b)| (a - shift + ell, b - shift + ell)).collect();
+                    return (p, line, text, syntax, marks);
+                }
+            }
+            (p, line, text, syntax, marks)
+        })
+        .collect()
 }
 
 impl Default for Search {
@@ -840,14 +892,14 @@ impl Search {
                         if line.to_lowercase().contains(&q) {
                             hits.push((p.clone(), n, line.trim().chars().take(200).collect()));
                             if hits.len() >= MAX_HITS {
-                                let _ = tx.send(hits);
+                                let _ = tx.send(colour_hits(hits, Some(&q)));
                                 return;
                             }
                         }
                     }
                 }
             }
-            let _ = tx.send(hits);
+            let _ = tx.send(colour_hits(hits, Some(&q)));
         });
     }
 
@@ -865,14 +917,29 @@ impl Search {
         let mut rows = Vec::new();
         let mut hits = Vec::new();
         let mut last: Option<&PathBuf> = None;
-        for (p, line, text) in &found {
+        let mut counts: HashMap<&PathBuf, usize> = HashMap::new();
+        for h in &found {
+            *counts.entry(&h.0).or_default() += 1;
+        }
+        for (p, line, text, syntax, marks) in &found {
             if last != Some(p) {
-                let rel = p.strip_prefix(root).unwrap_or(p).display().to_string();
-                rows.push(Row::new(rel).heading());
+                // (The file as the Explorer shows it: its icon and colour,
+                // its folder dim after it, how many lines matched.)
+                let rel = p.strip_prefix(root).unwrap_or(p);
+                let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| rel.display().to_string());
+                let dir = rel.parent().map(|d| d.display().to_string()).unwrap_or_default();
+                let row = Row::new(name.clone())
+                    .heading()
+                    .icon("▾")
+                    .glyph(crate::filetypes::icon(&name, false, false))
+                    .fg(crate::filetypes::colour(&name, false))
+                    .detail(dir)
+                    .badge(counts[p].to_string(), vga::LIGHT_GRAY);
+                rows.push(row);
                 hits.push(None);
                 last = Some(p);
             }
-            rows.push(Row::new(text.clone()).indent(1).detail(format!("{}", line + 1)));
+            rows.push(Row::new(text.clone()).indent(1).detail(format!("{}", line + 1)).syntax(syntax.clone()).marks(marks.clone()));
             hits.push(Some((p.clone(), *line)));
         }
         self.hits = hits;
@@ -900,192 +967,52 @@ impl Search {
                 let text = lines.get(line).map(|l| l.trim().chars().take(200).collect()).unwrap_or_default();
                 hits.push((p, line, text));
             }
-            let _ = tx.send(hits);
+            let _ = tx.send(colour_hits(hits, None));
         });
     }
 }
 
 // ---- Source Control -------------------------------------------------------------------
 
-/// Git: the changed files (staged and not), staging, and a commit message.
-pub struct Scm {
-    pub message: LineInput,
-    pub list: ListView,
-    /// Each row's (staged, path); None for headings.
-    pub entries: Vec<Option<(bool, PathBuf)>>,
-    pub in_field: bool,
-    pub status: String,
+/// One workspace folder's repository, as last read.
+#[derive(Clone, Debug, Default)]
+pub struct Repo {
+    /// The workspace folder.
+    pub folder: PathBuf,
+    /// The repository's top folder (git's paths are from it), once known.
+    pub top: Option<PathBuf>,
     pub branch: String,
-    /// Commits ahead of and behind the branch's upstream.
-    pub ahead: u32,
-    pub behind: u32,
     /// The upstream branch (origin/main), if it has one.
     pub upstream: Option<String>,
-    /// Each row's git letter (U untracked, M, A, D, R, C conflict; ' ' for headings).
-    pub codes: Vec<char>,
-    /// The repository's top folder (git's paths are from it).
-    pub top: Option<PathBuf>,
-    /// git's answer to the last command run, for the status bar (taken once).
-    pub done: Option<String>,
-    /// The workspace folder the view shows (None: the Explorer's root).
-    pub chosen: Option<PathBuf>,
-    /// Every workspace folder's repository: (folder, branch, changed files),
-    /// looked at now and then when there are several.
-    pub repos: Vec<(PathBuf, String, usize)>,
-    repos_at: Option<Instant>,
-    tx: Sender<ScmMsg>,
-    rx: Receiver<ScmMsg>,
+    /// Commits ahead of and behind the upstream.
+    pub ahead: u32,
+    pub behind: u32,
+    /// (git letter, path from the top): conflicts, staged, and the rest.
+    pub conflicts: Vec<(char, String)>,
+    pub staged: Vec<(char, String)>,
+    pub changes: Vec<(char, String)>,
+    /// Why there's nothing to show (not a git repository…).
+    pub error: Option<String>,
     busy: bool,
     refreshed: Option<Instant>,
 }
 
-enum ScmMsg {
-    Status(Option<PathBuf>, Result<String, String>),
-    Done(Result<String, String>),
-    Repos(Vec<(PathBuf, String, usize)>),
-}
-
-/// The repository's top and its status (with the branch line).
-fn scm_status(root: &Path) -> ScmMsg {
-    let top = git(root, &["rev-parse", "--show-toplevel"]).ok().map(|t| PathBuf::from(t.trim()));
-    ScmMsg::Status(top, git(root, &["status", "--porcelain=v1", "-b", "-uall"]))
-}
-
-pub fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("git").arg("-C").arg(root).args(args).output().map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
-}
-
-impl Default for Scm {
-    fn default() -> Self {
-        let (tx, rx) = channel();
-        Scm {
-            message: LineInput::default(),
-            list: ListView::new(),
-            entries: Vec::new(),
-            in_field: false,
-            status: String::new(),
-            branch: String::new(),
-            ahead: 0,
-            behind: 0,
-            upstream: None,
-            codes: Vec::new(),
-            top: None,
-            done: None,
-            chosen: None,
-            repos: Vec::new(),
-            repos_at: None,
-            tx,
-            rx,
-            busy: false,
-            refreshed: None,
-        }
-    }
-}
-
-impl Scm {
-    pub fn refresh(&mut self, root: &Path) {
-        if self.busy {
-            return;
-        }
-        self.busy = true;
-        self.refreshed = Some(Instant::now());
-        let tx = self.tx.clone();
-        let root = root.to_path_buf();
-        std::thread::spawn(move || {
-            let _ = tx.send(scm_status(&root));
-        });
+impl Repo {
+    fn new(folder: PathBuf) -> Self {
+        Repo { folder, ..Default::default() }
     }
 
-    /// The folder git commands run in: the repository's top once known
-    /// (status gives paths from it), else the project's.
-    pub fn root_for(&self, root: &Path) -> PathBuf {
-        self.top.clone().unwrap_or_else(|| root.to_path_buf())
+    /// Where git runs for it.
+    pub fn root(&self) -> PathBuf {
+        self.top.clone().unwrap_or_else(|| self.folder.clone())
     }
 
-    /// Run a git command, then look again (commit, push, pull and the rest).
-    pub fn run(&mut self, root: &Path, args: Vec<String>) {
-        self.run_all(root, vec![args]);
+    pub fn has_changes(&self) -> bool {
+        !(self.conflicts.is_empty() && self.staged.is_empty() && self.changes.is_empty())
     }
 
-    /// Run git commands one after another (stopping at a failure), then look again.
-    pub fn run_all(&mut self, root: &Path, cmds: Vec<Vec<String>>) {
-        self.run_with(root, move |r| {
-            let mut last = Ok(String::new());
-            for args in &cmds {
-                let a: Vec<&str> = args.iter().map(String::as_str).collect();
-                last = git(r, &a);
-                if last.is_err() {
-                    break;
-                }
-            }
-            last
-        });
-    }
-
-    /// Do some work in the repository off the UI thread (its answer the
-    /// status line), then look again.
-    pub fn run_with(&mut self, root: &Path, f: impl FnOnce(&Path) -> Result<String, String> + Send + 'static) {
-        let tx = self.tx.clone();
-        let root = self.root_for(root);
-        self.busy = true;
-        self.status = "Working…".into();
-        std::thread::spawn(move || {
-            let r = f(&root);
-            let _ = tx.send(ScmMsg::Done(r));
-            let _ = tx.send(scm_status(&root));
-        });
-    }
-
-    /// Stage or unstage the file on row `i`.
-    pub fn toggle_stage(&mut self, root: &Path, i: usize) {
-        let Some(Some((staged, p))) = self.entries.get(i).cloned() else { return };
-        let path = p.display().to_string();
-        let args = if staged { vec!["restore".into(), "--staged".into(), "--".into(), path] } else { vec!["add".into(), "--".into(), path] };
-        self.run(root, args);
-    }
-
-    pub fn commit(&mut self, root: &Path) -> Result<(), &'static str> {
-        self.commit_with(root, &[])
-    }
-
-    /// Commit (nothing staged: every change, as VS Code's smart commit),
-    /// with more of git's arguments (--amend), the message from the box.
-    pub fn commit_with(&mut self, root: &Path, extra: &[&str]) -> Result<(), &'static str> {
-        let args = self.commit_args(extra)?;
-        self.run(root, args);
-        Ok(())
-    }
-
-    /// git's arguments for a commit (see commit_with); the box is emptied.
-    pub fn commit_args(&mut self, extra: &[&str]) -> Result<Vec<String>, &'static str> {
-        let msg = self.message.text.trim().to_string();
-        let amend = extra.contains(&"--amend");
-        if msg.is_empty() && !amend {
-            return Err("Type a commit message first");
-        }
-        let any_staged = self.entries.iter().flatten().any(|(s, _)| *s);
-        let any = self.entries.iter().flatten().next().is_some();
-        if !any && !amend {
-            return Err("Nothing to commit");
-        }
-        self.message.set("");
-        let mut args: Vec<String> = vec!["commit".into()];
-        if !any_staged && !amend {
-            args.push("--all".into());
-        }
-        args.extend(extra.iter().map(|s| s.to_string()));
-        if msg.is_empty() {
-            args.push("--no-edit".into());
-        } else {
-            args.push("-m".into());
-            args.push(msg);
-        }
-        Ok(args)
+    pub fn changed_count(&self) -> usize {
+        self.conflicts.len() + self.staged.len() + self.changes.len()
     }
 
     /// git push's arguments: a branch with no upstream is published to origin.
@@ -1097,105 +1024,17 @@ impl Scm {
         }
     }
 
-    /// Whether anything is changed (staged or not).
-    pub fn has_changes(&self) -> bool {
-        self.entries.iter().flatten().next().is_some()
+    /// Its name in the view (the folder's).
+    pub fn name(&self) -> String {
+        self.folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.folder.display().to_string())
     }
 
-    /// Show another workspace folder's repository.
-    pub fn choose(&mut self, folder: PathBuf, main_root: &Path) {
-        self.chosen = (folder != main_root).then_some(folder.clone());
-        self.top = None;
-        self.entries.clear();
-        self.codes.clear();
-        self.branch.clear();
-        self.upstream = None;
-        self.ahead = 0;
-        self.behind = 0;
-        self.list.set_rows(vec![Row::new("…")]);
-        self.list.select(0);
-        self.busy = false;
-        self.refresh(&folder);
-    }
-
-    /// The folder the view shows.
-    pub fn base(&self, main_root: &Path) -> PathBuf {
-        self.chosen.clone().unwrap_or_else(|| main_root.to_path_buf())
-    }
-
-    /// Look at every workspace folder's repository (branch, changes), off
-    /// the UI thread, when there are several and it's been a while.
-    pub fn poll_repos(&mut self, folders: Vec<PathBuf>, soon: bool) {
-        if folders.len() < 2 {
-            self.repos.clear();
-            return;
-        }
-        let every = Duration::from_secs(if soon { 6 } else { 30 });
-        if self.repos_at.is_some_and(|t| t.elapsed() < every) {
-            return;
-        }
-        self.repos_at = Some(Instant::now());
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let v = folders
-                .into_iter()
-                .map(|f| {
-                    let out = git(&f, &["status", "--porcelain=v1", "-b"]).unwrap_or_default();
-                    let branch = out.lines().next().and_then(|l| l.strip_prefix("## ")).map(|b| b.split("...").next().unwrap_or(b).split(' ').next().unwrap_or("").to_string()).unwrap_or_default();
-                    let n = out.lines().skip(1).filter(|l| l.len() > 3).count();
-                    (f, branch, n)
-                })
-                .collect();
-            let _ = tx.send(ScmMsg::Repos(v));
-        });
-    }
-
-    /// The (staged, path) on a row.
-    pub fn entry(&self, i: usize) -> Option<(bool, PathBuf)> {
-        self.entries.get(i).cloned().flatten()
-    }
-
-    pub fn poll(&mut self, root: &Path, shown: bool) -> bool {
-        let mut changed = false;
-        while let Ok(m) = self.rx.try_recv() {
-            match m {
-                ScmMsg::Done(r) => {
-                    self.status = match r {
-                        Ok(out) => out.lines().next().unwrap_or("Done").to_string(),
-                        Err(e) => e.lines().last().unwrap_or("git failed").to_string(),
-                    };
-                    self.done = Some(self.status.clone());
-                }
-                ScmMsg::Repos(v) => self.repos = v,
-                ScmMsg::Status(top, r) => {
-                    self.busy = false;
-                    if top.is_some() {
-                        self.top = top;
-                    }
-                    match r {
-                        Ok(out) => self.read_status(&out),
-                        Err(e) => {
-                            self.entries.clear();
-                            self.codes.clear();
-                            self.list.set_rows(vec![Row::new(if e.contains("not a git repository") { "Not a git repository".to_string() } else { e })]);
-                        }
-                    }
-                }
-            }
-            changed = true;
-        }
-        // (Shown: every few seconds; else now and then, for the status bar's branch.)
-        let every = Duration::from_secs(if shown { 4 } else { 20 });
-        if !self.busy && self.refreshed.is_none_or(|t| t.elapsed() > every) {
-            self.refresh(root);
-        }
-        changed
-    }
-
+    /// `git status --porcelain=v1 -b`'s answer.
     fn read_status(&mut self, out: &str) {
-        let mut staged = Vec::new();
-        let mut changes = Vec::new();
-        let mut conflicts = Vec::new();
+        self.conflicts.clear();
+        self.staged.clear();
+        self.changes.clear();
+        self.error = None;
         for line in out.lines() {
             if let Some(b) = line.strip_prefix("## ") {
                 // "main...origin/main [ahead 1, behind 2]"
@@ -1215,48 +1054,362 @@ impl Scm {
             let path = line[3..].rsplit(" -> ").next().unwrap_or(&line[3..]).trim_matches('"').to_string();
             // (Both sides changed it: a merge conflict, its own list.)
             if matches!((x, y), ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D')) {
-                conflicts.push(('C', path));
+                self.conflicts.push(('C', path));
                 continue;
             }
             if x != ' ' && x != '?' {
-                staged.push((x, path.clone()));
+                self.staged.push((x, path.clone()));
             }
             if y != ' ' {
-                changes.push((if x == '?' { 'U' } else { y }, path));
+                self.changes.push((if x == '?' { 'U' } else { y }, path));
             }
         }
+    }
+}
+
+/// Git: every workspace folder's repository stacked (one alone shows
+/// without its heading), the changed files (staged and not), staging, and a
+/// commit message. The toolbar and the message are the selected row's
+/// repository's, as in VS Code's.
+pub struct Scm {
+    pub message: LineInput,
+    pub list: ListView,
+    pub repos: Vec<Repo>,
+    /// Each row's (staged, path from its repository's top); None for headings.
+    pub entries: Vec<Option<(bool, PathBuf)>>,
+    /// Each row's git letter (U untracked, M, A, D, R, C conflict; ' ' for headings).
+    pub codes: Vec<char>,
+    /// Each row's repository (an index into `repos`).
+    pub row_repo: Vec<usize>,
+    pub in_field: bool,
+    pub status: String,
+    /// git's answer to the last command run, for the status bar (taken once).
+    pub done: Option<String>,
+    tx: Sender<ScmMsg>,
+    rx: Receiver<ScmMsg>,
+}
+
+enum ScmMsg {
+    /// (folder, its top, git status)
+    Status(PathBuf, Option<PathBuf>, Result<String, String>),
+    Done(Result<String, String>),
+}
+
+/// A folder's repository top and its status (with the branch line).
+fn scm_status(folder: &Path) -> ScmMsg {
+    let top = git(folder, &["rev-parse", "--show-toplevel"]).ok().map(|t| PathBuf::from(t.trim()));
+    let st = git(folder, &["status", "--porcelain=v1", "-b", "-uall"]);
+    ScmMsg::Status(folder.to_path_buf(), top, st)
+}
+
+pub fn git(root: &Path, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git").arg("-C").arg(root).args(args).output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+impl Default for Scm {
+    fn default() -> Self {
+        let (tx, rx) = channel();
+        Scm {
+            message: LineInput::default(),
+            list: ListView::new(),
+            repos: Vec::new(),
+            entries: Vec::new(),
+            codes: Vec::new(),
+            row_repo: Vec::new(),
+            in_field: false,
+            status: String::new(),
+            done: None,
+            tx,
+            rx,
+        }
+    }
+}
+
+impl Scm {
+    /// The workspace's folders (the project's first): their repositories,
+    /// keeping what's known of those already shown.
+    pub fn set_folders(&mut self, folders: &[PathBuf]) {
+        if self.repos.len() == folders.len() && self.repos.iter().zip(folders).all(|(r, f)| &r.folder == f) {
+            return;
+        }
+        let active = self.active().map(|r| r.folder.clone());
+        let mut old: Vec<Repo> = std::mem::take(&mut self.repos);
+        self.repos = folders.iter().map(|f| old.iter().position(|r| &r.folder == f).map(|i| old.remove(i)).unwrap_or_else(|| Repo::new(f.clone()))).collect();
+        self.rebuild();
+        if let Some(i) = active.and_then(|a| self.repos.iter().position(|r| r.folder == a)) {
+            self.select_repo(i);
+        }
+    }
+
+    /// The selected row's repository's index.
+    pub fn active_index(&self) -> usize {
+        self.row_repo.get(self.list.selected).copied().unwrap_or(0).min(self.repos.len().saturating_sub(1))
+    }
+
+    /// The selected row's repository (the toolbar's and the message's).
+    pub fn active(&self) -> Option<&Repo> {
+        self.repos.get(self.active_index())
+    }
+
+    /// Where git runs for the selected row (the project's folder before any is read).
+    pub fn root(&self) -> Option<PathBuf> {
+        self.active().map(Repo::root)
+    }
+
+    /// The branch of the repository a file is in (else the selected one's).
+    pub fn branch_of(&self, file: Option<&Path>) -> String {
+        let r = file.and_then(|f| self.repos.iter().filter(|r| f.starts_with(r.root()) || f.starts_with(&r.folder)).max_by_key(|r| r.root().as_os_str().len()));
+        r.or(self.active()).map(|r| r.branch.clone()).unwrap_or_default()
+    }
+
+    /// Select a repository's first row (its heading when stacked).
+    pub fn select_repo(&mut self, k: usize) {
+        if let Some(i) = self.row_repo.iter().position(|&r| r == k) {
+            self.list.select(i);
+        }
+    }
+
+    /// Look again at every repository.
+    pub fn refresh_all(&mut self) {
+        for k in 0..self.repos.len() {
+            self.refresh(k);
+        }
+    }
+
+    fn refresh(&mut self, k: usize) {
+        let Some(r) = self.repos.get_mut(k) else { return };
+        if r.busy {
+            return;
+        }
+        r.busy = true;
+        r.refreshed = Some(Instant::now());
+        let tx = self.tx.clone();
+        let folder = r.folder.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(scm_status(&folder));
+        });
+    }
+
+    /// Run a git command in a repository, then look again (commit, push, pull and the rest).
+    pub fn run(&mut self, root: &Path, args: Vec<String>) {
+        self.run_all(root, vec![args]);
+    }
+
+    /// Run git commands one after another (stopping at a failure), then look again.
+    pub fn run_all(&mut self, root: &Path, cmds: Vec<Vec<String>>) {
+        self.run_with(root, move |r| {
+            let mut last = Ok(String::new());
+            for args in &cmds {
+                let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                last = git(r, &a);
+                if last.is_err() {
+                    break;
+                }
+            }
+            last
+        });
+    }
+
+    /// Do some work in a repository off the UI thread (its answer the
+    /// status line), then look at that repository again.
+    pub fn run_with(&mut self, root: &Path, f: impl FnOnce(&Path) -> Result<String, String> + Send + 'static) {
+        let tx = self.tx.clone();
+        let root = root.to_path_buf();
+        let k = self.repos.iter().position(|r| r.root() == root || r.folder == root);
+        let folder = k.map_or_else(|| root.clone(), |k| self.repos[k].folder.clone());
+        if let Some(k) = k {
+            self.repos[k].busy = true;
+        }
+        self.status = "Working…".into();
+        std::thread::spawn(move || {
+            let r = f(&root);
+            let _ = tx.send(ScmMsg::Done(r));
+            let _ = tx.send(scm_status(&folder));
+        });
+    }
+
+    /// Stage or unstage the file on row `i`.
+    pub fn toggle_stage(&mut self, i: usize) {
+        let Some((staged, p)) = self.entry(i) else { return };
+        let Some(root) = self.row_root(i) else { return };
+        let path = p.display().to_string();
+        let args = if staged { vec!["restore".into(), "--staged".into(), "--".into(), path] } else { vec!["add".into(), "--".into(), path] };
+        self.run(&root, args);
+    }
+
+    /// Where git runs for row `i`'s repository.
+    pub fn row_root(&self, i: usize) -> Option<PathBuf> {
+        self.row_repo.get(i).and_then(|&k| self.repos.get(k)).map(Repo::root)
+    }
+
+    /// Commit in the selected repository (see commit_with).
+    pub fn commit(&mut self) -> Result<(), &'static str> {
+        let Some(root) = self.root() else { return Err("No repository") };
+        self.commit_with(&root, &[])
+    }
+
+    /// Commit (nothing staged: every change, as VS Code's smart commit),
+    /// with more of git's arguments (--amend), the message from the box.
+    pub fn commit_with(&mut self, root: &Path, extra: &[&str]) -> Result<(), &'static str> {
+        let args = self.commit_args(extra)?;
+        self.run(root, args);
+        Ok(())
+    }
+
+    /// git's arguments for a commit in the selected repository (see
+    /// commit_with); the box is emptied.
+    pub fn commit_args(&mut self, extra: &[&str]) -> Result<Vec<String>, &'static str> {
+        let msg = self.message.text.trim().to_string();
+        let amend = extra.contains(&"--amend");
+        if msg.is_empty() && !amend {
+            return Err("Type a commit message first");
+        }
+        let (any, any_staged) = self.active().map_or((false, false), |r| (r.has_changes(), !r.staged.is_empty()));
+        if !any && !amend {
+            return Err("Nothing to commit");
+        }
+        self.message.set("");
+        let mut args: Vec<String> = vec!["commit".into()];
+        if !any_staged && !amend {
+            args.push("--all".into());
+        }
+        args.extend(extra.iter().map(|s| s.to_string()));
+        if msg.is_empty() {
+            args.push("--no-edit".into());
+        } else {
+            args.push("-m".into());
+            args.push(msg);
+        }
+        Ok(args)
+    }
+
+    /// The selected repository's push arguments.
+    pub fn push_args(&self) -> Vec<String> {
+        self.active().map(Repo::push_args).unwrap_or_else(|| vec!["push".into()])
+    }
+
+    /// Whether the selected repository has changes.
+    pub fn has_changes(&self) -> bool {
+        self.active().is_some_and(Repo::has_changes)
+    }
+
+    /// The (staged, path) on a row.
+    pub fn entry(&self, i: usize) -> Option<(bool, PathBuf)> {
+        self.entries.get(i).cloned().flatten()
+    }
+
+    pub fn poll(&mut self, shown: bool) -> bool {
+        let mut changed = false;
+        while let Ok(m) = self.rx.try_recv() {
+            match m {
+                ScmMsg::Done(r) => {
+                    self.status = match r {
+                        Ok(out) => out.lines().next().unwrap_or("Done").to_string(),
+                        Err(e) => e.lines().last().unwrap_or("git failed").to_string(),
+                    };
+                    self.done = Some(self.status.clone());
+                }
+                ScmMsg::Status(folder, top, r) => {
+                    let Some(repo) = self.repos.iter_mut().find(|r| r.folder == folder) else { continue };
+                    repo.busy = false;
+                    if top.is_some() {
+                        repo.top = top;
+                    }
+                    match r {
+                        Ok(out) => repo.read_status(&out),
+                        Err(e) => {
+                            *repo = Repo { folder: repo.folder.clone(), refreshed: repo.refreshed, ..Default::default() };
+                            repo.error = Some(if e.contains("not a git repository") { "Not a git repository".to_string() } else { e });
+                        }
+                    }
+                    self.rebuild();
+                }
+            }
+            changed = true;
+        }
+        // (Shown: every few seconds; else now and then, for the status bar's branch.)
+        let every = Duration::from_secs(if shown { 4 } else { 20 });
+        for k in 0..self.repos.len() {
+            let r = &self.repos[k];
+            if !r.busy && r.refreshed.is_none_or(|t| t.elapsed() > every) {
+                self.refresh(k);
+            }
+        }
+        changed
+    }
+
+    /// The rows from every repository's lists (the selection kept on its file).
+    fn rebuild(&mut self) {
+        let keep = (self.row_repo.get(self.list.selected).copied(), self.entry(self.list.selected));
         let colour = |c: char| match c {
             'M' => vga::YELLOW,
             'A' | 'U' => vga::LIGHT_GREEN,
             'D' | 'C' => vga::LIGHT_RED,
             _ => vga::LIGHT_CYAN,
         };
+        let stacked = self.repos.len() > 1;
         let mut rows = Vec::new();
-        let mut entries = Vec::new();
-        let mut codes = Vec::new();
-        for (title, list, is_staged) in [("Merge Changes", &conflicts, false), ("Staged Changes", &staged, true), ("Changes", &changes, false)] {
-            if list.is_empty() {
+        let (mut entries, mut codes, mut row_repo) = (Vec::new(), Vec::new(), Vec::new());
+        let mut push = |rows: &mut Vec<Row>, row: Row, e: Option<(bool, PathBuf)>, c: char, k: usize| {
+            rows.push(row);
+            entries.push(e);
+            codes.push(c);
+            row_repo.push(k);
+        };
+        for (k, repo) in self.repos.iter().enumerate() {
+            let ind = u16::from(stacked);
+            if stacked {
+                let mut detail = if repo.branch.is_empty() { String::new() } else { format!("⎇ {}", repo.branch) };
+                if repo.ahead > 0 || repo.behind > 0 {
+                    detail.push_str(&format!(" {}↓ {}↑", repo.behind, repo.ahead));
+                }
+                push(&mut rows, Row::new(repo.name()).heading().bold().icon("▣").detail(detail), None, ' ', k);
+            }
+            if let Some(e) = &repo.error {
+                push(&mut rows, Row::new(e.clone()).indent(ind), None, ' ', k);
                 continue;
             }
-            rows.push(Row::new(format!("{title} ({})", list.len())).heading());
-            entries.push(None);
-            codes.push(' ');
-            for (c, p) in list {
-                let name = Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.clone());
-                let dir = Path::new(p).parent().map(|d| d.display().to_string()).unwrap_or_default();
-                rows.push(Row::new(name).indent(1).icon(c.to_string()).detail(dir).fg(colour(*c)));
-                entries.push(Some((is_staged, PathBuf::from(p))));
-                codes.push(*c);
+            let mut any = false;
+            for (title, list, is_staged) in [("Merge Changes", &repo.conflicts, false), ("Staged Changes", &repo.staged, true), ("Changes", &repo.changes, false)] {
+                if list.is_empty() {
+                    continue;
+                }
+                any = true;
+                let mut h = Row::new(format!("{title} ({})", list.len())).indent(ind);
+                if !stacked {
+                    h = h.heading();
+                }
+                push(&mut rows, h, None, ' ', k);
+                for (c, p) in list {
+                    let name = Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.clone());
+                    let dir = Path::new(p).parent().map(|d| d.display().to_string()).unwrap_or_default();
+                    push(&mut rows, Row::new(name).indent(ind + 1).icon(c.to_string()).detail(dir).fg(colour(*c)), Some((is_staged, PathBuf::from(p))), *c, k);
+                }
+            }
+            if !any {
+                push(&mut rows, Row::new(if repo.refreshed.is_some() && !repo.busy || !repo.branch.is_empty() { "No changes" } else { "…" }).indent(ind), None, ' ', k);
             }
         }
         if rows.is_empty() {
-            rows.push(Row::new("No changes"));
-            entries.push(None);
-            codes.push(' ');
+            push(&mut rows, Row::new("No folder open"), None, ' ', 0);
         }
         self.entries = entries;
         self.codes = codes;
+        self.row_repo = row_repo;
+        let sel = self.list.selected;
         self.list.set_rows(rows);
+        // (The same file, else the same repository, else where it was.)
+        let found = match keep {
+            (Some(k), Some(e)) => (0..self.entries.len()).find(|&i| self.row_repo[i] == k && self.entries[i].as_ref() == Some(&e)),
+            _ => None,
+        }
+        .or_else(|| keep.0.filter(|&k| self.row_repo.get(sel) != Some(&k)).and_then(|k| self.row_repo.iter().position(|&r| r == k)));
+        self.list.select(found.unwrap_or(sel.min(self.entries.len().saturating_sub(1))));
     }
 }
 
@@ -1441,10 +1594,30 @@ mod tests {
     }
 
     #[test]
+    fn search_results_are_coloured_and_marked() {
+        let hits = colour_hits(vec![(PathBuf::from("a.rs"), 0, "let needle = Needle::new();".into())], Some("needle"));
+        let (_, _, _, syntax, marks) = &hits[0];
+        assert_eq!(marks, &vec![(4, 10), (13, 19)]);
+        // (`let` is a keyword: coloured as the editor colours it.)
+        assert!(syntax.iter().any(|(a, b, _)| *a == 0 && *b == 3), "{syntax:?}");
+        // A match far along: the start cut to keep it in view.
+        let hits = colour_hits(vec![(PathBuf::from("a.rs"), 0, "let a_very_long_name_here = 1 + needle;".into())], Some("needle"));
+        let (_, _, text, _, marks) = &hits[0];
+        assert_eq!(text, "…ere = 1 + needle;");
+        let (a, b) = marks[0];
+        assert_eq!(&text[a as usize..b as usize], "needle");
+    }
+
+    #[test]
     fn scm_reads_git_status() {
         let mut s = Scm::default();
-        s.read_status("## main...origin/main\nM  staged.rs\n M src/changed.rs\n?? new.txt\n");
-        assert_eq!(s.branch, "main");
+        s.set_folders(&[PathBuf::from("/p")]);
+        let feed = |s: &mut Scm, k: usize, out: &str| {
+            s.repos[k].read_status(out);
+            s.rebuild();
+        };
+        feed(&mut s, 0, "## main...origin/main\nM  staged.rs\n M src/changed.rs\n?? new.txt\n");
+        assert_eq!(s.repos[0].branch, "main");
         let rows: Vec<_> = s.list.rows.iter().map(|r| (r.icon.clone(), r.text.clone())).collect();
         assert_eq!(
             rows,
@@ -1457,13 +1630,26 @@ mod tests {
             ]
         );
         assert_eq!(s.entries[1], Some((true, PathBuf::from("staged.rs"))));
-        assert_eq!((s.ahead, s.behind, s.upstream.as_deref()), (0, 0, Some("origin/main")));
+        let r = &s.repos[0];
+        assert_eq!((r.ahead, r.behind, r.upstream.as_deref()), (0, 0, Some("origin/main")));
         // Ahead and behind, a conflict in its own list, no upstream.
-        s.read_status("## dev...origin/dev [ahead 2, behind 13]\nUU both.rs\n");
-        assert_eq!((s.branch.as_str(), s.ahead, s.behind), ("dev", 2, 13));
+        feed(&mut s, 0, "## dev...origin/dev [ahead 2, behind 13]\nUU both.rs\n");
+        let r = &s.repos[0];
+        assert_eq!((r.branch.as_str(), r.ahead, r.behind), ("dev", 2, 13));
         assert_eq!(s.list.rows[0].text, "Merge Changes (1)");
         assert_eq!(s.codes[1], 'C');
-        s.read_status("## topic\n");
-        assert_eq!((s.upstream.as_deref(), s.push_args()), (None, vec!["push".to_string(), "-u".into(), "origin".into(), "topic".into()]));
+        feed(&mut s, 0, "## topic\n");
+        assert_eq!((s.repos[0].upstream.as_deref(), s.push_args()), (None, vec!["push".to_string(), "-u".into(), "origin".into(), "topic".into()]));
+        // Two folders: stacked under their names; the toolbar's is the selected row's.
+        s.set_folders(&[PathBuf::from("/p"), PathBuf::from("/q")]);
+        feed(&mut s, 1, "## feature\n M a.txt\n");
+        let rows: Vec<_> = s.list.rows.iter().map(|r| r.text.clone()).collect();
+        assert_eq!(rows, vec!["p", "No changes", "q", "Changes (1)", "a.txt"]);
+        assert_eq!(s.row_repo, vec![0, 0, 1, 1, 1]);
+        assert_eq!(s.active().unwrap().branch, "topic");
+        s.select_repo(1);
+        assert_eq!(s.active().unwrap().branch, "feature");
+        assert_eq!(s.branch_of(Some(Path::new("/q/a.txt"))), "feature");
+        assert_eq!(s.branch_of(Some(Path::new("/p/x"))), "topic");
     }
 }

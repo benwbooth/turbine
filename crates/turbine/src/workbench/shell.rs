@@ -623,14 +623,10 @@ impl Workbench {
         self.shell.extensions.set_installed(installed.iter().map(|i| (i.name.clone(), i.description.clone(), i.error.clone(), i.loaded)).collect());
         self.shell.extensions.poll(ext_shown);
         let scm_shown = shown(self, Tab::Scm);
-        // (A folder taken out of the workspace: back to the main one.)
+        // (Every workspace folder's repository, stacked.)
         let folders = self.shell.explorer.roots();
-        if self.shell.scm.chosen.as_ref().is_some_and(|c| !folders.contains(c)) {
-            self.shell.scm.choose(root.clone(), &root);
-        }
-        let scm_base = self.shell.scm.base(&root);
-        self.shell.scm.poll(&scm_base, scm_shown);
-        self.shell.scm.poll_repos(folders, scm_shown);
+        self.shell.scm.set_folders(&folders);
+        self.shell.scm.poll(scm_shown);
         if let Some(d) = self.shell.scm.done.take() {
             self.say(format!("git: {d}"));
         }
@@ -1414,7 +1410,7 @@ impl Workbench {
                 let root = self.scm_root();
                 let s = &mut self.shell.scm;
                 if k.key == Key::Enter && k.mods.ctrl {
-                    if let Err(e) = s.commit(&root) {
+                    if let Err(e) = s.commit() {
                         self.say(e);
                     }
                     return;
@@ -1422,7 +1418,7 @@ impl Workbench {
                 if s.in_field {
                     match k.key {
                         Key::Enter => {
-                            if let Err(e) = s.commit(&root) {
+                            if let Err(e) = s.commit() {
                                 self.say(e);
                             }
                         }
@@ -1437,7 +1433,7 @@ impl Workbench {
                         Key::Tab => s.in_field = true,
                         Key::Char(' ') => {
                             let i = s.list.selected;
-                            s.toggle_stage(&root, i);
+                            s.toggle_stage(i);
                         }
                         // o: the file itself (Enter shows its changes).
                         Key::Char('o') => {

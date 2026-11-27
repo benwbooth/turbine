@@ -22,19 +22,13 @@ pub(super) const SCM_LIST_TOP: i32 = 3;
 impl Workbench {
     /// The folder git runs in for the Source Control view.
     pub(super) fn scm_root(&self) -> PathBuf {
-        let base = self.shell.scm.base(&self.shell.explorer.root);
-        self.shell.scm.root_for(&base)
-    }
-
-    /// The name shown for a workspace folder.
-    fn folder_name(p: &Path) -> String {
-        p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
+        self.shell.scm.root().unwrap_or_else(|| self.shell.explorer.root.clone())
     }
 
     /// The big button's job: commit when there are changes, else sync
     /// (ahead or behind) or publish (no upstream).
     fn scm_main(&self) -> (&'static str, String, &'static str) {
-        let s = &self.shell.scm;
+        let Some(s) = self.shell.scm.active() else { return ("commit", "✓ Commit".into(), "Commit") };
         if !s.has_changes() && !s.branch.is_empty() {
             if s.upstream.is_none() && !s.branch.starts_with("HEAD") && !s.branch.starts_with("No commits") {
                 return ("publish", "☁ Publish Branch".into(), "Push this branch to origin and follow it");
@@ -48,7 +42,9 @@ impl Workbench {
 
     /// The Source Control toolbar's buttons in the view's inside.
     pub(super) fn scm_buttons(&self, inner: Rect) -> Vec<ScmButton> {
-        let s = &self.shell.scm;
+        let sc = &self.shell.scm;
+        let blank = crate::views::Repo::default();
+        let s = sc.active().unwrap_or(&blank);
         let mut v = Vec::new();
         if inner.w < 8 || inner.h < 3 {
             return v;
@@ -65,8 +61,8 @@ impl Workbench {
         let icons_x = inner.right() - 1 - icons.len() as i32 * 3;
         let mut branch = if s.branch.is_empty() { "⎇ …".to_string() } else { format!("⎇ {}", s.branch) };
         // (Several projects open: which one this is; the menu switches.)
-        if s.repos.len() > 1 {
-            branch = format!("▣ {}  {branch}", Self::folder_name(&s.base(&self.shell.explorer.root)));
+        if sc.repos.len() > 1 {
+            branch = format!("▣ {}  {branch}", s.name());
         }
         if s.ahead > 0 || s.behind > 0 {
             branch.push_str(&format!(" {}↓ {}↑", s.behind, s.ahead));
@@ -155,21 +151,25 @@ impl Workbench {
             ],
             "branch" => {
                 let s = &self.shell.scm;
-                let cur = s.base(&self.shell.explorer.root);
-                let mut v: Vec<((String, String), String)> = s
-                    .repos
-                    .iter()
-                    .enumerate()
-                    .map(|(k, (f, b, n))| {
-                        let mark = if *f == cur { "◉" } else { "○" };
-                        let detail = match (b.is_empty(), n) {
-                            (true, _) => "not a git repository".to_string(),
-                            (false, 0) => format!("⎇ {b}"),
-                            (false, n) => format!("⎇ {b}  • {n}"),
-                        };
-                        ((format!("{mark} {}", Self::folder_name(f)), detail), format!("scm:repo:{k}"))
-                    })
-                    .collect();
+                let cur = s.active_index();
+                // (Several projects: each repository, to go to its changes.)
+                let mut v: Vec<((String, String), String)> = if s.repos.len() < 2 {
+                    Vec::new()
+                } else {
+                    s.repos
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| {
+                            let mark = if k == cur { "◉" } else { "○" };
+                            let detail = match (r.branch.is_empty(), r.changed_count()) {
+                                (true, _) => r.error.clone().unwrap_or_default(),
+                                (false, 0) => format!("⎇ {}", r.branch),
+                                (false, n) => format!("⎇ {}  • {n}", r.branch),
+                            };
+                            ((format!("{mark} {}", r.name()), detail), format!("scm:repo:{k}"))
+                        })
+                        .collect()
+                };
                 v.extend([
                 it("Switch Branch…", "", "checkout"),
                 it("Create Branch…", "", "new_branch"),
@@ -232,7 +232,7 @@ impl Workbench {
                 }
             }
             "undo_last" => s.run(&root, sv(&["reset", "--soft", "HEAD~1"])),
-            "refresh" => s.refresh(&root),
+            "refresh" => s.refresh_all(),
             "pull" => s.run(&root, sv(&["pull"])),
             "pull_rebase" => s.run(&root, sv(&["pull", "--rebase"])),
             "push" | "publish" => {
@@ -249,7 +249,7 @@ impl Workbench {
             "stash" => s.run(&root, sv(&["stash", "push", "-u"])),
             "pop" => s.run(&root, sv(&["stash", "pop"])),
             "discard_all" => {
-                let n = s.entries.iter().enumerate().filter(|(i, e)| e.as_ref().is_some_and(|(st, _)| !st) && s.codes.get(*i) != Some(&'U')).count();
+                let n = s.active().map_or(0, |r| r.changes.iter().filter(|(c, _)| *c != 'U').count());
                 if n == 0 {
                     self.say("No changes to discard (untracked files are left alone)");
                     return;
@@ -268,10 +268,7 @@ impl Workbench {
             f if f.starts_with("f_") => self.scm_file_action(f),
             r if r.starts_with("repo:") => {
                 let k: usize = r[5..].parse().unwrap_or(usize::MAX);
-                if let Some((f, _, _)) = self.shell.scm.repos.get(k).cloned() {
-                    let main = self.shell.explorer.root.clone();
-                    self.shell.scm.choose(f, &main);
-                }
+                self.shell.scm.select_repo(k);
             }
             _ => {}
         }
@@ -288,7 +285,7 @@ impl Workbench {
         match a {
             "f_open" => self.goto_file(&full, None, 0),
             "f_diff" => self.scm_diff(staged, &rel),
-            "f_stage" => self.shell.scm.toggle_stage(&root, i),
+            "f_stage" => self.shell.scm.toggle_stage(i),
             "f_discard" if code == 'U' => {
                 self.scm_confirm(&format!("trash\u{1f}{}", full.display()), "Delete File", &format!("Move {path} to the trash?"), "~D~elete");
             }

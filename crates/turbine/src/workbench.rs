@@ -5014,7 +5014,8 @@ impl Workbench {
                     return format!("{:05}:{:03}", l + 1, col + 1);
                 }
                 // As Cursor's: the branch and problem counts, then the file's.
-                let branch = &self.shell.scm.branch;
+                let file = self.windows.last().and_then(|w| w.ed.doc.path.as_deref());
+                let branch = &self.shell.scm.branch_of(file);
                 let (e, wn) = self.shell.problem_count;
                 format!(
                     "{}■ {e} ▲ {wn}  {lang}  {}:{}  {} {}  {}",
@@ -5045,7 +5046,7 @@ impl Workbench {
         self.status.right.clear();
         if let Some(w) = self.windows.last().filter(|w| w.term.is_none()) {
             let icons = self.theme.style.icons;
-            let branch = self.shell.scm.branch.clone();
+            let branch = self.shell.scm.branch_of(w.ed.doc.path.as_deref());
             if !branch.is_empty() {
                 self.status.left.push((format!("{} {branch}", if icons { "\u{e725}" } else { "⎇" }), "view.scm".into(), format!("Branch {branch}: Source Control")));
             }
@@ -6279,7 +6280,7 @@ mod tests {
         init(&dir);
         std::fs::write(dir.join("notes.md"), "# Notes\nmore\n").unwrap();
         wb.run_command("view.scm");
-        wait_until(&mut wb, "the change", |wb| wb.shell.scm.has_changes() && wb.shell.scm.branch == "main");
+        wait_until(&mut wb, "the change", |wb| wb.shell.scm.has_changes() && wb.shell.scm.branch_of(None) == "main");
         let mut surf = Surface::new(120, 36);
         wb.render(&mut surf);
         // Nothing staged: Commit commits every change (VS Code's smart commit).
@@ -6294,7 +6295,7 @@ mod tests {
         assert_eq!(wb.scm_buttons(inner)[0].action, "publish");
         // A new file, added to .gitignore from its menu: gone from the list, dim in the Explorer.
         std::fs::write(dir.join("junk.log"), "x").unwrap();
-        wb.shell.scm.refresh(&dir);
+        wb.shell.scm.refresh_all();
         wait_until(&mut wb, "the new file", |wb| wb.shell.scm.has_changes());
         let row = wb.shell.scm.entries.iter().position(|e| e.as_ref().is_some_and(|(_, p)| p == Path::new("junk.log"))).unwrap();
         wb.shell.scm.list.select(row);
@@ -6314,13 +6315,16 @@ mod tests {
         git(&other, &["switch", "-q", "-c", "feature"]);
         std::fs::write(other.join("a.txt"), "b\n").unwrap();
         wb.shell.explorer.add_root(other.clone());
-        wait_until(&mut wb, "both repositories", |wb| wb.shell.scm.repos.len() == 2);
+        wait_until(&mut wb, "both repositories", |wb| wb.shell.scm.repos.len() == 2 && wb.shell.scm.repos[1].branch == "feature");
+        // (Stacked: each under its folder's name.)
+        let texts: Vec<String> = wb.shell.scm.list.rows.iter().map(|r| r.text.clone()).collect();
+        assert!(texts.contains(&format!("turbine-scmbar2-{}", std::process::id())) && texts.contains(&"a.txt".to_string()), "{texts:?}");
         wb.scm_menu_open("branch", Point::new(5, 5));
         let (popup, _, acts) = wb.status_menu.take().unwrap();
         assert_eq!(acts[1], "scm:repo:1");
         assert!(popup.items[1].1.contains("feature") && popup.items[1].1.contains("• 1"), "{:?}", popup.items);
         wb.scm_action("repo:1");
-        wait_until(&mut wb, "the other repository", |wb| wb.shell.scm.branch == "feature" && wb.shell.scm.has_changes());
+        assert!(wb.shell.scm.has_changes() && wb.shell.scm.active().unwrap().branch == "feature");
         assert_eq!(wb.scm_root(), other);
         assert!(wb.scm_buttons(inner).iter().any(|b| b.label.contains("turbine-scmbar2")));
         std::fs::remove_dir_all(&dir).unwrap();
