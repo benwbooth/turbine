@@ -39,6 +39,9 @@ pub enum AiEvent {
     /// Part of a chat answer.
     Chunk { id: u64, text: String },
     Done { id: u64 },
+    /// A whole assistant message from a tool-using chat (OpenAI format:
+    /// `content`, and `tool_calls` [{id, function: {name, arguments}}]).
+    Message { id: u64, message: Value },
     /// A fill-in-the-middle completion.
     Completion { id: u64, text: String },
     Error { id: u64, message: String },
@@ -296,6 +299,45 @@ impl Ai {
                 }
             }
             let _ = tx.send(AiEvent::Done { id });
+        });
+        id
+    }
+
+    /// One turn of a chat where the model may call tools (not streamed).
+    /// `messages` are OpenAI-format message objects. Returns the request id.
+    pub fn chat_with_tools(&mut self, model: &Model, messages: Vec<Value>, tools: Vec<Value>) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.prepare(model);
+        let tx = self.tx.clone();
+        let m = model.clone();
+        std::thread::spawn(move || {
+            let mut body = json!({"model": m.name, "messages": messages, "tools": tools, "stream": false});
+            if m.provider.starts_with("ollama") {
+                body["reasoning_effort"] = json!("none");
+            }
+            let mut req = agent().post(&format!("{}/chat/completions", m.base)).header("Content-Type", "application/json");
+            if let Some(k) = &m.key {
+                req = req.header("Authorization", &format!("Bearer {k}"));
+            }
+            let r = req
+                .send_json(&body)
+                .map_err(|e| e.to_string())
+                .and_then(|mut r| r.body_mut().read_json::<Value>().map_err(|e| e.to_string()));
+            let _ = tx.send(match r {
+                Ok(v) => {
+                    let mut msg = v["choices"][0]["message"].clone();
+                    if msg.is_null() {
+                        AiEvent::Error { id, message: format!("no message in reply: {v}") }
+                    } else {
+                        let mut t = false;
+                        let content = strip_thinking(msg["content"].as_str().unwrap_or(""), &mut t);
+                        msg["content"] = json!(content.trim());
+                        AiEvent::Message { id, message: msg }
+                    }
+                }
+                Err(message) => AiEvent::Error { id, message },
+            });
         });
         id
     }

@@ -2,6 +2,7 @@
 
 mod agent;
 mod server;
+mod tools;
 mod vim;
 mod workbench;
 

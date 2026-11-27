@@ -55,6 +55,31 @@ fn default_dap_spawner() -> DapSpawner {
     })
 }
 
+/// Turbine's assistant working the UI with tools.
+struct AgentRun {
+    model: ai::Model,
+    messages: Vec<Value>,
+    /// The model turn being waited for.
+    waiting: Option<u64>,
+    /// Tool calls still to run: (call id, tool, arguments).
+    calls: std::collections::VecDeque<(String, String, Value)>,
+    /// The tool call running now, and where its result arrives.
+    current: Option<(String, String, Receiver<Value>)>,
+    /// A terminal command waiting for the person's yes.
+    approving: Option<(String, String, Value)>,
+    /// The person said yes to all terminal commands this run.
+    terminal_ok: bool,
+    turns: usize,
+}
+
+const AGENT_PROMPT: &str = "You are Turbine's agent. Turbine is a DOS-style code editor (menus, windows, \
+dialogs, editors, terminals) and you work it like a person, with tools: look at the screen, open menus, \
+click widgets, type, press keys, read a window's text, wait for text. The person watches everything you \
+do. Start with look. After each action that changes the screen, look again before the next. To write \
+code, focus an editor and type it (newlines become Enter; editors don't auto-indent your text). Save with \
+F2. Terminals run a real shell: type a command and a newline to run it, then wait for its output. When the \
+task is done, answer briefly in plain text without calling a tool.";
+
 /// A debugging session.
 struct Debug {
     client: DapClient,
@@ -189,6 +214,9 @@ pub struct Workbench {
     chat_model: Option<String>,
     /// A question asked before the model list arrived.
     pending_question: Option<String>,
+    agent: Option<AgentRun>,
+    /// A task given before the model list arrived.
+    pending_task: Option<String>,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -350,7 +378,7 @@ fn menus() -> Vec<Menu> {
             vec![
                 it("~C~hat...", "Ctrl+L", "ai.chat"),
                 soon("~I~nline Edit", "Ctrl+K", "ai.inline"),
-                soon("~A~gent", "Ctrl+I", "ai.agent"),
+                it("~A~gent...", "Ctrl+I", "ai.agent"),
                 it("~T~ab Completion", "", "ai.tab"),
                 it("~M~odels...", "", "ai.models"),
                 sep(),
@@ -460,6 +488,8 @@ impl Workbench {
             chat_streaming: None,
             chat_model: None,
             pending_question: None,
+            agent: None,
+            pending_task: None,
         };
         for f in files {
             wb.open_path(f);
@@ -934,8 +964,13 @@ impl Workbench {
                     was_dirty: false,
                     special: Some("chat"),
                 });
+                // (Behind the active window: the log never takes focus.)
+                let n = self.windows.len();
+                if n >= 2 {
+                    self.windows.swap(n - 1, n - 2);
+                }
                 self.renumber();
-                self.windows.len() - 1
+                self.windows.len().saturating_sub(2).min(n - 1)
             }
         };
         let ed = &mut self.windows[i].ed;
@@ -943,6 +978,149 @@ impl Workbench {
         ed.doc.insert(end, text, end);
         ed.doc.dirty = false;
         ed.cursor = ed.doc.rope.len_chars();
+    }
+
+    fn agent_dialog(&mut self) {
+        self.start_ai();
+        let w = (self.size.0 - 6).clamp(40, 76);
+        let d = Dialog::new("agent", "Agent: what should I do?", w, 8)
+            .input("task", 1, 2, w - 6, "~T~ask:", "")
+            .button("ok", w / 2 - 12, 4, "~S~tart", true)
+            .button("cancel", w / 2 + 2, 4, "Cancel", false);
+        self.dialog = Some(d);
+    }
+
+    fn start_agent(&mut self, task: &str) {
+        let Some(model) = self.chat_model() else {
+            self.pending_task = Some(task.to_string());
+            self.say("Waiting for the AI model list...");
+            return;
+        };
+        self.append_chat(&format!("\n## Agent task\n\n{task}\n\n*({} is working; Esc stops it)*\n\n", model.name));
+        let messages = vec![json!({"role": "system", "content": AGENT_PROMPT}), json!({"role": "user", "content": task})];
+        let id = self.ai.as_mut().unwrap().chat_with_tools(&model, messages.clone(), crate::tools::openai_tools());
+        self.driver.agent_name = format!("Agent ({})", model.name);
+        self.agent = Some(AgentRun {
+            model,
+            messages,
+            waiting: Some(id),
+            calls: Default::default(),
+            current: None,
+            approving: None,
+            terminal_ok: false,
+            turns: 0,
+        });
+    }
+
+    fn stop_agent(&mut self, why: &str) {
+        if self.agent.take().is_some() {
+            self.driver.agent_name = "Agent".into();
+            self.append_chat(&format!("\n*(Agent stopped: {why})*\n"));
+        }
+    }
+
+    /// The model answered a turn: run its tool calls, or it's done.
+    fn agent_message(&mut self, id: u64, message: Value) {
+        let Some(a) = &mut self.agent else { return };
+        if a.waiting != Some(id) {
+            return;
+        }
+        a.waiting = None;
+        a.turns += 1;
+        a.messages.push(message.clone());
+        let text = message["content"].as_str().unwrap_or("").trim().to_string();
+        let calls: Vec<(String, String, Value)> = message["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(i, c)| {
+                let f = &c["function"];
+                let args = match &f["arguments"] {
+                    Value::String(s) => serde_json::from_str(s).unwrap_or(json!({})),
+                    v => v.clone(),
+                };
+                (c["id"].as_str().map(str::to_string).unwrap_or_else(|| format!("call{i}")), f["name"].as_str().unwrap_or("").to_string(), args)
+            })
+            .collect();
+        let done = calls.is_empty();
+        let too_long = a.turns > 40;
+        a.calls.extend(calls);
+        if !text.is_empty() {
+            self.append_chat(&format!("{text}\n\n"));
+        }
+        if done {
+            self.agent = None;
+            self.driver.agent_name = "Agent".into();
+            self.append_chat("*(Agent finished)*\n");
+        } else if too_long {
+            self.stop_agent("too many steps");
+        }
+    }
+
+    /// Run the next tool call, collect results, and ask the model again.
+    fn agent_step(&mut self) {
+        let Some(a) = &mut self.agent else { return };
+        if a.approving.is_some() || a.waiting.is_some() {
+            return;
+        }
+        if let Some((call_id, name, rx)) = &a.current {
+            let Ok(reply) = rx.try_recv() else { return };
+            let text = crate::tools::result_text(name, &reply);
+            let short = if reply["ok"] == true { if name == "look" || name == "read" { "seen".to_string() } else { "ok".to_string() } } else { text.clone() };
+            a.messages.push(json!({"role": "tool", "tool_call_id": call_id, "content": text}));
+            a.current = None;
+            self.append_chat(&format!("   → {short}\n"));
+            return;
+        }
+        if let Some((call_id, name, args)) = a.calls.pop_front() {
+            // A command typed into a terminal waits for the person's yes.
+            let in_terminal = self.windows.last().is_some_and(|w| w.term.is_some());
+            let runs = match name.as_str() {
+                "type" => args["text"].as_str().is_some_and(|t| t.contains('\n')),
+                "key" => args["key"].as_str().is_some_and(|k| k.eq_ignore_ascii_case("enter")),
+                _ => false,
+            };
+            if in_terminal && runs && !a.terminal_ok {
+                let what = args["text"].as_str().unwrap_or("Enter").trim().to_string();
+                a.approving = Some((call_id, name, args));
+                let w = (self.size.0 - 6).clamp(40, 76);
+                let d = Dialog::new("agent_approve", "Agent wants to run a command", w, 9)
+                    .label(1, 1, "In the terminal:")
+                    .label(3, 2, &what.chars().take((w - 8) as usize).collect::<String>())
+                    .button("allow", 2, 4, "~A~llow", true)
+                    .button("always", 14, 4, "Allow A~l~ways", false)
+                    .button("deny", 32, 4, "~D~eny", false);
+                self.dialog = Some(d);
+                return;
+            }
+            self.agent_run_call(call_id, name, args);
+            return;
+        }
+        // Every call answered: the model's next turn.
+        let (model, msgs) = (a.model.clone(), a.messages.clone());
+        let id = self.ai.as_mut().map(|ai| ai.chat_with_tools(&model, msgs, crate::tools::openai_tools()));
+        if let (Some(a), Some(id)) = (&mut self.agent, id) {
+            a.waiting = Some(id);
+        }
+    }
+
+    fn agent_run_call(&mut self, call_id: String, name: String, args: Value) {
+        let shown = match name.as_str() {
+            "look" | "read" => String::new(),
+            _ => args.as_object().map(|o| o.values().map(|v| v.as_str().map(|s| format!("{s:?}")).unwrap_or_else(|| v.to_string())).collect::<Vec<_>>().join(" ")).unwrap_or_default(),
+        };
+        self.append_chat(&format!("▶ {name} {shown}\n"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        match crate::tools::to_command(&name, &args) {
+            Ok(cmd) => self.request(cmd, tx),
+            Err(e) => {
+                let _ = tx.send(json!({"ok": false, "error": e}));
+            }
+        }
+        if let Some(a) = &mut self.agent {
+            a.current = Some((call_id, name, rx));
+        }
     }
 
     fn models_dialog(&mut self) {
@@ -983,6 +1161,9 @@ impl Workbench {
         for e in events {
             match e {
                 AiEvent::Models(models) => {
+                    if let Some(t) = self.pending_task.take() {
+                        self.start_agent(&t);
+                    }
                     if let Some(q) = self.pending_question.take() {
                         if models.iter().any(|m| m.chat) {
                             self.ask(&q);
@@ -1008,7 +1189,14 @@ impl Workbench {
                         }
                     }
                 }
+                AiEvent::Message { id, message } => self.agent_message(id, message),
                 AiEvent::Error { id, message } => {
+                    if self.agent.as_ref().is_some_and(|a| a.waiting == Some(id)) {
+                        self.agent = None;
+                        self.driver.agent_name = "Agent".into();
+                        self.append_chat(&format!("\n*(Agent stopped: the model didn't answer: {message})*\n"));
+                        continue;
+                    }
                     if self.chat_streaming.as_ref().is_some_and(|(i, _)| *i == id) {
                         self.chat_streaming = None;
                         self.append_chat(&format!("\n*(The model didn't answer: {message})*\n"));
@@ -1033,6 +1221,7 @@ impl Workbench {
                 }
             }
         }
+        self.agent_step();
         // Ask for a completion once typing has paused.
         let Some((at, win, version)) = self.last_edit else { return };
         if now.duration_since(at) < Duration::from_millis(350) || self.fim_pending.is_some() {
@@ -1588,6 +1777,7 @@ impl Workbench {
             }
             "lsp.complete" => self.start_completion(),
             "ai.chat" => self.ask_dialog(),
+            "ai.agent" => self.agent_dialog(),
             "ai.models" => self.models_dialog(),
             "ai.tab" => {
                 self.tab_complete = !self.tab_complete;
@@ -1787,6 +1977,7 @@ impl Workbench {
             }
             "agent.demo" => self.queue_demo(),
             "agent.stop" => {
+                self.stop_agent("stopped from the menu");
                 self.driver.cancel();
                 self.say("Agent stopped");
             }
@@ -1882,6 +2073,30 @@ impl Workbench {
             return;
         }
         let kind = d.kind.clone();
+        if kind == "agent" {
+            let t = d.value("task").unwrap_or_default();
+            if !t.trim().is_empty() {
+                self.start_agent(t.trim());
+            }
+            return;
+        }
+        if kind == "agent_approve" {
+            if let Some(a) = &mut self.agent {
+                if let Some((call_id, name, args)) = a.approving.take() {
+                    match b.as_str() {
+                        "allow" | "always" => {
+                            a.terminal_ok |= b == "always";
+                            self.agent_run_call(call_id, name, args);
+                        }
+                        _ => {
+                            a.messages.push(json!({"role": "tool", "tool_call_id": call_id, "content": "The person said no: don't run that."}));
+                            self.append_chat("   → denied\n");
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if kind == "ask" {
             let q = d.value("q").unwrap_or_default();
             if !q.trim().is_empty() {
@@ -2025,6 +2240,7 @@ impl Workbench {
             Event::Key(k) if k.key == Key::Esc => {
                 self.driver.cancel();
                 self.say("Agent stopped");
+                self.stop_agent("you pressed Esc");
             }
             Event::Key(k) if k.key == Key::Char(' ') && k.mods == Mods::NONE => {
                 self.driver.paused = !self.driver.paused;
@@ -2104,7 +2320,13 @@ impl Workbench {
         if let Some(d) = &mut self.dialog {
             match d.handle_key(&k) {
                 DialogResult::None => {}
-                DialogResult::Cancel => self.dialog = None,
+                DialogResult::Cancel => {
+                    let d = self.dialog.take().unwrap();
+                    // (Closing the agent's question is a no.)
+                    if d.kind == "agent_approve" {
+                        self.finish_dialog(d, Some("deny".into()));
+                    }
+                }
                 DialogResult::Button(b) => {
                     let d = self.dialog.take().unwrap();
                     self.finish_dialog(d, Some(b));
@@ -2159,7 +2381,9 @@ impl Workbench {
                 VimOut::NotMine => {}
             }
         }
-        let shortcut = if k.is_ctrl('l') {
+        let shortcut = if k.is_ctrl('i') && k.key != Key::Tab {
+            Some("ai.agent")
+        } else if k.is_ctrl('l') {
             Some("ai.chat")
         } else if k.is(Key::Char(' '), Mods::CTRL) {
             Some("lsp.complete")
@@ -2480,7 +2704,13 @@ impl Workbench {
                     let d = self.dialog.take().unwrap();
                     self.finish_dialog(d, Some(b));
                 }
-                DialogResult::Cancel => self.dialog = None,
+                DialogResult::Cancel => {
+                    let d = self.dialog.take().unwrap();
+                    // (Closing the agent's question is a no.)
+                    if d.kind == "agent_approve" {
+                        self.finish_dialog(d, Some("deny".into()));
+                    }
+                }
                 DialogResult::None => {}
             }
             return;
@@ -2974,6 +3204,8 @@ impl App for Workbench {
             || self.fim_pending.is_some()
             || self.chat_streaming.is_some()
             || self.pending_question.is_some()
+            || self.agent.is_some()
+            || self.pending_task.is_some()
             || self.last_edit.is_some();
         let term_tick = (any_term || self.hl_pending > 0 || lsp_waiting).then(|| now + Duration::from_millis(16));
         // Servers send diagnostics unasked: look a few times a second.
@@ -3512,6 +3744,7 @@ mod tests {
         wait_until(&mut wb, "chat answer", |wb| wb.chat_streaming.is_none());
         let chat = wb.windows.iter().find(|w| w.special == Some("chat")).unwrap().ed.doc.rope.to_string();
         assert!(chat.contains("## You\n\nwhat does this do?"), "{chat}");
+        assert!(wb.windows.last().unwrap().special.is_none(), "the chat window doesn't take focus");
         assert!(chat.contains("Hello world"), "{chat}");
         assert_eq!(wb.chat_history.last().unwrap().content, "Hello world");
 
@@ -3526,6 +3759,104 @@ mod tests {
         assert_eq!(wb.windows.last().unwrap().ed.ghost.as_deref(), Some("println!(\"hi\");"));
         wb.key(KeyEvent::plain(Key::Tab));
         assert_eq!(wb.windows.last().unwrap().ed.doc.line(0), "fn main() { println!(\"hi\");");
+    }
+
+    /// A pretend tool-calling model: answers each chat turn from a script,
+    /// and keeps the requests it got.
+    fn fake_agent_server(script: Vec<Value>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let seen2 = seen.clone();
+        std::thread::spawn(move || {
+            let mut turn = 0;
+            for conn in l.incoming().flatten() {
+                let mut r = BufReader::new(conn.try_clone().unwrap());
+                let mut len = 0;
+                loop {
+                    let mut h = String::new();
+                    r.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0; len];
+                r.read_exact(&mut body).unwrap();
+                seen2.lock().unwrap().push(serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null));
+                let msg = script.get(turn).cloned().unwrap_or(json!({"role": "assistant", "content": "Done."}));
+                turn += 1;
+                let out = json!({"choices": [{"message": msg}]}).to_string();
+                let mut w = conn;
+                let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len());
+            }
+        });
+        (addr, seen)
+    }
+
+    fn call(id: &str, name: &str, args: Value) -> Value {
+        json!({"role": "assistant", "content": "", "tool_calls": [{"id": id, "type": "function", "function": {"name": name, "arguments": args.to_string()}}]})
+    }
+
+    fn agent_bench(addr: &str) -> Workbench {
+        let mut wb = bench();
+        wb.set_ai(Ai::with_models(vec![ai::Model {
+            provider: "test".into(),
+            name: "agent-model".into(),
+            base: format!("http://{addr}/v1"),
+            key: None,
+            loaded: true,
+            fim: false,
+            chat: true,
+        }]));
+        wb
+    }
+
+    #[test]
+    fn agent_works_the_ui_with_tools() {
+        let (addr, seen) = fake_agent_server(vec![
+            call("c1", "look", json!({})),
+            call("c2", "menu", json!({"path": "File/New Text File"})),
+            call("c3", "type", json!({"text": "hello from the agent"})),
+            json!({"role": "assistant", "content": "I wrote the greeting."}),
+        ]);
+        let mut wb = agent_bench(&addr);
+        wb.start_agent("write a greeting in a new file");
+        assert!(wb.driver.agent_name.contains("agent-model"));
+        wait_until(&mut wb, "agent to finish", |wb| wb.agent.is_none());
+        let code = wb.windows.iter().rev().find(|w| w.special.is_none()).unwrap();
+        assert_eq!(code.ed.doc.rope.to_string(), "hello from the agent");
+        let reqs = seen.lock().unwrap();
+        assert_eq!(reqs.len(), 4);
+        assert!(reqs[0]["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "look"));
+        // The second turn saw the screen from look.
+        let tool_msg = reqs[1]["messages"].as_array().unwrap().iter().find(|m| m["role"] == "tool").unwrap();
+        assert!(tool_msg["content"].as_str().unwrap().contains("Widgets:"), "{tool_msg}");
+        let chat = wb.windows.iter().find(|w| w.special == Some("chat")).unwrap().ed.doc.rope.to_string();
+        assert!(chat.contains("▶ menu \"File/New Text File\""), "{chat}");
+        assert!(chat.contains("I wrote the greeting.") && chat.contains("Agent finished"), "{chat}");
+    }
+
+    #[test]
+    fn agent_asks_before_running_a_terminal_command() {
+        let (addr, seen) = fake_agent_server(vec![
+            call("c1", "type", json!({"text": "echo nope\n"})),
+            json!({"role": "assistant", "content": "OK, I won't."}),
+        ]);
+        let mut wb = agent_bench(&addr);
+        wb.new_terminal(vec!["sh".into()]);
+        wb.start_agent("run something");
+        wait_until(&mut wb, "approval question", |wb| wb.dialog.as_ref().is_some_and(|d| d.kind == "agent_approve"));
+        // The person says no (Esc).
+        wb.key(KeyEvent::plain(Key::Esc));
+        wait_until(&mut wb, "agent to finish", |wb| wb.agent.is_none());
+        let reqs = seen.lock().unwrap();
+        let tool_msg = reqs[1]["messages"].as_array().unwrap().iter().find(|m| m["role"] == "tool").unwrap().clone();
+        assert!(tool_msg["content"].as_str().unwrap().contains("said no"), "{tool_msg}");
+        assert!(!wb.windows.last().unwrap().term_text.contains("nope\nnope"), "nothing ran");
     }
 
     #[test]
