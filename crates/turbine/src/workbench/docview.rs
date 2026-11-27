@@ -21,6 +21,9 @@ pub(super) struct DocView {
     pub tree: Option<StructView>,
     /// The document version the tree was read from.
     tree_version: u64,
+    /// The preview wraps at the window's width (else lines run on, and it
+    /// scrolls sideways).
+    pub preview_wrap: bool,
 }
 
 /// In-place previews go by an id of their own (not a window's).
@@ -44,7 +47,7 @@ impl Workbench {
 
     /// The toolbar's controls in a window: (place, action, label, on, tip).
     pub(super) fn doc_buttons(&self, w: &EdWin) -> Vec<(Rect, &'static str, String, &'static str)> {
-        buttons(w, self.doc_mode(w.win.id))
+        buttons(w, self.doc_mode(w.win.id), self.docviews.get(&w.win.id).is_none_or(|d| d.preview_wrap))
     }
 
     /// Where a window's text goes: under the toolbar when it has one.
@@ -57,6 +60,18 @@ impl Workbench {
         let Some(i) = self.windows.iter().position(|w| w.win.id == id) else { return };
         match action {
             "wrap" => {
+                // (The preview's own wrap in Preview; the text's in Source.)
+                if self.doc_mode(id) == Mode::Preview {
+                    if let Some(dv) = self.docviews.get_mut(&id) {
+                        dv.preview_wrap = !dv.preview_wrap;
+                        dv.alt.wrap = false;
+                        dv.alt.scroll_x = 0;
+                    }
+                    if let Some(p) = self.preview.previews.get_mut(&(PREVIEW_ID | id)) {
+                        p.rerender();
+                    }
+                    return;
+                }
                 let w = &mut self.windows[i];
                 w.ed.wrap = !w.ed.wrap;
                 return;
@@ -72,8 +87,9 @@ impl Workbench {
         let dv = self.docviews.entry(id).or_insert_with(|| {
             let mut alt = EditorView::new(Document::new());
             alt.line_numbers = false;
-            alt.wrap = true;
-            DocView { mode: Mode::Source, alt, tree: None, tree_version: u64::MAX }
+            // (The page is laid out at the window's width already.)
+            alt.wrap = false;
+            DocView { mode: Mode::Source, alt, tree: None, tree_version: u64::MAX, preview_wrap: true }
         });
         dv.mode = mode;
         let pid = PREVIEW_ID | id;
@@ -108,7 +124,7 @@ impl Workbench {
     pub(super) fn docview_key(&mut self, k: &KeyEvent) -> bool {
         let Some(id) = self.windows.last().filter(|w| Self::doc_kind(w).is_some()).map(|w| w.win.id) else { return false };
         // Alt+Z: word wrap, as VS Code's.
-        if k.is(Key::Char('z'), Mods::ALT) && self.doc_mode(id) == Mode::Source {
+        if k.is(Key::Char('z'), Mods::ALT) && self.doc_mode(id) != Mode::Tree {
             self.doc_action(id, "wrap");
             return true;
         }
@@ -220,7 +236,7 @@ impl Workbench {
 }
 
 /// The toolbar's controls: (place, action, label, tooltip).
-fn buttons(w: &EdWin, mode: Mode) -> Vec<(Rect, &'static str, String, &'static str)> {
+fn buttons(w: &EdWin, mode: Mode, preview_wrap: bool) -> Vec<(Rect, &'static str, String, &'static str)> {
     let Some(kind) = Workbench::doc_kind(w) else { return Vec::new() };
     let inner = w.win.inner();
         let other = if kind == "markdown" { ("preview", "Preview", Mode::Preview, "Show it rendered (Ctrl+Shift+V beside it)") } else { ("tree", "Tree", Mode::Tree, "Show it as a tree to fold and search") };
@@ -260,7 +276,8 @@ pub(super) fn draw(w: &mut EdWin, dv: Option<&mut DocView>, c: &mut Canvas, them
     let bs = Style { fg: s.editor_gutter.fg, ..s.editor };
     c.fill(bar, " ", bs);
     let mode = dv.as_ref().map_or(Mode::Source, |d| d.mode);
-    for (r, _, label, _) in buttons(w, mode) {
+    let pw = dv.as_ref().is_none_or(|d| d.preview_wrap);
+    for (r, _, label, _) in buttons(w, mode, pw) {
         let on = label.starts_with("(•)") || label.starts_with("[X]");
         let st = if on { Style { fg: s.frame_active.fg, ..bs } } else { bs };
         c.print(r.x, r.y, &label, st);

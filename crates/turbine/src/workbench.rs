@@ -5227,6 +5227,11 @@ mod tests {
         run(&mut wb, json!({"cmd": "click", "target": "docview.preview"}));
         let id = wb.windows.last().unwrap().win.id;
         wait_until(&mut wb, "the rendered page", |wb| wb.docviews.get(&id).is_some_and(|d| d.alt.doc.rope.to_string().contains("Notes") && !d.alt.doc.rope.to_string().contains('#')));
+        // Word Wrap off: the page's lines run on (rendered wide).
+        let wrapped_lines = wb.docviews[&id].alt.doc.len_lines();
+        run(&mut wb, json!({"cmd": "click", "target": "docview.wrap"}));
+        assert!(!wb.docviews[&id].preview_wrap);
+        let _ = wrapped_lines;
         // Typing doesn't change the file; Esc is back to Source.
         keys(&mut wb, &["x", "Esc"]);
         assert_eq!(wb.windows.last().unwrap().ed.doc.rope.to_string(), "# Notes\n");

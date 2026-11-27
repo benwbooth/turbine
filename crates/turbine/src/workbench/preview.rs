@@ -49,6 +49,11 @@ pub(super) struct Preview {
 }
 
 impl Preview {
+    /// Render again (its width or wrapping changed).
+    pub(super) fn rerender(&mut self) {
+        self.asked = None;
+    }
+
     /// A file's preview drawn in its own window (docview's Preview).
     pub(super) fn in_place(src: u32, base: Option<PathBuf>) -> Preview {
         let root = base.clone().map(|b| lsp::project_root(&b.join("x"))).unwrap_or_default();
@@ -236,7 +241,11 @@ impl Workbench {
                 self.preview.previews.remove(&id);
                 continue;
             };
-            let width = (w.win.inner().w.max(20) as usize).saturating_sub(2);
+            let mut width = (w.win.inner().w.max(20) as usize).saturating_sub(2);
+            // (An in-place preview without wrap: lines run on.)
+            if self.preview.previews.get(&id).and_then(|p| p.inplace).and_then(|src| self.docviews.get(&src)).is_some_and(|d| !d.preview_wrap) {
+                width = 4000;
+            }
             let p = self.preview.previews.get(&id).unwrap();
             let (version, md) = match &p.source {
                 Source::Pending => continue,
