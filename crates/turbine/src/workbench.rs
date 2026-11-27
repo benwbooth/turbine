@@ -6085,12 +6085,12 @@ mod tests {
         let text = surf.to_text();
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].trim_end().ends_with("Help"), "Help at the right: {:?}", lines[0]);
-        assert!(lines[1].starts_with("┌") && lines[1].contains(" UNTITLED ") && lines[1].contains("┤↑├"), "{:?}", lines[1]);
+        assert!(lines[1].starts_with("┌") && lines[1].contains(" Untitled ") && lines[1].contains("┤↑├"), "{:?}", lines[1]);
         assert!(lines[2].starts_with("│") && !lines[2].contains(" 1 "), "no line numbers: {:?}", lines[2]);
         assert!(lines[24].contains("<F1=Help>") && lines[24].contains("│ 00001:001"), "{:?}", lines[24]);
         assert!(text.contains('↓') && text.contains('→'), "arrow scroll bars");
         // The title is in reverse video (blue on grey).
-        let x = lines[1].find(" UNTITLED ").map(|b| lines[1][..b].chars().count()).unwrap() as i32 + 1;
+        let x = lines[1].find(" Untitled ").map(|b| lines[1][..b].chars().count()).unwrap() as i32 + 1;
         assert_eq!(surf.get(x, 1).unwrap().style.bg, turbine_ui::theme::vga::LIGHT_GRAY);
     }
 
@@ -6108,7 +6108,7 @@ mod tests {
         wb.render(&mut surf);
         let text = surf.to_text();
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[1].contains("[1] UNTITLED") && lines[1].contains('▼') && lines[1].contains('▲'), "{:?}", lines[1]);
+        assert!(lines[1].contains("[1] Untitled") && lines[1].contains('▼') && lines[1].contains('▲'), "{:?}", lines[1]);
         assert_eq!(surf.get(3, 1).unwrap().style.bg, turbine_ui::theme::vga::MAGENTA);
         // VB-DOS's editing status line: <key=what> hints, then │ 00001:001.
         assert!(lines[24].starts_with(" <F1=Help>") && lines[24].contains("│ 00001:001"), "{:?}", lines[24]);

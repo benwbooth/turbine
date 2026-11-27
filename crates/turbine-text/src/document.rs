@@ -119,7 +119,7 @@ impl Document {
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "UNTITLED".into())
+            .unwrap_or_else(|| "Untitled".into())
     }
 
     pub fn len_lines(&self) -> usize {

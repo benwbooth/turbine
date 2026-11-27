@@ -165,7 +165,10 @@ pub(super) fn project_of(files: &[PathBuf]) -> PathBuf {
 impl Workbench {
     /// The parts and the editors' area on this screen.
     pub(super) fn layout(&self) -> Layout {
-        self.shell.dock.layout(Rect::new(0, 1, self.size.0, (self.size.1 - 2).max(1)))
+        let mut dock = self.shell.dock.clone();
+        // (A front editor with no file: no breadcrumbs, its name is the tab.)
+        dock.crumbs_hidden = self.editor_index().is_some_and(|i| self.windows[i].ed.doc.path.is_none() && self.windows[i].special.is_none());
+        dock.layout(Rect::new(0, 1, self.size.0, (self.size.1 - 2).max(1)))
     }
 
     /// The window being edited: the front window that isn't docked.
@@ -1503,26 +1506,27 @@ impl Workbench {
         let s = &theme.scheme;
         // Editor tabs: one per window on the desktop, the front one lit.
         if let Some(tr) = l.editor_tabs {
-            c.fill(tr, " ", s.tab_bar);
+            // (On the front window's top border: its line under the tabs.)
+            let fw = self.editor_index().map(|i| &self.windows[i]);
+            let line_style = if fw.is_some_and(|w| w.ed.help_look) { Style::new(s.help.fg, s.help.bg) } else { s.frame_active };
+            let h = if theme.style.title_bar { " " } else { theme.style.active_frame.h };
+            c.fill(tr, h, line_style);
             let front = self.editor_index().map(|i| self.windows[i].win.id);
             let mut tc = c.sub(tr);
             let icons = theme.style.icons;
+            // The front tab as the originals title a window: a grey box
+            // (QBasic's reverse title, the grey of the others' menus); the
+            // rest plain on the border line.
+            let active = if theme.style.title_reverse { s.frame_icons } else { s.menu };
             for (id, r, x) in &self.shell.editor_tab_rects {
                 let Some(w) = self.windows.iter().find(|w| w.win.id == *id) else { continue };
                 let on = Some(*id) == front;
-                let stl = if on { s.tab_active } else { s.tab_inactive };
+                let stl = if on { active } else { line_style };
                 // (The preview tab in italics, as VS Code shows it.)
                 let stl = if self.shell.preview_tab == Some(*id) { Style { attrs: turbine_ui::theme::Attrs { italic: true, ..stl.attrs }, ..stl } } else { stl };
                 tc.print(r.x, r.y, &editor_tab_name(w, icons), stl);
                 tc.print(x.x, x.y, "×", stl);
-                if icons && on {
-                    // The front tab as a pill.
-                    let cap = Style::new(stl.bg, s.tab_bar.bg);
-                    tc.print(r.x - 1, r.y, crate::dock::CAP_LEFT, cap);
-                    tc.print(x.x + 1, x.y, crate::dock::CAP_RIGHT, cap);
-                } else if !icons {
-                    tc.print(x.x + 1, x.y, "│", s.tab_bar);
-                }
+                tc.print(x.x + 1, x.y, " ", stl);
             }
         }
         // Breadcrumbs.

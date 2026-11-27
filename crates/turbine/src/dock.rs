@@ -131,8 +131,10 @@ pub struct Dock {
     pub right: Part,
     /// A row of tabs for the open editors above them.
     pub editor_tabs: bool,
-    /// A breadcrumbs row under the tabs.
+    /// A breadcrumbs row above the editors.
     pub breadcrumbs: bool,
+    /// The front editor has no file: no breadcrumbs row (set each layout).
+    pub crumbs_hidden: bool,
     /// Tabs with emoji icons and rounded ends (from the control style).
     pub icons: bool,
     drag: Option<Drag>,
@@ -146,6 +148,7 @@ impl Default for Dock {
             right: Part { visible: false, size: 46, tabs: Vec::new(), active: 0 },
             editor_tabs: true,
             breadcrumbs: true,
+            crumbs_hidden: false,
             icons: false,
             drag: None,
         }
@@ -227,16 +230,16 @@ impl Dock {
         let bh = if shown(&self.bottom) { self.bottom.size.clamp(4, (mid.h - 6).max(4)) } else { 0 };
         let bottom = (bh > 0 && mid.h > bh).then(|| Rect::new(mid.x, mid.bottom() - bh, mid.w, bh));
         let ed = Rect::new(mid.x, mid.y, mid.w, mid.h - bottom.map_or(0, |b| b.h));
-        let (editor_tabs, ed) = if self.editor_tabs && ed.h > 4 {
+        // Breadcrumbs above the editors (none for a file with no path:
+        // they'd only repeat its name); the tabs in the editor window's
+        // top border, where its title would be (Turbo Vision's way), so a
+        // file's name shows once.
+        let (breadcrumbs, editors) = if self.breadcrumbs && !self.crumbs_hidden && ed.h > 6 {
             (Some(Rect::new(ed.x, ed.y, ed.w, 1)), Rect::new(ed.x, ed.y + 1, ed.w, ed.h - 1))
         } else {
             (None, ed)
         };
-        let (breadcrumbs, editors) = if self.breadcrumbs && ed.h > 6 {
-            (Some(Rect::new(ed.x, ed.y, ed.w, 1)), Rect::new(ed.x, ed.y + 1, ed.w, ed.h - 1))
-        } else {
-            (None, ed)
-        };
+        let editor_tabs = (self.editor_tabs && editors.h > 4 && editors.w > 16).then(|| Rect::new(editors.x + 2, editors.y, editors.w - 9, 1));
         Layout { left, bottom, right, editors, editor_tabs, breadcrumbs }
     }
 
@@ -373,8 +376,9 @@ mod tests {
         let (left, right, bottom) = (l.left.unwrap(), l.right.unwrap(), l.bottom.unwrap());
         assert_eq!((left.x, left.w, right.right(), right.w), (0, 30, 120, 46));
         assert_eq!((bottom.x, bottom.w, bottom.bottom()), (30, 120 - 30 - 46, 41));
-        assert_eq!((l.editor_tabs.unwrap().y, l.breadcrumbs.unwrap().y), (1, 2));
-        assert_eq!((l.editors.y, l.editors.bottom()), (3, bottom.y));
+        // (The tabs are in the editors' top border, under the breadcrumbs.)
+        assert_eq!((l.breadcrumbs.unwrap().y, l.editor_tabs.unwrap().y), (1, 2));
+        assert_eq!((l.editors.y, l.editors.bottom()), (2, bottom.y));
         // A narrow screen: the side bars give way.
         let l = d.layout(Rect::new(0, 1, 60, 20));
         assert!(l.editors.w >= 24, "{l:?}");
