@@ -28,3 +28,12 @@ unicode-bidi = "0.3"
 crossterm = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Dev builds (devloop's, the tests'): optimised enough to feel instant.
+# Turbine's own crates at -O1 still rebuild quickly; the libraries under
+# it (tree-sitter, Ghostty's engine, Qt's bindings) built once at -O3.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

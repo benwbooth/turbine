@@ -89,6 +89,9 @@ impl Workbench {
             alt.line_numbers = false;
             // (The page is laid out at the window's width already.)
             alt.wrap = false;
+            // (Drawn as the guide is: black, its headings, links, code and
+            // keys in their colours.)
+            alt.help_look = true;
             DocView { mode: Mode::Source, alt, tree: None, tree_version: u64::MAX, preview_wrap: true }
         });
         dv.mode = mode;
