@@ -6217,13 +6217,13 @@ mod tests {
         let mut surf = Surface::new(100, 40);
         wb.render(&mut surf);
         let r = wb.tip.drawn.get().unwrap();
-        assert_eq!(r.h, 16);
+        assert_eq!(r.h, 20, "half the screen");
         for _ in 0..40 {
             wb.event(Event::Mouse(MouseEvent { kind: MouseKind::ScrollDown, pos: Point::new(r.x + 1, r.y + 1), mods: Mods::NONE }));
         }
         wb.render(&mut surf);
-        assert_eq!(wb.tip.drawn.get().unwrap().h, 16, "the box keeps its size");
-        assert!(surf.to_text().contains("line 29") && !surf.to_text().contains("line 13 "), "scrolled to its last line");
+        assert_eq!(wb.tip.drawn.get().unwrap().h, 20, "the box keeps its size");
+        assert!(surf.to_text().contains("line 29") && !surf.to_text().contains("line 9 "), "scrolled to its last line");
     }
 
     #[test]

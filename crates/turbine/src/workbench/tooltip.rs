@@ -11,7 +11,7 @@ const DELAY: Duration = Duration::from_millis(600);
 #[derive(Default)]
 pub(super) struct TipState {
     /// Where the mouse rests, and since when.
-    at: Option<(Point, Instant)>,
+    pub at: Option<(Point, Instant)>,
     /// The tip shown: the control's place (moving off it hides the tip)
     /// and the text.
     pub shown: Option<(Rect, String)>,
@@ -213,6 +213,8 @@ impl Workbench {
             }
             out.push(pieces);
         }
+        // (One blank line at most in a row: servers' Markdown has many.)
+        out.dedup_by(|b, a| a.iter().all(|(t, _)| t.trim().is_empty()) && b.iter().all(|(t, _)| t.trim().is_empty()));
         // (No blank lines at the ends.)
         while out.last().is_some_and(|l| l.iter().all(|(t, _)| t.trim().is_empty())) {
             out.pop();
@@ -304,7 +306,9 @@ impl Workbench {
         // (Its size from all of it, so scrolling never shrinks the box: at
         // most 16 rows, scrolled no further than its last line at the bottom.)
         let w = lines.iter().map(|l| l.iter().map(|(t, _)| str_width(t)).sum::<usize>()).max().unwrap_or(0) as i32 + 2;
-        let rows = lines.len().min(16);
+        // (Up to half the screen, at least 16 rows.)
+        let cap = ((screen.h / 2).max(16) as usize).min(40);
+        let rows = lines.len().min(cap);
         let skip = self.tip.scroll.get().min(lines.len() - rows);
         self.tip.scroll.set(skip);
         let more_below = skip + rows < lines.len();
