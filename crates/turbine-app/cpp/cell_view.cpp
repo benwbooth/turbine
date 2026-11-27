@@ -348,6 +348,14 @@ void CellView::hoverMoveEvent(QHoverEvent* e)
     afterInput();
 }
 
+// The mouse left the window: no tooltip stays behind.
+void CellView::hoverLeaveEvent(QHoverEvent* e)
+{
+    m_lastCell = QPoint(-1, -1);
+    turbine::app_mouse(3, 0, -1, -1, uint32_t(e->modifiers()));
+    afterInput();
+}
+
 void CellView::wheelEvent(QWheelEvent* e)
 {
     // Trackpads send pixels, wheels send angles: one step per 120 or per cell height.

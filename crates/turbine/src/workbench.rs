@@ -23,6 +23,7 @@ mod inline_ai;
 mod lsp_more;
 mod preview;
 mod session;
+mod tooltip;
 mod settings;
 mod shell;
 use find::FindBar;
@@ -293,6 +294,7 @@ pub struct Workbench {
     /// WebAssembly extensions (started by the front end).
     exts: extensions::ExtState,
     session: session::SessionState,
+    tip: tooltip::TipState,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -643,6 +645,7 @@ impl Workbench {
             inline: None,
             exts: extensions::ExtState::default(),
             session: session::SessionState::default(),
+            tip: tooltip::TipState::default(),
         };
         for f in files {
             // (A folder is the project: the Explorer shows it.)
@@ -3172,6 +3175,7 @@ impl Workbench {
     }
 
     fn dispatch(&mut self, ev: Event) {
+        self.tip_event(&ev);
         match ev {
             Event::Resize(w, h) => {
                 let old = self.desktop();
@@ -4218,6 +4222,11 @@ impl Workbench {
 
 impl App for Workbench {
     fn event(&mut self, ev: Event) {
+        // (The mouse leaving the window: only the tooltip cares.)
+        if matches!(&ev, Event::Mouse(m) if m.pos.x < 0 || m.pos.y < 0) {
+            self.tip_event(&ev);
+            return;
+        }
         self.human_input(&ev);
         if self.driver.busy() && matches!(ev, Event::Key(_)) {
             return; // keys go to the agent controls while it drives
@@ -4315,7 +4324,8 @@ impl App for Workbench {
         let term_tick = (any_term || self.hl_pending > 0 || lsp_waiting).then(|| now + Duration::from_millis(16));
         // Servers send diagnostics unasked: look a few times a second.
         let lsp_tick = (!self.lsp.is_empty()).then(|| now + Duration::from_millis(100));
-        [next, msg_tick, poll, term_tick, lsp_tick].into_iter().flatten().min()
+        let tip_tick = self.tip_tick(now);
+        [next, msg_tick, poll, term_tick, lsp_tick, tip_tick].into_iter().flatten().min()
     }
 
     fn render(&mut self, surf: &mut Surface) {
@@ -4526,6 +4536,7 @@ impl App for Workbench {
         if self.dialog.is_none() && !self.menubar.is_open() {
             shell::join_borders(surf, &parts);
         }
+        self.draw_tip(&mut surf.canvas(), &theme);
         surf.cursor_blink = self.shell.cursor_blink;
         // (No pictures under a dialog or a menu.)
         surf.images = if self.dialog.is_none() && !self.menubar.is_open() && self.shell.palette.is_none() { std::mem::take(&mut self.image_places) } else { Vec::new() };
@@ -5046,6 +5057,35 @@ mod tests {
         keys(&mut wb, &["End"]);
         run(&mut wb, json!({"cmd": "type", "text": "("}));
         assert!(wb.find.error.is_some());
+    }
+
+    #[test]
+    fn tooltips_name_icons_and_show_cut_names_whole() {
+        let (dir, mut wb) = project("tips");
+        std::fs::write(dir.join("a_very_long_file_name_that_will_not_fit_in_the_side_bar.txt"), "").unwrap();
+        wait_until(&mut wb, "the listing", |wb| wb.shell.explorer.list.rows.iter().any(|r| r.text.starts_with("a_very")));
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let rest = |wb: &mut Workbench, p: Point| {
+            wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Moved, pos: p, mods: Mods::NONE }));
+            wb.tick(Instant::now() + Duration::from_millis(700));
+            wb.tip.shown.as_ref().map(|(_, t)| t.clone())
+        };
+        // The New File icon in the Explorer's header.
+        let b = wb.tree().find_target("explorer.new_file").map(|n| n.rect).expect("the button");
+        assert_eq!(rest(&mut wb, Point::new(b.x, b.y)).as_deref(), Some("New File"));
+        // A name cut short: whole.
+        wb.render(&mut surf);
+        let i = wb.shell.explorer.list.rows.iter().position(|r| r.text.starts_with("a_very")).unwrap();
+        let a = wb.shell.explorer.list.area;
+        let y = a.y + (i - wb.shell.explorer.list.scroll) as i32;
+        assert_eq!(rest(&mut wb, Point::new(a.x + 3, y)).as_deref(), Some("a_very_long_file_name_that_will_not_fit_in_the_side_bar.txt"));
+        wb.render(&mut surf);
+        assert!(surf.to_text().contains("a_very_long_file_name_that_will_not_fit_in_the_side_bar.txt"), "drawn");
+        // A key hides it.
+        keys(&mut wb, &["Down"]);
+        assert!(wb.tip.shown.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

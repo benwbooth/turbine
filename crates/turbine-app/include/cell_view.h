@@ -44,6 +44,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* e) override;
     void mouseDoubleClickEvent(QMouseEvent* e) override;
     void hoverMoveEvent(QHoverEvent* e) override;
+    void hoverLeaveEvent(QHoverEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
     void geometryChange(const QRectF& now, const QRectF& old) override;
     bool event(QEvent* e) override;

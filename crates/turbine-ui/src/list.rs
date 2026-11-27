@@ -119,6 +119,8 @@ pub struct ListView {
     typed_at: Option<Instant>,
     /// Show the scroll bar only while the list has the keys.
     pub bar_when_focused: bool,
+    /// Rows cut short when last drawn (their tooltips show them whole).
+    pub cut: Vec<usize>,
 }
 
 impl ListView {
@@ -282,6 +284,8 @@ impl ListView {
         let bar = self.rows.len() > n && n >= 3 && (focused || !self.bar_when_focused);
         let text_w = r.w - i32::from(bar);
         let dim = Style::new(s.panel_frame.fg, base.bg);
+        self.cut.clear();
+        let mut cut = Vec::new();
         for (k, row) in self.rows.iter().enumerate().skip(self.scroll).take(n) {
             let y = r.y + (k - self.scroll) as i32;
             let sel = k == self.selected;
@@ -319,6 +323,7 @@ impl ListView {
             let mut detail = row.detail.clone();
             let room_d = avail - name_w - 2;
             if str_width(&detail) as i32 > room_d {
+                cut.push(k);
                 if room_d >= 6 {
                     while !detail.is_empty() && str_width(&detail) as i32 > room_d - 1 {
                         detail.remove(0);
@@ -332,6 +337,7 @@ impl ListView {
             let room = (avail - if dw > 0 { dw + 1 } else { 0 }).max(0);
             let mut t = row.text.clone();
             if str_width(&t) as i32 > room {
+                cut.push(k);
                 while !t.is_empty() && str_width(&t) as i32 > (room - 1).max(0) {
                     t.pop();
                 }
@@ -343,6 +349,7 @@ impl ListView {
                 lc.print(r.x + text_w - 1 - dw, y, &detail, ds);
             }
         }
+        self.cut.extend(cut);
         if bar {
             draw_vscroll(c, r.right() - 1, r.y, r.h, self.scroll, max + 1, s.scrollbar, theme.style.scroll);
         }
@@ -363,6 +370,10 @@ impl ListView {
             let mut it = Node::new(format!("{id}.{k}"), "listitem", row.text.clone(), ir).focused(k == self.selected);
             if !row.detail.is_empty() {
                 it = it.value(row.detail.clone());
+            }
+            // (Cut short when drawn: the whole of it on hovering.)
+            if self.cut.contains(&k) {
+                it = it.tip(if row.detail.is_empty() { row.text.clone() } else { format!("{}  {}", row.text, row.detail) });
             }
             n = n.child(it);
         }

@@ -19,6 +19,9 @@ pub struct Node {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// What hovering shows (a cut name in full, a path, an icon's meaning).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tip: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<Node>,
 }
@@ -37,6 +40,7 @@ impl Node {
             focused: false,
             enabled: true,
             value: None,
+            tip: None,
             children: Vec::new(),
         }
     }
@@ -50,6 +54,10 @@ impl Node {
     }
     pub fn value(mut self, v: impl Into<String>) -> Self {
         self.value = Some(v.into());
+        self
+    }
+    pub fn tip(mut self, t: impl Into<String>) -> Self {
+        self.tip = Some(t.into());
         self
     }
     pub fn child(mut self, n: Node) -> Self {

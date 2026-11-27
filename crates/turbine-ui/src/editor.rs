@@ -547,6 +547,16 @@ impl EditorView {
         true
     }
 
+    /// The error or warning under a cell of the text (for its tooltip).
+    pub fn diagnostic_at(&self, p: Point) -> Option<&DiagMark> {
+        if !self.area.contains(p) || (self.line_numbers && p.x < self.area.x + self.gutter_width()) {
+            return None;
+        }
+        let ch = self.pos_to_char(p);
+        let (line, byte) = self.doc.char_to_line_byte(ch);
+        self.diagnostics.iter().filter(|d| d.line == line).find(|d| byte >= d.start && (byte < d.end || (d.end <= d.start && byte == d.start)))
+    }
+
     fn pos_to_char(&self, p: Point) -> usize {
         if let Some(ch) = self.wrapped_pos(p.y - self.area.y, p.x - self.area.x - self.gutter_width()) {
             return ch;

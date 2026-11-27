@@ -1701,7 +1701,14 @@ impl Workbench {
             for (id, r, x) in &self.shell.editor_tab_rects {
                 let w = self.windows.iter().find(|w| w.win.id == *id);
                 let name = w.map(|w| w.ed.doc.title()).unwrap_or_default();
-                tabs = tabs.child(Node::new(format!("editor_tab.{id}"), "tab", name.clone(), *r).focused(self.editor_index().map(|i| self.windows[i].win.id) == Some(*id)));
+                let mut tab = Node::new(format!("editor_tab.{id}"), "tab", name.clone(), *r).focused(self.editor_index().map(|i| self.windows[i].win.id) == Some(*id));
+                // (Hovering shows where the file is, as VS Code's tabs do.)
+                if let Some(p) = w.and_then(|w| w.ed.doc.path.as_ref()) {
+                    let shown = p.strip_prefix(&self.shell.explorer.root).map(|r| r.display().to_string()).unwrap_or_else(|_| p.display().to_string());
+                    let dirty = w.is_some_and(|w| w.ed.doc.dirty);
+                    tab = tab.tip(if dirty { format!("{shown} • unsaved") } else { shown });
+                }
+                tabs = tabs.child(tab);
                 tabs = tabs.child(Node::new(format!("editor_tab.{id}.close"), "button", format!("Close {name}"), *x));
             }
             root = root.child(tabs);
