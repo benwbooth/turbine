@@ -449,7 +449,9 @@ impl Workbench {
     /// "▼ n": every editor, to pick one.
     pub(super) fn open_tab_menu(&mut self) {
         let Some((r, _)) = self.shell.tab_more else { return };
-        let mut eds: Vec<(u32, String)> = self.windows.iter().filter(|w| w.dock.is_none()).map(|w| (w.win.id, editor_tab_name(w, self.theme.style.icons).trim().to_string())).collect();
+        // (Only the tabs that didn't fit: the shown ones are a click away.)
+        let shown: HashSet<u32> = self.shell.editor_tab_rects.iter().map(|t| t.0).collect();
+        let mut eds: Vec<(u32, String)> = self.windows.iter().filter(|w| w.dock.is_none() && !shown.contains(&w.win.id)).map(|w| (w.win.id, editor_tab_name(w, self.theme.style.icons).trim().to_string())).collect();
         eds.sort_by_key(|e| e.0);
         let items = eds.iter().map(|(_, n)| (n.clone(), String::new())).collect();
         let mut popup = turbine_ui::popup::ListPopup::new(items);

@@ -6891,6 +6891,8 @@ mod tests {
         assert!(surf.to_text().contains(&format!("▼ {n}")));
         wb.dispatch(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(r.x, r.y), mods: Mods::NONE }));
         assert!(wb.shell.tab_menu.is_some());
+        // (It lists only the tabs that didn't fit.)
+        assert_eq!(wb.shell.tab_menu.as_ref().unwrap().1.len(), n);
         keys(&mut wb, &["Home", "Enter"]);
         assert!(wb.shell.tab_menu.is_none());
         let w = &wb.windows[wb.editor_index().unwrap()];
