@@ -582,6 +582,11 @@ impl Workbench {
         self.sync_menu_checks();
     }
 
+    /// The colours and control style in use.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
     /// Where the chosen look is kept (set by the front end; tests keep none).
     pub fn set_look_path(&mut self, p: PathBuf) {
         if let Ok(text) = std::fs::read_to_string(&p) {
@@ -1935,21 +1940,21 @@ impl Workbench {
             "options.colors" => {
                 let names: Vec<String> = Scheme::all().iter().map(|s| s.name.to_string()).collect();
                 let cur = names.iter().position(|n| n == self.theme.scheme.name).unwrap_or(0);
-                let d = Dialog::new("colors", "Colors", 40, 12)
+                let d = Dialog::new("colors", "Colors", 44, 12)
                     .label(1, 0, "Color scheme:")
-                    .list("scheme", Rect::new(1, 1, 22, 7), names, cur)
-                    .button("ok", 25, 2, "O~K~", true)
-                    .button("cancel", 25, 5, "Cancel", false);
+                    .list("scheme", Rect::new(1, 1, 26, 8), names, cur)
+                    .button("ok", 30, 2, "O~K~", true)
+                    .button("cancel", 30, 5, "Cancel", false);
                 self.dialog = Some(d);
             }
             "options.style" => {
                 let names: Vec<String> = ControlStyle::all().iter().map(|s| s.name.to_string()).collect();
                 let cur = names.iter().position(|n| n == self.theme.style.name).unwrap_or(0);
-                let d = Dialog::new("style", "Control Style", 40, 12)
+                let d = Dialog::new("style", "Control Style", 44, 12)
                     .label(1, 0, "Draw controls like:")
-                    .list("style", Rect::new(1, 1, 22, 7), names, cur)
-                    .button("ok", 25, 2, "O~K~", true)
-                    .button("cancel", 25, 5, "Cancel", false);
+                    .list("style", Rect::new(1, 1, 26, 8), names, cur)
+                    .button("ok", 30, 2, "O~K~", true)
+                    .button("cancel", 30, 5, "Cancel", false);
                 self.dialog = Some(d);
             }
             "window.tile" => self.tile(),

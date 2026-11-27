@@ -13,7 +13,7 @@ use crate::event::{Button, Key, KeyEvent, KeyKind, MouseEvent, MouseKind};
 use crate::frame::{draw_frame, draw_title, draw_vscroll};
 use crate::geom::{Point, Rect};
 use crate::surface::{Canvas, CursorShape};
-use crate::theme::{Theme, vga};
+use crate::theme::{Style, Theme, vga};
 use std::time::{Duration, Instant};
 use turbine_text::unicode::{grapheme_boundaries, str_width};
 
@@ -147,6 +147,9 @@ pub struct Dialog {
     last_click: Option<(Point, Instant)>,
     /// The screen from the last layout (drop-downs stay inside it).
     screen: Rect,
+    /// Controls drawn in boxes (QBasic, VB-DOS) at the last draw: where
+    /// their insides are. (Clicks and list rows use them.)
+    boxed: Vec<Option<Rect>>,
 }
 
 impl Dialog {
@@ -165,6 +168,7 @@ impl Dialog {
             drag: None,
             last_click: None,
             screen: Rect::default(),
+            boxed: Vec::new(),
         }
     }
 
@@ -388,8 +392,42 @@ impl Dialog {
         })
     }
 
+    /// Where a control's contents go: inside its box when it has one.
+    fn inner(&self, i: usize) -> Rect {
+        self.boxed.get(i).copied().flatten().unwrap_or_else(|| self.control_rect(i))
+    }
+
+    /// The box around a field, drop-down or list (QBasic, VB-DOS), or None
+    /// where there's no room for one. Inputs and drop-downs: the label goes
+    /// beside the field and the box takes the label's row and the row below.
+    fn box_of(&self, i: usize) -> Option<(Rect, Rect)> {
+        let cr = self.control_rect(i);
+        match &self.controls[i].control {
+            Control::Input { label, .. } | Control::Combo { label, .. } => {
+                let lw = str_width(&label.replace('~', "")) as i32;
+                let x0 = if lw > 0 { cr.x + lw + 1 } else { cr.x };
+                let outer = Rect::new(x0, cr.y - 1, cr.right() - x0, 3);
+                let room = outer.w >= 8
+                    && self.row_free(i, cr.y + 1, outer.x, outer.right())
+                    && (lw > 0 || self.row_free(i, cr.y - 1, outer.x, outer.right()));
+                room.then(|| (outer, Rect::new(x0 + 1, cr.y, outer.w - 2, 1)))
+            }
+            Control::List { .. } => {
+                // (A list filling a group box already has its box.)
+                let in_group = self.controls.iter().enumerate().any(|(j, p)| {
+                    matches!(p.control, Control::Group { .. }) && {
+                        let g = self.control_rect(j);
+                        g.inset(1) == cr
+                    }
+                });
+                (!in_group && cr.w >= 4 && cr.h >= 3).then(|| (cr, cr.inset(1)))
+            }
+            _ => None,
+        }
+    }
+
     fn list_rows(&self, i: usize) -> usize {
-        let r = self.control_rect(i);
+        let r = self.inner(i);
         let header = matches!(&self.controls[i].control, Control::List { header: Some(_), .. });
         (r.h - header as i32).max(1) as usize
     }
@@ -621,7 +659,9 @@ impl Dialog {
     fn combo_popup(&self) -> Option<(usize, Rect)> {
         let i = self.controls.iter().position(|p| matches!(p.control, Control::Combo { open: true, .. }))?;
         let Control::Combo { items, .. } = &self.controls[i].control else { return None };
-        let r = self.control_rect(i);
+        let r = self.inner(i);
+        // (Below the box, when it has one.)
+        let r = if self.boxed.get(i).copied().flatten().is_some() { Rect::new(r.x - 1, r.y + 1, r.w + 2, 1) } else { r };
         // As wide as the longest item, kept on screen.
         let w = items.iter().map(|s| str_width(s) as i32 + 4).max().unwrap_or(0).max(r.w);
         let x = if self.screen.w > 0 { r.x.min(self.screen.right() - w).max(self.screen.x) } else { r.x };
@@ -637,7 +677,7 @@ impl Dialog {
     /// Scroll list `i` so its thumb is at screen row `y` (on the track
     /// between the arrows); the selection stays in view.
     fn thumb_to(&mut self, i: usize, y: i32) {
-        let cr = self.control_rect(i);
+        let cr = self.inner(i);
         let rows = self.list_rows(i);
         if let Control::List { items, selected, scroll, header, .. } = &mut self.controls[i].control {
             let y0 = cr.y + header.is_some() as i32;
@@ -718,17 +758,19 @@ impl Dialog {
         self.last_click = Some((ev.pos, Instant::now()));
         for i in (0..self.controls.len()).rev() {
             let cr = self.control_rect(i);
-            if !cr.contains(ev.pos) || matches!(self.controls[i].control, Control::Group { .. } | Control::Label { .. }) {
+            let hit = cr.contains(ev.pos) || self.boxed.get(i).copied().flatten().is_some_and(|b| b.y == ev.pos.y && b.x - 1 <= ev.pos.x && ev.pos.x <= b.right());
+            if !hit || matches!(self.controls[i].control, Control::Group { .. } | Control::Label { .. }) {
                 continue;
             }
             if self.controls[i].control.focusable() {
                 self.focus = i;
             }
             let rows = if matches!(self.controls[i].control, Control::List { .. }) { self.list_rows(i) } else { 1 };
+            let ir = self.inner(i);
             match &mut self.controls[i].control {
                 Control::Button { id, .. } => return DialogResult::Button(id.clone()),
                 Control::List { id, items, selected, scroll, header, activates } => {
-                    let row = ev.pos.y - cr.y - header.is_some() as i32;
+                    let row = ev.pos.y - ir.y - header.is_some() as i32;
                     // (A click on the scroll bar column scrolls.)
                     if ev.pos.x == cr.right() - 1 && items.len() > rows && row >= 0 {
                         let max = items.len().saturating_sub(rows);
@@ -762,7 +804,8 @@ impl Dialog {
                     return DialogResult::None;
                 }
                 Control::Input { value, cursor, .. } => {
-                    let col = (ev.pos.x - cr.x - 1).max(0) as usize;
+                    let pad = if self.boxed.get(i).copied().flatten().is_some() { 0 } else { 1 };
+                    let col = (ev.pos.x - ir.x - pad).max(0) as usize;
                     let mut w = 0;
                     *cursor = value.len();
                     for (bi, g) in unicode_segmentation::UnicodeSegmentation::grapheme_indices(value.as_str(), true) {
@@ -845,9 +888,24 @@ impl Dialog {
                 }
             }
         }
-        // The resize corner.
-        c.print(r.right() - 1, r.bottom() - 1, if st.resize_grip.is_empty() { "┘" } else { st.resize_grip }, s.dialog_frame);
+        // (No resize grip: DOS dialogs never had one; the edges still drag.)
+        self.boxed = (0..self.controls.len()).map(|i| if st.boxed_fields { self.box_of(i).map(|(_, inner)| inner) } else { None }).collect();
+        let boxes: Vec<Option<Rect>> = (0..self.controls.len()).map(|i| if st.boxed_fields { self.box_of(i).map(|(outer, _)| outer) } else { None }).collect();
         let mut c = c.sub(r.inset(1));
+        // The boxes: QBasic's in the frame's colour, VB-DOS's sunken (dark
+        // top and left, white bottom and right).
+        for b in boxes.iter().flatten() {
+            let (lo, hi) = if st.title_bar { (s.dialog.fg(vga::BLACK), s.dialog.fg(vga::WHITE)) } else { (s.dialog_frame, s.dialog_frame) };
+            let (x0, x1, y0, y1) = (b.x, b.right() - 1, b.y, b.bottom() - 1);
+            c.print(x0, y0, "┌", lo);
+            c.hline(x0 + 1, y0, x1 - x0 - 1, "─", lo);
+            c.print(x1, y0, "┐", hi);
+            c.vline(x0, y0 + 1, y1 - y0 - 1, "│", lo);
+            c.vline(x1, y0 + 1, y1 - y0 - 1, "│", hi);
+            c.print(x0, y1, "└", lo);
+            c.hline(x0 + 1, y1, x1 - x0 - 1, "─", hi);
+            c.print(x1, y1, "┘", hi);
+        }
         // Group boxes first: the controls draw over their insides.
         let order: Vec<usize> = (0..self.controls.len())
             .filter(|&i| matches!(self.controls[i].control, Control::Group { .. }))
@@ -868,17 +926,25 @@ impl Dialog {
                 Control::Group { title } => {
                     draw_frame(&mut c, cr, crate::theme::SINGLE, s.dialog_frame);
                     if !title.is_empty() {
-                        c.print_hot(cr.x + 1, cr.y, title, s.dialog, s.button_hotkey);
+                        c.print_hot(cr.x + 1, cr.y, title, s.dialog, s.label_hotkey);
                     }
                 }
                 Control::Input { label, value, cursor, .. } => {
+                    let boxed = self.boxed[i].is_some();
                     if !label.is_empty() {
-                        c.print_hot(cr.x, cr.y - 1, label, s.dialog, s.button_hotkey);
+                        // (Boxed: the label beside the field, as in QBasic.)
+                        c.print_hot(cr.x, if boxed { cr.y } else { cr.y - 1 }, label, if focused { s.label_focused } else { s.dialog }, s.label_hotkey);
                     }
-                    c.fill(cr, " ", s.input);
+                    // (Inside a box the field's text starts at its left edge.)
+                    let cr = match self.boxed[i] {
+                        Some(ir) => Rect::new(ir.x - 1, ir.y, ir.w + 1, 1),
+                        None => cr,
+                    };
+                    let field = self.boxed[i].unwrap_or(cr);
+                    c.fill(field, " ", s.input);
                     let before = str_width(&value[..*cursor]) as i32;
                     let skip = (before - cr.w + 2).max(0);
-                    let mut sub = c.sub(cr);
+                    let mut sub = c.sub(field);
                     sub.print(cr.x - skip + 1, cr.y, value, s.input);
                     if focused {
                         sub.set_cursor(Point::new(cr.x + 1 + before - skip, cr.y), CursorShape::Underline);
@@ -886,7 +952,6 @@ impl Dialog {
                 }
                 Control::Button { label, default, .. } => {
                     let (l, rr) = st.button;
-                    let (l, rr) = if *default && l.trim().is_empty() { ("◄ ", " ►") } else { (l, rr) };
                     let text = format!("{l}{label}{rr}");
                     let w = str_width(&text.replace('~', "")) as i32;
                     if boxed_button {
@@ -915,7 +980,7 @@ impl Dialog {
                         let x = c.print_hot(x, cr.y, label, s.button, s.button_hotkey);
                         c.print(x, cr.y, rr, br);
                     } else {
-                        let stl = if focused { s.button_focused } else { s.button };
+                        let stl = if focused { s.button_focused } else if *default { s.button_default } else { s.button };
                         c.print_hot(cr.x, cr.y, &text, stl, s.button_hotkey);
                         if st.shadows && st.button.0.trim().is_empty() {
                             c.print(cr.x + w, cr.y, "▄", s.dialog.fg(vga::BLACK));
@@ -928,39 +993,58 @@ impl Dialog {
                 }
                 Control::Check { label, checked, .. } => {
                     let x = c.print(cr.x, cr.y, if *checked { "[X] " } else { "[ ] " }, s.dialog);
-                    c.print_hot(x, cr.y, label, s.dialog, s.button_hotkey);
+                    c.print_hot(x, cr.y, label, s.dialog, s.label_hotkey);
                     if focused {
                         c.set_cursor(Point::new(cr.x + 1, cr.y), CursorShape::Underline);
                     }
                 }
                 Control::Radio { label, checked, .. } => {
                     let x = c.print(cr.x, cr.y, if *checked { "(•) " } else { "( ) " }, s.dialog);
-                    c.print_hot(x, cr.y, label, s.dialog, s.button_hotkey);
+                    c.print_hot(x, cr.y, label, s.dialog, s.label_hotkey);
                     if focused {
                         c.set_cursor(Point::new(cr.x + 1, cr.y), CursorShape::Underline);
                     }
                 }
                 Control::Combo { label, items, selected, .. } => {
+                    let boxed = self.boxed[i].is_some();
                     if !label.is_empty() {
-                        c.print_hot(cr.x, cr.y - 1, label, s.dialog, s.button_hotkey);
+                        c.print_hot(cr.x, if boxed { cr.y } else { cr.y - 1 }, label, if focused { s.label_focused } else { s.dialog }, s.label_hotkey);
                     }
-                    c.fill(cr, " ", s.input);
-                    let mut sub = c.sub(Rect::new(cr.x, cr.y, cr.w - 2, 1));
+                    let cr = match self.boxed[i] {
+                        Some(ir) => Rect::new(ir.x - 1, ir.y, ir.w + 1, 1),
+                        None => cr,
+                    };
+                    // Turbo Vision: a green ▐↓▌ beside the field (its history
+                    // button); elsewhere a ↓ at the field's end.
+                    let tv = !boxed && st.shadows && st.button.0.trim().is_empty();
+                    let cr = if tv { Rect::new(cr.x, cr.y, cr.w - 3, 1) } else { cr };
+                    c.fill(self.boxed[i].unwrap_or(cr), " ", s.input);
+                    let mut sub = c.sub(Rect::new(cr.x, cr.y, cr.w - if tv { 0 } else { 2 }, 1));
                     sub.print(cr.x + 1, cr.y, items.get(*selected).map(String::as_str).unwrap_or(""), s.input);
-                    c.print(cr.right() - 1, cr.y, st.scroll[1], s.scrollbar);
+                    if tv {
+                        let edge = Style::new(s.button.bg, s.dialog.bg);
+                        c.print(cr.right(), cr.y, "▐", edge);
+                        c.print(cr.right() + 1, cr.y, "↓", s.button);
+                        c.print(cr.right() + 2, cr.y, "▌", edge);
+                    } else {
+                        c.print(cr.right() - 1, cr.y, st.scroll[1], s.scrollbar);
+                    }
                     if focused {
                         c.set_cursor(Point::new(cr.x + 1, cr.y), CursorShape::Underline);
                     }
                 }
                 Control::List { items, selected, scroll, header, .. } => {
+                    // (Boxed: the items inside, the scroll bar on the box's right side.)
+                    let outer = cr;
+                    let cr = self.boxed[i].unwrap_or(cr);
                     if *selected < *scroll {
                         *scroll = *selected;
                     } else if *selected >= *scroll + rows {
                         *scroll = *selected + 1 - rows;
                     }
-                    c.fill(cr, " ", s.input);
+                    c.fill(cr, " ", s.list);
                     let bar = items.len() > rows;
-                    let text_w = cr.w - bar as i32;
+                    let text_w = if outer != cr { cr.w } else { cr.w - bar as i32 };
                     let mut y0 = cr.y;
                     if let Some(h) = header {
                         // (Column titles: the dialog's colours, underlined.)
@@ -974,9 +1058,9 @@ impl Dialog {
                     for (row, it) in items.iter().enumerate().skip(*scroll).take(rows) {
                         let y = y0 + (row - *scroll) as i32;
                         let stl = if row == *selected {
-                            if focused { s.menu_selected } else { s.editor_selection }
+                            if focused { s.list_selected } else { s.list_selected_unfocused }
                         } else {
-                            s.input
+                            s.list
                         };
                         sub.fill(Rect::new(cr.x, y, text_w, 1), " ", stl);
                         sub.print(cr.x + 1, y, it, stl);
@@ -984,7 +1068,7 @@ impl Dialog {
                     if bar {
                         // (The thumb shows where the view is, so it can be dragged.)
                         let max = items.len().saturating_sub(rows);
-                        draw_vscroll(&mut c, cr.right() - 1, y0, rows as i32, *scroll, max + 1, s.scrollbar, st.scroll);
+                        draw_vscroll(&mut c, outer.right() - 1, y0, rows as i32, *scroll, max + 1, s.scrollbar, st.scroll);
                     }
                     if focused {
                         let y = y0 + (*selected as i32 - *scroll as i32).max(0);
@@ -1030,6 +1114,7 @@ impl Dialog {
                     if let Some(v) = items.get(*selected) {
                         n = n.value(v.clone());
                     }
+                    let r = self.inner(i);
                     let y0 = r.y + header.is_some() as i32;
                     let rows = (r.h - header.is_some() as i32).max(1) as usize;
                     for (row, it) in items.iter().enumerate().skip(*scroll).take(rows) {

@@ -11,6 +11,7 @@
 #include <QtGui/QPainter>
 #include <QtQuick/QQuickWindow>
 
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -126,6 +127,17 @@ CellView::CellView(QQuickItem* parent)
     setFillColor(Qt::black);
 
     m_font = baseFont();
+    // VGA mode: the PxPlus fonts are the VGA ROM's glyphs on a square grid;
+    // drawn at whole multiples of 16 px they land exactly on pixels.
+    m_vga = qEnvironmentVariable("TURBINE_FONT").trimmed().isEmpty() && QFontDatabase::hasFamily(QStringLiteral("PxPlus IBM VGA 9x16"))
+        && QFontDatabase::hasFamily(QStringLiteral("PxPlus IBM VGA 8x16"));
+    for (auto [font, fam] : { std::pair { &m_vga9, "PxPlus IBM VGA 9x16" }, std::pair { &m_vga8, "PxPlus IBM VGA 8x16" } }) {
+        font->setFamilies({ QString::fromLatin1(fam), QStringLiteral("UbuntuMono Nerd Font Mono"), QStringLiteral("Hack"), QStringLiteral("DejaVu Sans Mono") });
+        font->setStyleHint(QFont::Monospace);
+        font->setFixedPitch(true);
+        font->setKerning(false);
+        font->setHintingPreference(QFont::PreferNoHinting);
+    }
     m_bold = m_font;
     m_italic = m_font;
     if (!singleFace(m_font)) {
@@ -139,6 +151,14 @@ CellView::CellView(QQuickItem* parent)
     m_cw = std::ceil(fm.horizontalAdvance(QLatin1Char('M')));
     m_ch = std::ceil(fm.lineSpacing());
     m_ascent = fm.ascent() + (m_ch - fm.lineSpacing()) / 2;
+    if (m_vga) {
+        // A 9-dot cell 9 px wide; 16 lines at 4:3 (720x400 on a 4:3 tube)
+        // make it 16 x 1.35 = 21.6 px tall. (8-dot VB-DOS: 640x400, the
+        // same cell: 8 dots x 1.125 wide, 16 lines x 1.35.)
+        m_cw = 9;
+        m_ch = 21.6;
+        setSmooth(true);
+    }
 
     m_timer.setSingleShot(true);
     connect(&m_timer, &QTimer::timeout, this, &CellView::tick);
@@ -197,6 +217,17 @@ void CellView::tick()
     }
     if (turbine::app_dirty()) {
         m_frame = std::make_shared<turbine::Frame>(turbine::app_frame());
+        if (m_vga) {
+            // Texture pixels per dot: enough that the stretch only ever
+            // shrinks (sharp, even dots), so 2 at 100-200% scales.
+            const qreal dpr = window() ? window()->effectiveDevicePixelRatio() : 1;
+            m_k = std::clamp(int(std::ceil(dpr * m_ch / 16 - 0.05)), 1, 4);
+            m_dots = m_frame->dots == 8 ? 8 : 9;
+            // (The whole item, the strip past the last cell included, so every
+            // cell stretches by the same amount.)
+            m_vgaSize = QSize(std::max(m_frame->cols * m_dots * m_k, int(std::lround(width() / m_cw * m_dots * m_k))),
+                              std::max(m_frame->rows * 16 * m_k, int(std::lround(height() / m_ch * 16 * m_k))));
+        }
         update();
         // Check marks and enabled items may have changed.
         const QString menus = QString::fromStdString(std::string(turbine::app_menus_json()));
@@ -369,10 +400,88 @@ bool CellView::drawShape(QPainter* p, char32_t c, const QRectF& r, const QColor&
     return true;
 }
 
+void CellView::paintVga(QPainter* p)
+{
+    const turbine::Frame& f = *m_frame;
+    const int cols = f.cols, rows = f.rows;
+    const int gw = m_dots * m_k, gh = 16 * m_k;
+    // Paint text mode's own pixels into an image, then stretch that over
+    // the item (smoothly: from whole dots, so they stay even and sharp).
+    if (m_vgaImage.size() != m_vgaSize) m_vgaImage = QImage(m_vgaSize, QImage::Format_RGB32);
+    QPainter* screen = p;
+    QPainter ip(&m_vgaImage);
+    p = &ip;
+    p->setRenderHint(QPainter::Antialiasing, false);
+    p->setRenderHint(QPainter::TextAntialiasing, true);
+    QFont font = m_dots == 8 ? m_vga8 : m_vga9;
+    font.setPixelSize(16 * m_k);
+    p->setFont(font);
+    const int ascent = 12 * m_k;
+    if (!f.cells.empty()) p->fillRect(m_vgaImage.rect(), rgb(f.cells[0].bg));
+    for (int y = 0; y < rows; ++y) {
+        int x = 0;
+        while (x < cols) {
+            const auto& c = f.cells[size_t(y * cols + x)];
+            const uint32_t bg = (c.flags & 8) ? c.fg : c.bg;
+            int x1 = x + 1;
+            while (x1 < cols) {
+                const auto& n = f.cells[size_t(y * cols + x1)];
+                if (((n.flags & 8) ? n.fg : n.bg) != bg) break;
+                ++x1;
+            }
+            p->fillRect(QRect(x * gw, y * gh, (x1 - x) * gw, gh), rgb(bg));
+            x = x1;
+        }
+    }
+    for (int y = 0; y < rows; ++y) {
+        int x = 0;
+        while (x < cols) {
+            const auto& c = f.cells[size_t(y * cols + x)];
+            if (c.flags & 32) { ++x; continue; }
+            const QColor fg = rgb((c.flags & 8) ? c.bg : c.fg);
+            const int w = (c.flags & 16) ? 2 : 1;
+            int x1 = x + w;
+            if (!(c.text.size() == 1 && c.text.data()[0] == ' ')) {
+                // Runs of plain ASCII in one colour; one cell at a time otherwise.
+                QString run = QString::fromUtf8(c.text.data(), int(c.text.size()));
+                if (c.text.size() == 1 && uint8_t(c.text.data()[0]) < 0x80 && w == 1) {
+                    while (x1 < cols) {
+                        const auto& n = f.cells[size_t(y * cols + x1)];
+                        if (n.fg != c.fg || n.bg != c.bg || n.flags != c.flags || n.text.size() != 1 || uint8_t(n.text.data()[0]) >= 0x80) break;
+                        run += QLatin1Char(n.text.data()[0]);
+                        ++x1;
+                    }
+                }
+                p->setPen(fg);
+                p->drawText(QPoint(x * gw, y * gh + ascent), run);
+            }
+            if (c.flags & 4) p->fillRect(QRect(x * gw, y * gh + 15 * m_k, (x1 - x) * gw, m_k), fg);
+            x = x1;
+        }
+    }
+    // The cursor: VGA's two bottom scan lines, or the whole cell.
+    if (f.cursor_shape >= 0 && f.cursor_x < cols && f.cursor_y < rows && hasActiveFocus()) {
+        const auto& c = f.cells[size_t(f.cursor_y * cols + f.cursor_x)];
+        const QRect r(f.cursor_x * gw, f.cursor_y * gh, ((c.flags & 16) ? 2 : 1) * gw, gh);
+        const QColor fg = rgb(c.fg);
+        if (f.cursor_shape == 0) p->fillRect(QRect(r.x(), r.y() + 14 * m_k, r.width(), 2 * m_k), fg);
+        else if (f.cursor_shape == 2) p->fillRect(QRect(r.x(), r.y(), 2 * m_k, r.height()), fg);
+        else {
+            p->fillRect(r, fg);
+            p->setPen(rgb(c.bg));
+            p->drawText(QPoint(r.x(), r.y() + ascent), QString::fromUtf8(c.text.data(), int(c.text.size())));
+        }
+    }
+    ip.end();
+    screen->setRenderHint(QPainter::SmoothPixmapTransform, true);
+    screen->drawImage(QRectF(0, 0, m_vgaSize.width() / qreal(m_dots * m_k) * m_cw, m_vgaSize.height() / 16.0 / m_k * m_ch), m_vgaImage);
+}
+
 void CellView::paint(QPainter* p)
 {
     // (The render thread: only the frame taken on the GUI thread, never Turbine itself.)
     if (!m_frame) return;
+    if (m_vga) return paintVga(p);
     const turbine::Frame& f = *m_frame;
     const QRectF all = boundingRect();
     p->setRenderHint(QPainter::Antialiasing, false);

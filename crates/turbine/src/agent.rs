@@ -126,11 +126,20 @@ impl Driver {
             if let Some(g) = self.glide {
                 let t = if g.dur.is_zero() { 1.0 } else { (now - g.start).as_secs_f64() / g.dur.as_secs_f64() };
                 let t = t.min(1.0);
-                // ease in-out
-                let e = t * t * (3.0 - 2.0 * t);
+                // Ease in-out. Like a person, the pointer leaves the menu bar
+                // row before it moves sideways, and lines up before going up
+                // to it: sliding along the bar would open the menus it passes.
+                let ease = |t: f64| t * t * (3.0 - 2.0 * t);
+                let (tx, ty) = if g.from.y == 0 && g.to.y > 0 {
+                    (((t - 0.15) / 0.85).clamp(0.0, 1.0), (t / 0.3).min(1.0))
+                } else if g.to.y == 0 && g.from.y > 0 {
+                    ((t / 0.7).min(1.0), ((t - 0.6) / 0.4).clamp(0.0, 1.0))
+                } else {
+                    (t, t)
+                };
                 let p = Point::new(
-                    g.from.x + ((g.to.x - g.from.x) as f64 * e).round() as i32,
-                    g.from.y + ((g.to.y - g.from.y) as f64 * e).round() as i32,
+                    g.from.x + ((g.to.x - g.from.x) as f64 * ease(tx)).round() as i32,
+                    g.from.y + ((g.to.y - g.from.y) as f64 * ease(ty)).round() as i32,
                 );
                 if Some(p) != self.pointer {
                     self.pointer = Some(p);
@@ -218,5 +227,39 @@ impl Driver {
             _ => 1.0,
         };
         Duration::from_secs_f64(base * f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every point the pointer passes on a glide from `from` to `to`.
+    fn path(from: Point, to: Point) -> Vec<Point> {
+        let mut d = Driver::new();
+        d.cps = 60.0;
+        d.pointer = Some(from);
+        d.queue.push_back(Step::MoveTo(to));
+        let t0 = Instant::now();
+        let mut pts = vec![from];
+        for ms in (0..1000).step_by(4) {
+            let (out, _) = d.tick(t0 + Duration::from_millis(ms));
+            pts.extend(out.into_iter().filter_map(|o| match o {
+                Output::Pointer(p, _) => Some(p),
+                _ => None,
+            }));
+        }
+        pts
+    }
+
+    #[test]
+    fn glides_leave_the_menu_bar_before_moving_sideways() {
+        // From a menu title down-left to one of its items, and back up.
+        let down = path(Point::new(70, 0), Point::new(62, 6));
+        assert_eq!(down.last(), Some(&Point::new(62, 6)));
+        assert!(down.iter().all(|p| p.y > 0 || p.x == 70), "slid along the bar: {down:?}");
+        let up = path(Point::new(62, 6), Point::new(20, 0));
+        assert_eq!(up.last(), Some(&Point::new(20, 0)));
+        assert!(up.iter().all(|p| p.y > 0 || p.x == 20), "slid along the bar: {up:?}");
     }
 }

@@ -109,6 +109,15 @@ pub struct Scheme {
     pub title_active: Style,
     pub title_inactive: Style,
     pub dialog_title: Style,
+    /// Dialog lists, and their selected item with and without focus.
+    pub list: Style,
+    pub list_selected: Style,
+    pub list_selected_unfocused: Style,
+    /// A label's hotkey letter, and a label whose control has focus.
+    pub label_hotkey: Style,
+    pub label_focused: Style,
+    /// The default button's text (Turbo Vision: light cyan).
+    pub button_default: Style,
 }
 
 /// Highlight kinds, in index order (the same list as turbine-syntax's).
@@ -194,6 +203,12 @@ impl Scheme {
             title_active: s!(WHITE on BLUE),
             title_inactive: s!(LIGHT_GRAY on BLUE),
             dialog_title: s!(WHITE on LIGHT_GRAY),
+            list: s!(BLACK on CYAN),
+            list_selected: s!(WHITE on GREEN),
+            list_selected_unfocused: s!(YELLOW on CYAN),
+            label_hotkey: s!(YELLOW on LIGHT_GRAY),
+            label_focused: s!(WHITE on LIGHT_GRAY),
+            button_default: s!(LIGHT_CYAN on GREEN),
         }
     }
 
@@ -239,6 +254,12 @@ impl Scheme {
             title_active: s!(WHITE on BLUE),
             title_inactive: s!(LIGHT_GRAY on BLUE),
             dialog_title: s!(WHITE on LIGHT_GRAY),
+            list: s!(BLACK on LIGHT_GRAY),
+            list_selected: s!(LIGHT_GRAY on BLACK),
+            list_selected_unfocused: s!(LIGHT_GRAY on BLACK),
+            label_hotkey: s!(WHITE on LIGHT_GRAY),
+            label_focused: s!(BLACK on LIGHT_GRAY),
+            button_default: s!(BLACK on LIGHT_GRAY),
         }
     }
 
@@ -345,6 +366,12 @@ impl Scheme {
             title_active: r,
             title_inactive: n,
             dialog_title: r,
+            list: n,
+            list_selected: r,
+            list_selected_unfocused: r,
+            label_hotkey: Style { attrs: Attrs { bold: true, ..Attrs::default() }, ..r },
+            label_focused: r,
+            button_default: n,
         }
     }
 
@@ -409,6 +436,13 @@ pub struct ControlStyle {
     pub title_bar: bool,
     /// Status line hints as `F1=Help │ …` (VB-DOS).
     pub status_rules: bool,
+    /// Text mode dots per character: 9 (VGA's usual) or 8 (VB-DOS
+    /// switches to 8-dot characters for its redefined glyphs). The desktop
+    /// app draws the VGA font at this width.
+    pub dots: u8,
+    /// Text fields, drop-downs and lists sit in boxes, a field's label beside
+    /// it (QBasic, VB-DOS); VB-DOS's boxes are sunken 3-D ones.
+    pub boxed_fields: bool,
 }
 
 impl ControlStyle {
@@ -435,6 +469,8 @@ impl ControlStyle {
             line_numbers: true,
             scheme: None,
             title_bar: false,
+            dots: 9,
+            boxed_fields: false,
             status_rules: false,
         }
     }
@@ -465,6 +501,8 @@ impl ControlStyle {
             line_numbers: false,
             scheme: Some("QBasic"),
             title_bar: false,
+            dots: 9,
+            boxed_fields: true,
             status_rules: false,
         }
     }
@@ -479,6 +517,8 @@ impl ControlStyle {
             zoom_icon: "▼▲",
             title_reverse: false,
             title_bar: true,
+            dots: 8,
+            boxed_fields: true,
             status_rules: true,
             scheme: Some("VB-DOS"),
             dialog_frame: BLANK,
@@ -509,6 +549,8 @@ impl ControlStyle {
             line_numbers: true,
             scheme: None,
             title_bar: false,
+            dots: 9,
+            boxed_fields: false,
             status_rules: false,
         }
     }

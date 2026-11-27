@@ -7,6 +7,7 @@
 #include <QtCore/QTimer>
 #include <memory>
 #include <QtGui/QFont>
+#include <QtGui/QImage>
 #include <QtQuick/QQuickPaintedItem>
 
 namespace turbine { struct Frame; }
@@ -50,12 +51,22 @@ private:
     void afterInput();
     QPoint cellAt(QPointF pos) const;
     bool drawShape(QPainter* p, char32_t c, const QRectF& r, const QColor& fg, const QColor& bg);
+    void paintVga(QPainter* p);
 
     // The frame to paint, taken on the GUI thread: Turbine's state lives
     // there, and paint() runs on Qt Quick's render thread on a real display.
     std::shared_ptr<turbine::Frame> m_frame;
     QFont m_font, m_bold, m_italic, m_boldItalic;
     qreal m_cw = 8, m_ch = 16, m_ascent = 12;
+    // VGA mode (the default with the DOS font installed): the screen is
+    // drawn at text mode's own pixels, 8 or 9 dots by 16 per character
+    // (each dot m_k texture pixels), and the texture is stretched to the
+    // cells as a 4:3 monitor did: dots 1.35 times taller than wide.
+    bool m_vga = false;
+    int m_k = 2, m_dots = 9;
+    QFont m_vga9, m_vga8;
+    QSize m_vgaSize;
+    QImage m_vgaImage;
     int m_cols = 0, m_rows = 0;
     QTimer m_timer;
     QString m_title, m_menusJson;
