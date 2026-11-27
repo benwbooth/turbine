@@ -272,7 +272,7 @@ impl Workbench {
         let focused = self.shell.focus == Focus::Find && self.dialog.is_none() && !self.menubar.is_open();
         c.fill(r, " ", s.dialog);
         turbine_ui::frame::draw_frame(c, r, theme.style.menu_frame, s.dialog_frame);
-        turbine_ui::frame::draw_title(c, r, if self.find.replacing { "Replace" } else { "Find" }, s.dialog_frame);
+        turbine_ui::frame::draw_title_in(c, r, if self.find.replacing { "Replace" } else { "Find" }, s.dialog_frame, 2);
         if theme.style.shadows {
             c.shadow(r, s.shadow);
         }

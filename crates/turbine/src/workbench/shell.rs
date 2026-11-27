@@ -1167,7 +1167,7 @@ impl Workbench {
         let p = self.shell.palette.as_mut().unwrap();
         c.fill(r, " ", s.menu);
         turbine_ui::frame::draw_frame(c, r, theme.style.menu_frame, s.menu);
-        turbine_ui::frame::draw_title(c, r, p.title(), s.menu);
+        turbine_ui::frame::draw_title_in(c, r, p.title(), s.menu, 2);
         if theme.style.shadows {
             c.shadow(r, s.shadow);
         }
