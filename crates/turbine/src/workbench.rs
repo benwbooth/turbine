@@ -23,6 +23,7 @@ mod images;
 mod inline_ai;
 mod lsp_more;
 mod preview;
+mod sections;
 mod session;
 mod tooltip;
 mod settings;
@@ -5225,6 +5226,50 @@ mod tests {
         keys(&mut wb, &["x", "Esc"]);
         assert_eq!(wb.windows.last().unwrap().ed.doc.rope.to_string(), "# Notes\n");
         assert_eq!(wb.doc_mode(id), docview::Mode::Source);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn outline_and_timeline_sit_under_the_explorer() {
+        let (dir, mut wb) = project("sections");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").arg("-C").arg(&dir).args(args).env("GIT_AUTHOR_NAME", "T").env("GIT_AUTHOR_EMAIL", "t@x").env("GIT_COMMITTER_NAME", "T").env("GIT_COMMITTER_EMAIL", "t@x").output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "First commit"]);
+        wb.goto_file(&dir.join("src/main.rs"), Some(0), 0);
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        // Outline open below the Explorer: main's symbol listed.
+        wait_until(&mut wb, "the outline", |wb| wb.shell.outline.list.rows.iter().any(|r| r.text.contains("main")));
+        let l = wb.layout();
+        let (main, secs) = wb.shell.dock.sections_in(Side::Left, l.left.unwrap()).unwrap();
+        assert_eq!(secs.len(), 2);
+        assert!(secs[0].2.is_some() && secs[1].2.is_none(), "Outline open, Timeline folded");
+        assert!(main.h >= 4 && wb.shell.outline.list.area == secs[0].2.unwrap());
+        // Timeline: a click on its title opens it; it lists the commit.
+        let th = secs[1].1;
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(th.x + 3, th.y), mods: Mods::NONE }));
+        wait_until(&mut wb, "the timeline", |wb| wb.shell.timeline.list.rows.iter().any(|r| r.text == "First commit"));
+        // Dragging the Outline's header resizes it.
+        let (_, secs) = wb.shell.dock.sections_in(Side::Left, wb.layout().left.unwrap()).unwrap();
+        let (h, oh) = (secs[0].1, secs[0].2.unwrap().h);
+        let at = Point::new(h.right() - 3, h.y);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: at, mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Drag(Button::Left), pos: Point::new(at.x, at.y - 2), mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: Point::new(at.x, at.y - 2), mods: Mods::NONE }));
+        let (_, secs) = wb.shell.dock.sections_in(Side::Left, wb.layout().left.unwrap()).unwrap();
+        assert_eq!(secs[0].2.unwrap().h, oh + 2);
+        // Enter on the commit: its change as a diff page.
+        let (_, secs) = wb.shell.dock.sections_in(Side::Left, wb.layout().left.unwrap()).unwrap();
+        let b = secs[1].2.unwrap();
+        for _ in 0..2 {
+            wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(b.x + 3, b.y), mods: Mods::NONE }));
+            wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: Point::new(b.x + 3, b.y), mods: Mods::NONE }));
+        }
+        wait_until(&mut wb, "the diff", |wb| wb.windows.last().is_some_and(|w| w.win.title.contains("main.rs @")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

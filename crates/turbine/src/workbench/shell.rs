@@ -3,6 +3,7 @@
 //! commands for them. See `crate::dock` for the geometry.
 
 use super::*;
+use super::sections;
 use crate::dock::{Dock, Layout, Tab};
 use crate::palette::{self, Palette, Pick};
 use std::collections::HashMap;
@@ -29,6 +30,9 @@ pub(super) struct Shell {
     pub focus: Focus,
     pub explorer: Explorer,
     pub outline: Outline,
+    pub timeline: sections::Timeline,
+    /// A section header being dragged: (section, from row, its size then).
+    pub section_drag: Option<(usize, i32, i32)>,
     pub search: Search,
     pub scm: Scm,
     pub problems: ListView,
@@ -93,6 +97,8 @@ impl Shell {
             focus: Focus::Editors,
             explorer: Explorer::new(root),
             outline: Outline::default(),
+            timeline: sections::Timeline::default(),
+            section_drag: None,
             search: Search::default(),
             scm: Scm::default(),
             problems: ListView::new(),
@@ -295,7 +301,8 @@ impl Workbench {
         }
         self.panel_order();
         if let Focus::View(t) = self.shell.focus {
-            if self.shell.dock.side_of(t).is_none_or(|s| !self.shell.dock.part(s).visible) {
+            let section = self.shell.dock.sections.iter().any(|(x, ..)| *x == t);
+            if (section && !self.section_shown(t)) || self.shell.dock.side_of(t).is_none_or(|s| !self.shell.dock.part(s).visible) {
                 self.shell.focus = Focus::Editors;
             }
         }
@@ -315,6 +322,16 @@ impl Workbench {
             let inner = Dock::content(r);
             let below_field = Rect::new(inner.x, inner.y + 2, inner.w, (inner.h - 2).max(0));
             let area = if matches!(t, Tab::Search | Tab::Scm) { below_field } else { inner };
+            // (The Explorer above its sections.)
+            if let Some((main, secs)) = self.shell.dock.sections_in(side, r) {
+                self.shell.explorer.list.area = main;
+                for (st, _, body) in secs {
+                    if let (Some(b), Some(list)) = (body, self.view_list(st)) {
+                        list.area = b;
+                    }
+                }
+                continue;
+            }
             if let Some(list) = self.view_list(t) {
                 list.area = area;
             }
@@ -539,6 +556,7 @@ impl Workbench {
             Tab::Debug => "\u{eb91}",
             Tab::Extensions => "\u{eae6}",
             Tab::Problems => "\u{ea6c}",
+            Tab::Timeline => "\u{ea82}",
             Tab::Output => "\u{eb9d}",
             Tab::DebugConsole => "\u{eb8e}",
             Tab::Terminal => "\u{ea85}",
@@ -556,7 +574,8 @@ impl Workbench {
     // ---- keeping the views current ----------------------------------------------------
 
     pub(super) fn update_views(&mut self) {
-        let shown = |wb: &Workbench, t: Tab| wb.shell.dock.side_of(t).is_some_and(|s| wb.shell.dock.part(s).visible && wb.shell.dock.part(s).current() == Some(t));
+        self.timeline_tick();
+        let shown = |wb: &Workbench, t: Tab| wb.section_shown(t) || wb.shell.dock.side_of(t).is_some_and(|s| wb.shell.dock.part(s).visible && wb.shell.dock.part(s).current() == Some(t));
         let explorer_shown = shown(self, Tab::Explorer);
         self.shell.explorer.poll(explorer_shown);
         let root = self.shell.explorer.root.clone();
@@ -1041,7 +1060,8 @@ impl Workbench {
     pub(super) fn layout_json(&self) -> Value {
         let d = &self.shell.dock;
         let part = |p: &crate::dock::Part| json!({"visible": p.visible, "size": p.size, "active": p.current().filter(|t| !matches!(t, Tab::Pane(_))).map(|t| t.key())});
-        json!({"left": part(&d.left), "bottom": part(&d.bottom), "right": part(&d.right), "editor_tabs": d.editor_tabs, "breadcrumbs": d.breadcrumbs, "minimap": self.shell.minimap})
+        let sections: Vec<Value> = d.sections.iter().map(|(t, open, size)| json!({"view": t.key(), "open": open, "size": size})).collect();
+        json!({"left": part(&d.left), "bottom": part(&d.bottom), "right": part(&d.right), "editor_tabs": d.editor_tabs, "breadcrumbs": d.breadcrumbs, "minimap": self.shell.minimap, "sections": sections})
     }
 
     pub(super) fn apply_layout_json(&mut self, v: &Value) {
@@ -1066,6 +1086,16 @@ impl Workbench {
         if let Some(b) = v["editor_tabs"].as_bool() {
             self.shell.dock.editor_tabs = b;
         }
+        for sv in v["sections"].as_array().into_iter().flatten() {
+            if let Some(s) = self.shell.dock.sections.iter_mut().find(|(t, ..)| Some(t.key().as_str()) == sv["view"].as_str()) {
+                s.1 = sv["open"].as_bool().unwrap_or(s.1);
+                s.2 = sv["size"].as_i64().map_or(s.2, |n| (n as i32).clamp(2, 200));
+            }
+        }
+        // (Outline was a tab of its own before: it's a section now.)
+        let cur = self.shell.dock.left.current();
+        self.shell.dock.left.tabs.retain(|t| *t != Tab::Outline);
+        self.shell.dock.left.active = cur.and_then(|c| self.shell.dock.left.tabs.iter().position(|x| *x == c)).unwrap_or(0);
         if let Some(b) = v["breadcrumbs"].as_bool() {
             self.shell.dock.breadcrumbs = b;
         }
@@ -1078,7 +1108,8 @@ impl Workbench {
     pub(super) fn shell_command(&mut self, cmd: &str) -> bool {
         match cmd {
             "view.files" => self.show_tab(Tab::Explorer),
-            "view.outline" => self.show_tab(Tab::Outline),
+            "view.outline" => self.show_section(Tab::Outline),
+            "view.timeline" => self.show_section(Tab::Timeline),
             "view.search" | "search.files" => self.show_tab(Tab::Search),
             "view.scm" => self.show_tab(Tab::Scm),
             "view.debug" => self.show_tab(Tab::Debug),
@@ -1397,8 +1428,13 @@ impl Workbench {
                 }
                 _ => {}
             },
+            Tab::Timeline => self.timeline_key(k),
             Tab::Pane(_) | Tab::Output | Tab::DebugConsole | Tab::Terminal => {}
         }
+    }
+
+    pub(super) fn outline_goto_pub(&mut self, i: usize, focus: bool) {
+        self.outline_goto(i, focus);
     }
 
     fn outline_goto(&mut self, i: usize, focus: bool) {
@@ -1468,6 +1504,10 @@ impl Workbench {
                     }
                 }
             }
+        }
+        // The Explorer's sections: their headers and lists.
+        if self.section_mouse(m) {
+            return true;
         }
         let press = matches!(m.kind, MouseKind::Down(Button::Left));
         // (The panel's top edge drags it taller, but not on a tab or button.)
@@ -1598,6 +1638,7 @@ impl Workbench {
             Tab::Problems => &mut self.shell.problems,
             Tab::Debug => &mut self.shell.debug_view,
             Tab::Extensions => &mut self.shell.extensions.list,
+            Tab::Timeline => &mut self.shell.timeline.list,
             Tab::Pane(_) | Tab::Output | Tab::DebugConsole | Tab::Terminal => return None,
         })
     }
@@ -1814,9 +1855,12 @@ impl Workbench {
                 }
                 Some(t) => {
                     let f = view_focus(t);
+                    // (The Explorer with its sections below it.)
+                    let area = self.shell.dock.sections_in(side, r).map_or(inner, |(main, _)| main);
                     if let Some(list) = self.view_list(t) {
-                        list.draw(c, inner, theme, f);
+                        list.draw(c, area, theme, f);
                     }
+                    self.draw_sections(c, theme, side, r, focused);
                 }
                 None => {}
             }

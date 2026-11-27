@@ -31,6 +31,8 @@ pub enum Tab {
     Debug,
     Extensions,
     Problems,
+    /// The current file's history (git), a section under the Explorer.
+    Timeline,
     /// The panel's own tabs, as VS Code's: each opens its window (which
     /// then takes the tab's place) when it's picked.
     Output,
@@ -49,6 +51,7 @@ impl Tab {
             Tab::Debug => "Run and Debug",
             Tab::Extensions => "Extensions",
             Tab::Problems => "Problems",
+            Tab::Timeline => "Timeline",
             Tab::Output => "Output",
             Tab::DebugConsole => "Debug Console",
             Tab::Terminal => "Terminal",
@@ -65,6 +68,7 @@ impl Tab {
             Tab::Debug => "D",
             Tab::Extensions => "X",
             Tab::Problems => "P",
+            Tab::Timeline => "M",
             Tab::Output => "L",
             Tab::DebugConsole => "C",
             Tab::Terminal => "T",
@@ -150,13 +154,16 @@ pub struct Dock {
     pub icons: bool,
     /// The panel covers the editors (VS Code's Maximize Panel Size).
     pub maximized: bool,
+    /// Sections under the Explorer, as VS Code stacks them: (view, open,
+    /// rows when open).
+    pub sections: Vec<(Tab, bool, i32)>,
     drag: Option<Drag>,
 }
 
 impl Default for Dock {
     fn default() -> Self {
         Dock {
-            left: Part { visible: true, size: 30, tabs: vec![Tab::Explorer, Tab::Outline, Tab::Search, Tab::Scm, Tab::Debug, Tab::Extensions], active: 0 },
+            left: Part { visible: true, size: 30, tabs: vec![Tab::Explorer, Tab::Search, Tab::Scm, Tab::Debug, Tab::Extensions], active: 0 },
             bottom: Part { visible: false, size: 12, tabs: vec![Tab::Problems, Tab::Output, Tab::DebugConsole, Tab::Terminal], active: 0 },
             right: Part { visible: false, size: 46, tabs: Vec::new(), active: 0 },
             editor_tabs: true,
@@ -164,6 +171,7 @@ impl Default for Dock {
             crumbs_hidden: false,
             icons: false,
             maximized: false,
+            sections: vec![(Tab::Outline, true, 10), (Tab::Timeline, false, 8)],
             drag: None,
         }
     }
@@ -187,7 +195,44 @@ impl Dock {
 
     /// Which part has this tab.
     pub fn side_of(&self, t: Tab) -> Option<Side> {
-        [Side::Left, Side::Bottom, Side::Right].into_iter().find(|s| self.part(*s).tabs.contains(&t))
+        [Side::Left, Side::Bottom, Side::Right].into_iter().find(|s| self.part(*s).tabs.contains(&t)).or_else(|| {
+            // (A section goes with the Explorer.)
+            self.sections.iter().any(|(x, ..)| *x == t).then(|| self.side_of(Tab::Explorer)).flatten()
+        })
+    }
+
+    /// The Explorer's part split into the Explorer and its sections below:
+    /// (the Explorer's place, each section's header row and its body when
+    /// open). None when the part doesn't show the Explorer.
+    pub fn sections_in(&self, side: Side, r: Rect) -> Option<(Rect, Vec<(Tab, Rect, Option<Rect>)>)> {
+        let part = self.part(side);
+        if part.current() != Some(Tab::Explorer) || self.sections.is_empty() {
+            return None;
+        }
+        let inner = Self::content(r);
+        // (The Explorer keeps 4 rows at least; sections shrink first.)
+        let headers = self.sections.len() as i32;
+        let room = (inner.h - 4 - headers).max(0);
+        let mut want: Vec<i32> = self.sections.iter().map(|(_, open, size)| if *open { (*size).max(2) } else { 0 }).collect();
+        while want.iter().sum::<i32>() > room {
+            let Some(m) = want.iter_mut().max_by_key(|w| **w) else { break };
+            if *m == 0 {
+                break;
+            }
+            *m -= 1;
+        }
+        let mut y = inner.bottom();
+        let mut out = Vec::new();
+        for (i, (t, open, _)) in self.sections.iter().enumerate().rev() {
+            let body = (*open && want[i] > 0).then(|| {
+                y -= want[i];
+                Rect::new(inner.x, y, inner.w, want[i])
+            });
+            y -= 1;
+            out.push((*t, Rect::new(r.x, y, r.w, 1), body));
+        }
+        out.reverse();
+        Some((Rect::new(inner.x, inner.y, inner.w, (y - inner.y).max(0)), out))
     }
 
     /// Show a tab (its part too).
