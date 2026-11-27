@@ -4726,11 +4726,15 @@ mod tests {
     fn run(wb: &mut Workbench, cmd: Value) -> Value {
         let (tx, rx) = mpsc::channel();
         wb.request(cmd, tx);
-        for _ in 0..1000 {
+        // (By time, not ticks: optimised builds tick through a count before
+        // a background job is done.)
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(20) {
             wb.tick(Instant::now());
             if let Ok(v) = rx.try_recv() {
                 return v;
             }
+            std::thread::sleep(Duration::from_micros(200));
         }
         panic!("no reply");
     }
