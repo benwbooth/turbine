@@ -397,6 +397,72 @@ pub const DOUBLE: FrameChars = FrameChars { tl: "╔", tr: "╗", bl: "╚", br:
 pub const BLANK: FrameChars = FrameChars { tl: " ", tr: " ", bl: " ", br: " ", h: " ", v: " " };
 pub const ASCII: FrameChars = FrameChars { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" };
 
+/// How a dialog's buttons look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonLook {
+    /// The label between brackets: `< OK >` (QBasic), `[ OK ]`.
+    Brackets(&'static str, &'static str),
+    /// A bar of the button colour at least `min_w` wide, the label centred,
+    /// a half-block shadow right and below (Turbo Vision).
+    Bar { min_w: i32 },
+    /// A 3-D box lit from the top left, in double lines when it's the
+    /// default or has focus (VB-DOS).
+    Box3d,
+}
+
+/// How text fields, drop-downs and lists look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldLook {
+    /// A bar of the field colour, the label on the row above (Turbo Vision).
+    Bar,
+    /// In a box of the frame's colour, the label beside it (QBasic).
+    Box,
+    /// In a sunken 3-D box (dark top and left, white bottom and right), the
+    /// label beside it (VB-DOS).
+    Sunken,
+}
+
+/// Where a dialog's buttons go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonPlace {
+    /// Spread along the bottom edge under a line across the dialog (QBasic).
+    BottomRule,
+    /// In a column at the right beside a list, else a row centred at the
+    /// bottom (Turbo Vision, VB-DOS).
+    Beside,
+}
+
+/// How dialogs and their controls are drawn and spaced. Each control style
+/// describes its own, so the layout and drawing code has no styles in it.
+#[derive(Clone, Copy, Debug)]
+pub struct ControlLook {
+    pub button: ButtonLook,
+    pub field: FieldLook,
+    pub buttons: ButtonPlace,
+    /// Blank rows between controls in a column; blank columns between
+    /// controls in a row.
+    pub row_gap: i32,
+    pub col_gap: i32,
+    /// The same between buttons in a column, and in a row.
+    pub button_row_gap: i32,
+    pub button_col_gap: i32,
+    /// A drop-down's arrow: a history button beside the field (Turbo
+    /// Vision's ▐↓▌), else a ↓ at the end of the field.
+    pub combo_arrow_beside: bool,
+    /// Blank space inside the dialog's frame: columns at each side, rows at
+    /// the top and at the bottom.
+    pub pad_x: i32,
+    pub pad_top: i32,
+    pub pad_bottom: i32,
+}
+
+impl ControlLook {
+    /// Fields, drop-downs and lists in boxes, labels beside fields.
+    pub fn boxed(&self) -> bool {
+        self.field != FieldLook::Bar
+    }
+}
+
 /// How controls are drawn.
 #[derive(Clone, Debug)]
 pub struct ControlStyle {
@@ -405,8 +471,6 @@ pub struct ControlStyle {
     pub inactive_frame: FrameChars,
     pub menu_frame: FrameChars,
     pub shadows: bool,
-    /// Text around a button label, e.g. ("< ", " >") or ("[ ", " ]").
-    pub button: (&'static str, &'static str),
     pub close_icon: &'static str,
     pub zoom_icon: &'static str,
     pub resize_grip: &'static str,
@@ -424,9 +488,10 @@ pub struct ControlStyle {
     pub hotkeys_when_active: bool,
     /// Status line key hints as `<F1=Help>` and the position as `00001:001`.
     pub dos_status: bool,
-    /// Dialogs: their frame, and a dividing line above the buttons.
+    /// Dialogs' frame.
     pub dialog_frame: FrameChars,
-    pub dialog_rule: bool,
+    /// Dialogs' controls.
+    pub controls: ControlLook,
     /// Editors show line numbers (QBasic and Edit never did).
     pub line_numbers: bool,
     /// The whole look comes with this colour scheme (by name).
@@ -440,9 +505,6 @@ pub struct ControlStyle {
     /// switches to 8-dot characters for its redefined glyphs). The desktop
     /// app draws the VGA font at this width.
     pub dots: u8,
-    /// Text fields, drop-downs and lists sit in boxes, a field's label beside
-    /// it (QBasic, VB-DOS); VB-DOS's boxes are sunken 3-D ones.
-    pub boxed_fields: bool,
 }
 
 impl ControlStyle {
@@ -453,7 +515,6 @@ impl ControlStyle {
             inactive_frame: SINGLE,
             menu_frame: SINGLE,
             shadows: true,
-            button: ("  ", "  "),
             close_icon: "[■]",
             zoom_icon: "[↑]",
             resize_grip: "┘",
@@ -465,12 +526,23 @@ impl ControlStyle {
             hotkeys_when_active: false,
             dos_status: false,
             dialog_frame: DOUBLE,
-            dialog_rule: false,
+            controls: ControlLook {
+                button: ButtonLook::Bar { min_w: 10 },
+                field: FieldLook::Bar,
+                buttons: ButtonPlace::Beside,
+                row_gap: 1,
+                col_gap: 2,
+                button_row_gap: 1,
+                button_col_gap: 2,
+                combo_arrow_beside: true,
+                pad_x: 1,
+                pad_top: 1,
+                pad_bottom: 1,
+            },
             line_numbers: true,
             scheme: None,
             title_bar: false,
             dots: 9,
-            boxed_fields: false,
             status_rules: false,
         }
     }
@@ -485,7 +557,6 @@ impl ControlStyle {
             inactive_frame: SINGLE,
             menu_frame: SINGLE,
             shadows: true,
-            button: ("< ", " >"),
             close_icon: "",
             zoom_icon: "┤↑├",
             resize_grip: "",
@@ -497,12 +568,23 @@ impl ControlStyle {
             hotkeys_when_active: true,
             dos_status: true,
             dialog_frame: SINGLE,
-            dialog_rule: true,
+            controls: ControlLook {
+                button: ButtonLook::Brackets("< ", " >"),
+                field: FieldLook::Box,
+                buttons: ButtonPlace::BottomRule,
+                row_gap: 0,
+                col_gap: 2,
+                button_row_gap: 0,
+                button_col_gap: 2,
+                combo_arrow_beside: false,
+                pad_x: 1,
+                pad_top: 0,
+                pad_bottom: 0,
+            },
             line_numbers: false,
             scheme: Some("QBasic"),
             title_bar: false,
             dots: 9,
-            boxed_fields: true,
             status_rules: false,
         }
     }
@@ -518,11 +600,22 @@ impl ControlStyle {
             title_reverse: false,
             title_bar: true,
             dots: 8,
-            boxed_fields: true,
             status_rules: true,
             scheme: Some("VB-DOS"),
             dialog_frame: BLANK,
-            dialog_rule: false,
+            controls: ControlLook {
+                button: ButtonLook::Box3d,
+                field: FieldLook::Sunken,
+                buttons: ButtonPlace::Beside,
+                row_gap: 0,
+                col_gap: 2,
+                button_row_gap: 0,
+                button_col_gap: 2,
+                combo_arrow_beside: false,
+                pad_x: 1,
+                pad_top: 1,
+                pad_bottom: 1,
+            },
             ..ControlStyle::qbasic()
         }
     }
@@ -533,7 +626,6 @@ impl ControlStyle {
             inactive_frame: ASCII,
             menu_frame: ASCII,
             shadows: false,
-            button: ("[ ", " ]"),
             close_icon: "[x]",
             zoom_icon: "[^]",
             resize_grip: "+",
@@ -545,12 +637,23 @@ impl ControlStyle {
             hotkeys_when_active: false,
             dos_status: false,
             dialog_frame: ASCII,
-            dialog_rule: false,
+            controls: ControlLook {
+                button: ButtonLook::Brackets("[ ", " ]"),
+                field: FieldLook::Bar,
+                buttons: ButtonPlace::Beside,
+                row_gap: 1,
+                col_gap: 2,
+                button_row_gap: 1,
+                button_col_gap: 2,
+                combo_arrow_beside: false,
+                pad_x: 1,
+                pad_top: 1,
+                pad_bottom: 1,
+            },
             line_numbers: true,
             scheme: None,
             title_bar: false,
             dots: 9,
-            boxed_fields: false,
             status_rules: false,
         }
     }

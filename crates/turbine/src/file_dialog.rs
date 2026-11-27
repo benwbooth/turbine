@@ -23,8 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use turbine_text::encoding::{CodePage, LineEnding, TextEncoding};
-use turbine_ui::dialog::{Anchors, Dialog};
-use turbine_ui::Rect;
+use turbine_ui::dialog::{self as ui, Dialog};
 
 pub struct Entry {
     pub name: String,
@@ -74,8 +73,6 @@ pub struct FileDialog {
     /// Indexes into `entries` of the rows shown (the first may be "..").
     pub shown: Vec<Option<usize>>,
     pub places: Vec<(String, PathBuf)>,
-    /// The control index of the label showing the folder.
-    path_label: usize,
     /// The files list's width the rows were laid out for.
     width: i32,
 }
@@ -123,7 +120,6 @@ impl FileDialog {
         recent: &[PathBuf],
         encoding: Option<(TextEncoding, bool)>,
         line_ending: LineEnding,
-        screen: (i32, i32),
     ) -> (FileDialog, Dialog) {
         let mut places: Vec<(String, PathBuf)> = Vec::new();
         if let Some(h) = home() {
@@ -145,29 +141,18 @@ impl FileDialog {
             }
         }
 
-        let (w, h) = (74, 24);
         let title = if save { "Save As" } else { "Open" };
-        let mut d = Dialog::new("filedlg", title, w, h)
-            .input("fname", 1, 1, 52, "File ~n~ame:", name)
-            .anchor(Anchors::TOP_WIDE)
-            .button("ok", 57, 1, if save { "~S~ave" } else { "~O~pen" }, true)
-            .anchor(Anchors::TOP_RIGHT)
-            .button("cancel", 57, 4, "Cancel", false)
-            .anchor(Anchors::TOP_RIGHT)
-            .label(1, 3, &dir.display().to_string())
-            .anchor(Anchors::TOP_LEFT)
-            .group("~P~laces", Rect::new(0, 4, 17, 14))
-            .anchor(Anchors::LEFT_TALL)
-            .list("places", Rect::new(1, 5, 15, 12), places.iter().map(|(l, _)| l.clone()).collect(), 0)
-            .anchor(Anchors::LEFT_TALL)
-            .group("~F~iles", Rect::new(17, 4, 38, 14))
-            .anchor(Anchors::ALL)
-            .activating_list("files", Rect::new(18, 5, 36, 12), Some(""), Vec::new(), 0)
-            .anchor(Anchors::ALL)
-            .combo("type", 1, 20, 34, "Files of ~t~ype:", TYPES.iter().map(|(l, _)| l.to_string()).collect(), 0)
-            .anchor(Anchors::BOTTOM_LEFT)
-            .check("hidden", 38, 20, "~H~idden files", false)
-            .anchor(Anchors::BOTTOM_LEFT);
+        let places_list = ui::list("places", places.iter().map(|(l, _)| l.clone()).collect(), 0).grow_x(false).lines(12);
+        let files_list = ui::list("files", Vec::new(), 0).activates().header("").chars(62).lines(12);
+        let mut rows = vec![
+            ui::input("fname", "File ~n~ame:", name).chars(40),
+            ui::label(&dir.display().to_string()).id("path").chars(40),
+            ui::row(vec![ui::group("~P~laces", places_list), ui::group("~F~iles", files_list)]).grow_y(true),
+            ui::row(vec![
+                ui::combo("type", "Files of ~t~ype:", TYPES.iter().map(|(l, _)| l.to_string()).collect(), 0),
+                ui::check("hidden", "~H~idden files", false),
+            ]),
+        ];
         if save {
             let enc = encoding
                 .and_then(|(e, bom)| {
@@ -176,18 +161,16 @@ impl FileDialog {
                 })
                 .unwrap_or(0);
             let le = LINE_ENDINGS.iter().position(|(_, l)| *l == line_ending).unwrap_or(0);
-            d = d
-                .combo("encoding", 57, 8, 15, "~E~ncoding:", ENCODINGS.iter().map(|(l, _, _)| l.to_string()).collect(), enc)
-                .anchor(Anchors::TOP_RIGHT)
-                .combo("eol", 57, 11, 15, "~L~ine endings:", LINE_ENDINGS.iter().map(|(l, _)| l.to_string()).collect(), le)
-                .anchor(Anchors::TOP_RIGHT);
+            rows.push(ui::row(vec![
+                ui::combo("encoding", "~E~ncoding:", ENCODINGS.iter().map(|(l, _, _)| l.to_string()).collect(), enc),
+                ui::combo("eol", "~L~ine endings:", LINE_ENDINGS.iter().map(|(l, _)| l.to_string()).collect(), le),
+            ]));
         }
-        d = d.min_size(56, 18).sized((screen.0 * 4 / 5).clamp(w, 140), (screen.1 * 4 / 5).clamp(h, 50));
+        let mut d = Dialog::new("filedlg", title)
+            .body(ui::col(rows))
+            .buttons(vec![ui::button("ok", if save { "~S~ave" } else { "~O~pen" }, true), ui::button("cancel", "Cancel", false)]);
         d.focus_id("fname");
-        let path_label = 3;
-        let mut f = FileDialog { save, dir, entries: Vec::new(), shown: Vec::new(), places, path_label, width: 36 };
-        d.layout(Rect::new(0, 0, screen.0, screen.1));
-        f.width = f.list_width(&d);
+        let mut f = FileDialog { save, dir, entries: Vec::new(), shown: Vec::new(), places, width: 62 };
         f.read_dir();
         f.refresh(&mut d);
         (f, d)
@@ -280,12 +263,12 @@ impl FileDialog {
                 _ => "Name".to_string(),
             });
         }
-        d.set_label(self.path_label, &self.dir.display().to_string());
+        d.set_label("path", &self.dir.display().to_string());
         self.shown = shown;
     }
 
     fn list_width(&self, d: &Dialog) -> i32 {
-        d.controls.iter().position(|p| p.control.id() == Some("files")).map(|i| d.control_rect(i).w).unwrap_or(36)
+        d.controls.iter().position(|p| p.control.id() == Some("files")).map(|i| d.content_rect(i).w).unwrap_or(36)
     }
 
     /// After a layout: lay the rows out again if the list changed width.
@@ -376,7 +359,9 @@ mod tests {
         std::fs::write(dir.join("main.rs"), "fn main() {}").unwrap();
         std::fs::write(dir.join("notes.txt"), "hi").unwrap();
         std::fs::write(dir.join(".hidden"), "").unwrap();
-        let (mut f, mut d) = FileDialog::new(false, dir.clone(), "", None, &[], None, LineEnding::Lf, (100, 30));
+        let (mut f, mut d) = FileDialog::new(false, dir.clone(), "", None, &[], None, LineEnding::Lf);
+        d.layout(turbine_ui::Rect::new(0, 0, 120, 40), &turbine_ui::Theme::default());
+        f.fit(&mut d);
         let names = |d: &Dialog| d.automation_node().find_target("dialog.files").unwrap().children.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
         let n = names(&d);
         assert!(n[0] == "../" && n[1].starts_with("sub/") && n.iter().any(|x| x.starts_with("main.rs")), "{n:?}");
@@ -405,7 +390,7 @@ mod tests {
 
     #[test]
     fn save_as_chooses_encoding_and_line_endings() {
-        let (f, mut d) = FileDialog::new(true, std::env::temp_dir(), "x.bas", None, &[], Some((TextEncoding::Utf8, false)), LineEnding::Lf, (100, 30));
+        let (f, mut d) = FileDialog::new(true, std::env::temp_dir(), "x.bas", None, &[], Some((TextEncoding::Utf8, false)), LineEnding::Lf);
         assert_eq!(f.format(&d), Some((TextEncoding::Utf8, false, LineEnding::Lf)));
         for p in &mut d.controls {
             if let turbine_ui::dialog::Control::Combo { id, selected, .. } = &mut p.control {

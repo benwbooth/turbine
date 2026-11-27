@@ -45,6 +45,9 @@ impl Rect {
         let b = self.bottom().min(o.bottom());
         Rect::new(x, y, (r - x).max(0), (b - y).max(0))
     }
+    pub fn contains_rect(&self, o: Rect) -> bool {
+        o.x >= self.x && o.y >= self.y && o.right() <= self.right() && o.bottom() <= self.bottom()
+    }
     /// Shrink by `n` cells on every side.
     pub fn inset(&self, n: i32) -> Rect {
         Rect::new(self.x + n, self.y + n, (self.w - 2 * n).max(0), (self.h - 2 * n).max(0))

@@ -1,25 +1,26 @@
-//! Dialog boxes: movable, resizable, with controls that stretch and move
-//! with the box (anchors, as in WinForms).
+//! Dialog boxes: movable and resizable, laid out by their contents.
 //!
-//! A dialog is built at its natural size with controls placed inside it;
-//! when it grows or shrinks (dragged by an edge or corner, or the screen
-//! changes), each control keeps its distance to the edges it's anchored to.
-//! Controls get sensible anchors on their own (lists and group boxes
-//! stretch both ways, fields stretch across, buttons on the right or bottom
-//! follow those edges); `.anchor()` sets them explicitly.
+//! A dialog is a tree of controls in rows, columns and group boxes (see
+//! `row`, `col`, `group`), plus its buttons. Nothing has a fixed size: each
+//! control measures itself in the control style in use, so the same dialog
+//! looks like QBasic's (fields in boxes with their labels beside them,
+//! buttons spread along the bottom under a line), Turbo Vision's or
+//! VB-DOS's. Rows and columns share out the space the dialog has, so it
+//! can be dragged bigger or smaller and lists and fields stretch.
 
 use crate::automation::Node;
 use crate::event::{Button, Key, KeyEvent, KeyKind, MouseEvent, MouseKind};
 use crate::frame::{draw_frame, draw_title, draw_vscroll};
 use crate::geom::{Point, Rect};
 use crate::surface::{Canvas, CursorShape};
-use crate::theme::{Style, Theme, vga};
+use crate::theme::{ButtonLook, ButtonPlace, ControlStyle, FieldLook, Style, Theme, vga};
 use std::time::{Duration, Instant};
 use turbine_text::unicode::{grapheme_boundaries, str_width};
 
 #[derive(Debug, Clone)]
 pub enum Control {
-    Label { text: String },
+    /// Text; `id` (may be empty) lets `set_label` change it.
+    Label { id: String, text: String },
     Input { id: String, label: String, value: String, cursor: usize },
     Button { id: String, label: String, default: bool },
     /// A list; `header` is a column title row; `activates`: Enter and
@@ -43,6 +44,7 @@ impl Control {
             | Control::Check { id, .. }
             | Control::Radio { id, .. }
             | Control::Combo { id, .. } => Some(id),
+            Control::Label { id, .. } if !id.is_empty() => Some(id),
             Control::Label { .. } | Control::Group { .. } => None,
         }
     }
@@ -63,7 +65,7 @@ impl Control {
     }
     fn label_text(&self) -> String {
         match self {
-            Control::Label { text } => text.clone(),
+            Control::Label { text, .. } => text.clone(),
             Control::Input { label, .. }
             | Control::Check { label, .. }
             | Control::Radio { label, .. }
@@ -75,34 +77,200 @@ impl Control {
     }
 }
 
-/// Which edges a control keeps its distance to as the dialog resizes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Anchors {
-    pub left: bool,
-    pub top: bool,
-    pub right: bool,
-    pub bottom: bool,
-}
-
-impl Anchors {
-    pub const TOP_LEFT: Anchors = Anchors { left: true, top: true, right: false, bottom: false };
-    pub const ALL: Anchors = Anchors { left: true, top: true, right: true, bottom: true };
-    pub const TOP_WIDE: Anchors = Anchors { left: true, top: true, right: true, bottom: false };
-    pub const TOP_RIGHT: Anchors = Anchors { left: false, top: true, right: true, bottom: false };
-    pub const BOTTOM_LEFT: Anchors = Anchors { left: true, top: false, right: false, bottom: true };
-    pub const BOTTOM_RIGHT: Anchors = Anchors { left: false, top: false, right: true, bottom: true };
-    pub const BOTTOM_WIDE: Anchors = Anchors { left: true, top: false, right: true, bottom: true };
-    /// Stretches down, keeps its width at the left.
-    pub const LEFT_TALL: Anchors = Anchors { left: true, top: true, right: false, bottom: true };
-}
-
-/// A control placed at a position relative to the dialog's inside (at the
-/// dialog's natural size).
+/// A control's place in the dialog (on screen, from the last layout): the
+/// row a field or button sits on; boxes, labels and shadows go around it.
 #[derive(Debug, Clone)]
 pub struct Placed {
     pub control: Control,
     pub rect: Rect,
-    pub anchors: Option<Anchors>,
+}
+
+/// Size wishes for one item of a dialog's layout.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Hints {
+    /// Columns of text it would like (a field's, a list's).
+    pub chars: Option<i32>,
+    /// Rows a list would like.
+    pub lines: Option<i32>,
+    /// Takes spare width / height (lists and fields grow on their own).
+    pub grow_x: Option<bool>,
+    pub grow_y: Option<bool>,
+}
+
+/// A dialog's contents: controls in rows and columns, group boxes, spacers.
+/// Nothing has a fixed size or place: each control measures itself in the
+/// current control style (a QBasic field is a 3-row box with its label
+/// beside it, a Turbo Vision one a label row and a field row), and rows and
+/// columns share out what space there is.
+#[derive(Debug, Clone)]
+pub struct Item {
+    kind: ItemKind,
+    hints: Hints,
+}
+
+#[derive(Debug, Clone)]
+enum ItemKind {
+    /// Before the dialog takes it.
+    Control(Box<Control>),
+    /// Afterwards: the control's index.
+    Leaf(usize),
+    /// Side by side / one under another; the gap (None: the style's).
+    Row(Vec<Item>, Option<i32>),
+    Col(Vec<Item>, Option<i32>),
+    /// A group box (its control) around an item.
+    Group(Box<Item>, Box<Item>),
+    /// Space that takes what's spare.
+    Stretch,
+    /// QBasic's line across the dialog above its buttons.
+    Rule,
+}
+
+impl Item {
+    fn new(kind: ItemKind) -> Item {
+        Item { kind, hints: Hints::default() }
+    }
+    fn control(c: Control) -> Item {
+        Item::new(ItemKind::Control(Box::new(c)))
+    }
+    /// Columns of text wanted (a field's, list's or label's width).
+    pub fn chars(mut self, n: i32) -> Item {
+        self.hints.chars = Some(n);
+        self
+    }
+    /// Rows wanted (a list's).
+    pub fn lines(mut self, n: i32) -> Item {
+        self.hints.lines = Some(n);
+        self
+    }
+    /// Take (or don't take) spare width.
+    pub fn grow_x(mut self, g: bool) -> Item {
+        self.hints.grow_x = Some(g);
+        self
+    }
+    /// Take (or don't take) spare height.
+    pub fn grow_y(mut self, g: bool) -> Item {
+        self.hints.grow_y = Some(g);
+        self
+    }
+    /// A list's column header row.
+    pub fn header(mut self, h: &str) -> Item {
+        if let ItemKind::Control(c) = &mut self.kind {
+            if let Control::List { header, .. } = c.as_mut() {
+                *header = Some(h.to_string());
+            }
+        }
+        self
+    }
+    /// A list whose Enter and double-click report Activated.
+    pub fn activates(mut self) -> Item {
+        if let ItemKind::Control(c) = &mut self.kind {
+            if let Control::List { activates, .. } = c.as_mut() {
+                *activates = true;
+            }
+        }
+        self
+    }
+    /// A label that can be changed later by `set_label`.
+    pub fn id(mut self, new_id: &str) -> Item {
+        if let ItemKind::Control(c) = &mut self.kind {
+            if let Control::Label { id, .. } = c.as_mut() {
+                *id = new_id.to_string();
+            }
+        }
+        self
+    }
+}
+
+/// Text; several lines with `\n`.
+pub fn label(text: &str) -> Item {
+    Item::control(Control::Label { id: String::new(), text: text.into() })
+}
+/// A text field; its label (with a `~h~otkey`) beside or above it.
+pub fn input(id: &str, label: &str, value: &str) -> Item {
+    Item::control(Control::Input { id: id.into(), label: label.into(), value: value.into(), cursor: value.len() })
+}
+pub fn button(id: &str, label: &str, default: bool) -> Item {
+    Item::control(Control::Button { id: id.into(), label: label.into(), default })
+}
+pub fn list(id: &str, items: Vec<String>, selected: usize) -> Item {
+    Item::control(Control::List { id: id.into(), items, selected, scroll: 0, header: None, activates: false })
+}
+pub fn check(id: &str, label: &str, checked: bool) -> Item {
+    Item::control(Control::Check { id: id.into(), label: label.into(), checked })
+}
+/// Radio buttons with the same `group` are exclusive.
+pub fn radio(id: &str, group: &str, label: &str, checked: bool) -> Item {
+    Item::control(Control::Radio { id: id.into(), label: label.into(), group: group.into(), checked })
+}
+/// A drop-down; its label beside or above it, like a field's.
+pub fn combo(id: &str, label: &str, items: Vec<String>, selected: usize) -> Item {
+    Item::control(Control::Combo { id: id.into(), label: label.into(), items, selected, open: false })
+}
+/// A titled box around `inner`.
+pub fn group(title: &str, inner: Item) -> Item {
+    Item::new(ItemKind::Group(Box::new(Item::control(Control::Group { title: title.into() })), Box::new(inner)))
+}
+/// Items side by side, the style's gap between them.
+pub fn row(items: Vec<Item>) -> Item {
+    Item::new(ItemKind::Row(items, None))
+}
+/// Items one under another, the style's gap between them.
+pub fn col(items: Vec<Item>) -> Item {
+    Item::new(ItemKind::Col(items, None))
+}
+/// Items one under another with no gap (radio buttons, check boxes).
+pub fn stack(items: Vec<Item>) -> Item {
+    Item::new(ItemKind::Col(items, Some(0)))
+}
+/// Space that takes what's spare.
+pub fn stretch() -> Item {
+    Item::new(ItemKind::Stretch)
+}
+
+/// What an item needs and would like, in cells.
+#[derive(Debug, Clone, Copy, Default)]
+struct Measure {
+    min_w: i32,
+    min_h: i32,
+    w: i32,
+    h: i32,
+    grow_x: bool,
+    grow_y: bool,
+}
+
+/// Share `avail` among items wanting `want` (at least `min`): spare space
+/// goes to those that grow, a shortfall comes out of what's above their minimum.
+fn share(avail: i32, items: &[(i32, i32, bool)]) -> Vec<i32> {
+    let want: i32 = items.iter().map(|i| i.0).sum();
+    let mut out: Vec<i32> = items.iter().map(|i| i.0).collect();
+    if avail >= want {
+        let growers: Vec<usize> = (0..items.len()).filter(|&k| items[k].2).collect();
+        if !growers.is_empty() {
+            let extra = avail - want;
+            for (n, &k) in growers.iter().enumerate() {
+                out[k] += extra / growers.len() as i32 + i32::from((n as i32) < extra % growers.len() as i32);
+            }
+        }
+    } else {
+        let slack: i32 = items.iter().map(|i| (i.0 - i.1).max(0)).sum();
+        let mut cut = (want - avail).min(slack);
+        // Proportionally to each one's slack; the rounding off the last ones.
+        for k in 0..items.len() {
+            let s = (items[k].0 - items[k].1).max(0);
+            if slack > 0 && cut > 0 {
+                let c = ((want - avail).min(slack) * s / slack).min(cut);
+                out[k] -= c;
+                cut -= c;
+            }
+        }
+        for k in (0..items.len()).rev() {
+            let room = out[k] - items[k].1;
+            let c = room.min(cut).max(0);
+            out[k] -= c;
+            cut -= c;
+        }
+    }
+    out
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -131,15 +299,13 @@ pub struct Dialog {
     /// What the dialog is for (the workbench uses it to act on the result).
     pub kind: String,
     pub title: String,
-    /// The natural size the controls were placed for.
-    pub w: i32,
-    pub h: i32,
     pub controls: Vec<Placed>,
     pub focus: usize,
     /// Where it is on screen (from the last layout).
     pub rect: Rect,
-    /// Its size now (it starts at the natural size), and the smallest.
-    size: (i32, i32),
+    /// The size the person dragged it to (else the size its contents want).
+    size: Option<(i32, i32)>,
+    /// The smallest it can be (from the last layout).
     pub min: (i32, i32),
     /// Where the person moved it (else centred).
     pos: Option<Point>,
@@ -150,100 +316,361 @@ pub struct Dialog {
     /// Controls drawn in boxes (QBasic, VB-DOS) at the last draw: where
     /// their insides are. (Clicks and list rows use them.)
     boxed: Vec<Option<Rect>>,
+    /// The contents, and the buttons (placed by the control style: a row
+    /// along the bottom, or a column at the right beside lists).
+    body: Item,
+    buttons: Vec<Item>,
+    /// Rows of QBasic's line above the buttons (from the last layout).
+    rules: Vec<i32>,
+}
+
+/// Where an item's main row is (fields and drop-downs sit under or beside
+/// their labels): rows side by side line up on it.
+fn base_of(c: &Control, st: &ControlStyle) -> i32 {
+    match c {
+        Control::Input { label, .. } | Control::Combo { label, .. } => i32::from(st.controls.boxed() || !label.is_empty()),
+        Control::Button { .. } => i32::from(st.controls.button == ButtonLook::Box3d),
+        _ => 0,
+    }
 }
 
 impl Dialog {
-    pub fn new(kind: &str, title: &str, w: i32, h: i32) -> Self {
+    /// A dialog; its contents come from `body` and `buttons`.
+    pub fn new(kind: &str, title: &str) -> Self {
         Dialog {
             kind: kind.into(),
             title: title.into(),
-            w,
-            h,
             controls: Vec::new(),
             focus: 0,
             rect: Rect::default(),
-            size: (w, h),
-            min: ((w * 2 / 3).max(24).min(w), (h * 2 / 3).max(6).min(h)),
+            size: None,
+            min: (0, 0),
             pos: None,
             drag: None,
             last_click: None,
             screen: Rect::default(),
             boxed: Vec::new(),
+            body: Item::new(ItemKind::Stretch),
+            buttons: Vec::new(),
+            rules: Vec::new(),
         }
     }
 
-    fn push(mut self, control: Control, rect: Rect) -> Self {
-        self.controls.push(Placed { control, rect, anchors: None });
+    /// The controls, as rows, columns and groups (see `row`, `col`, `group`).
+    pub fn body(mut self, item: Item) -> Self {
+        self.body = self.attach(item);
         self.fix_focus();
         self
     }
 
-    pub fn label(self, x: i32, y: i32, text: &str) -> Self {
-        let w = str_width(text) as i32;
-        self.push(Control::Label { text: text.into() }, Rect::new(x, y, w, 1))
+    /// The buttons (made with `button`), in order.
+    pub fn buttons(mut self, items: Vec<Item>) -> Self {
+        self.buttons = items.into_iter().map(|i| self.attach(i)).collect();
+        self.fix_focus();
+        self
     }
 
-    pub fn input(self, id: &str, x: i32, y: i32, w: i32, label: &str, value: &str) -> Self {
-        let c = Control::Input { id: id.into(), label: label.into(), value: value.into(), cursor: value.len() };
-        self.push(c, Rect::new(x, y, w, 1))
+    /// Move an item's controls into the dialog (in reading order: that's
+    /// the Tab order), leaving their indexes in the tree.
+    fn attach(&mut self, item: Item) -> Item {
+        let hints = item.hints;
+        let kind = match item.kind {
+            ItemKind::Control(c) => {
+                self.controls.push(Placed { control: *c, rect: Rect::default() });
+                ItemKind::Leaf(self.controls.len() - 1)
+            }
+            ItemKind::Row(v, g) => ItemKind::Row(v.into_iter().map(|i| self.attach(i)).collect(), g),
+            ItemKind::Col(v, g) => ItemKind::Col(v.into_iter().map(|i| self.attach(i)).collect(), g),
+            ItemKind::Group(g, inner) => {
+                let g = self.attach(*g);
+                ItemKind::Group(Box::new(g), Box::new(self.attach(*inner)))
+            }
+            k => k,
+        };
+        Item { kind, hints }
     }
 
-    pub fn button(self, id: &str, x: i32, y: i32, label: &str, default: bool) -> Self {
-        let w = str_width(&label.replace('~', "")) as i32 + 4;
-        self.push(Control::Button { id: id.into(), label: label.into(), default }, Rect::new(x, y, w, 1))
-    }
+    // ---- measuring and arranging ----------------------------------------------------
 
-    pub fn list(self, id: &str, r: Rect, items: Vec<String>, selected: usize) -> Self {
-        let c = Control::List { id: id.into(), items, selected, scroll: 0, header: None, activates: false };
-        self.push(c, r)
-    }
-
-    /// A list whose Enter / double-click reports Activated, with an optional
-    /// column header row.
-    pub fn activating_list(self, id: &str, r: Rect, header: Option<&str>, items: Vec<String>, selected: usize) -> Self {
-        let c = Control::List { id: id.into(), items, selected, scroll: 0, header: header.map(str::to_string), activates: true };
-        self.push(c, r)
-    }
-
-    pub fn check(self, id: &str, x: i32, y: i32, label: &str, checked: bool) -> Self {
-        let w = str_width(&label.replace('~', "")) as i32 + 4;
-        self.push(Control::Check { id: id.into(), label: label.into(), checked }, Rect::new(x, y, w, 1))
-    }
-
-    pub fn radio(self, id: &str, group: &str, x: i32, y: i32, label: &str, checked: bool) -> Self {
-        let w = str_width(&label.replace('~', "")) as i32 + 4;
-        let c = Control::Radio { id: id.into(), label: label.into(), group: group.into(), checked };
-        self.push(c, Rect::new(x, y, w, 1))
-    }
-
-    /// A drop-down: `label` goes on the row above, like an input's.
-    pub fn combo(self, id: &str, x: i32, y: i32, w: i32, label: &str, items: Vec<String>, selected: usize) -> Self {
-        let c = Control::Combo { id: id.into(), label: label.into(), items, selected, open: false };
-        self.push(c, Rect::new(x, y, w, 1))
-    }
-
-    /// A group box: the frame is `r` (its title in the top edge).
-    pub fn group(self, title: &str, r: Rect) -> Self {
-        self.push(Control::Group { title: title.into() }, r)
-    }
-
-    /// Anchors for the control added last.
-    pub fn anchor(mut self, a: Anchors) -> Self {
-        if let Some(p) = self.controls.last_mut() {
-            p.anchors = Some(a);
+    fn measure_control(&self, i: usize, h: &Hints, st: &ControlStyle) -> Measure {
+        let text_w = |s: &str| str_width(&s.replace('~', "")) as i32;
+        let mut m = match &self.controls[i].control {
+            Control::Label { text, .. } => {
+                let w = h.chars.unwrap_or_else(|| text.split('\n').map(|l| str_width(l) as i32).max().unwrap_or(0));
+                let n = text.split('\n').count() as i32;
+                Measure { min_w: w.min(12), min_h: n, w, h: n, ..Default::default() }
+            }
+            Control::Input { label, .. } | Control::Combo { label, .. } => {
+                let combo = matches!(self.controls[i].control, Control::Combo { .. });
+                let lw = text_w(label);
+                let items_w = match &self.controls[i].control {
+                    Control::Combo { items, .. } => items.iter().map(|s| str_width(s) as i32).max().unwrap_or(4) + 2,
+                    _ => 20,
+                };
+                let c = h.chars.unwrap_or(items_w) + if combo && !st.controls.boxed() && st.controls.combo_arrow_beside { 3 } else { 0 };
+                if st.controls.boxed() {
+                    let lead = if lw > 0 { lw + 1 } else { 0 };
+                    Measure { min_w: lead + 10, min_h: 3, w: lead + c + 2, h: 3, grow_x: !combo, ..Default::default() }
+                } else {
+                    let rows = if lw > 0 { 2 } else { 1 };
+                    Measure { min_w: lw.max(10), min_h: rows, w: lw.max(c + 2), h: rows, grow_x: !combo, ..Default::default() }
+                }
+            }
+            Control::Button { label, .. } => {
+                let lw = text_w(label);
+                let (w, hh) = match st.controls.button {
+                    // A 3-D box, the label with room either side.
+                    ButtonLook::Box3d => (lw + 6, 3),
+                    // A bar and its shadow (a column right, a row below).
+                    ButtonLook::Bar { min_w } => ((lw + 4).max(min_w) + 1, 2),
+                    ButtonLook::Brackets(l, r) => (text_w(l) + lw + text_w(r), 1),
+                };
+                Measure { min_w: w, min_h: hh, w, h: hh, ..Default::default() }
+            }
+            Control::Check { label, .. } | Control::Radio { label, .. } => {
+                let w = text_w(label) + 4;
+                Measure { min_w: w, min_h: 1, w, h: 1, ..Default::default() }
+            }
+            Control::List { items, header, .. } => {
+                let pad = if st.controls.boxed() { 2 } else { 0 };
+                let widest = items.iter().map(|s| str_width(s) as i32).max().unwrap_or(0).max(header.as_deref().map_or(0, |s| str_width(s) as i32));
+                let w = h.chars.unwrap_or((widest + 3).clamp(12, 60)) + pad;
+                let hd = i32::from(header.is_some());
+                let rows = h.lines.unwrap_or((items.len() as i32).clamp(3, 12));
+                Measure { min_w: 10 + pad, min_h: 3 + hd + pad, w, h: rows + hd + pad, grow_x: true, grow_y: true, ..Default::default() }
+            }
+            Control::Group { title } => {
+                let w = text_w(title) + 4;
+                Measure { min_w: w, min_h: 2, w, h: 2, ..Default::default() }
+            }
+        };
+        if let Some(g) = h.grow_x {
+            m.grow_x = g;
         }
-        self
+        if let Some(g) = h.grow_y {
+            m.grow_y = g;
+        }
+        m.min_w = m.min_w.min(m.w);
+        m.min_h = m.min_h.min(m.h);
+        m
     }
 
-    /// Start bigger (or smaller) than the natural size.
-    pub fn sized(mut self, w: i32, h: i32) -> Self {
-        self.size = (w.max(self.min.0), h.max(self.min.1));
-        self
+    fn measure(&self, item: &Item, st: &ControlStyle) -> (Measure, i32) {
+        let (mut m, base) = match &item.kind {
+            ItemKind::Leaf(i) => (self.measure_control(*i, &item.hints, st), base_of(&self.controls[*i].control, st)),
+            ItemKind::Control(_) => (Measure::default(), 0),
+            ItemKind::Stretch => (Measure { grow_x: true, grow_y: true, ..Default::default() }, 0),
+            ItemKind::Rule => (Measure { min_h: 2, h: 2, grow_x: true, ..Default::default() }, 0),
+            ItemKind::Row(v, gap) => {
+                let gap = gap.unwrap_or(st.controls.col_gap);
+                let ms: Vec<(Measure, i32)> = v.iter().map(|i| self.measure(i, st)).collect();
+                let base = ms.iter().map(|m| m.1).max().unwrap_or(0);
+                let gaps = gap * (v.len() as i32 - 1).max(0);
+                let mut m = Measure { w: gaps, min_w: gaps, ..Default::default() };
+                for (c, b) in &ms {
+                    m.w += c.w;
+                    m.min_w += c.min_w;
+                    m.h = m.h.max(base - b + c.h);
+                    m.min_h = m.min_h.max(base - b + c.min_h);
+                    m.grow_x |= c.grow_x;
+                    m.grow_y |= c.grow_y;
+                }
+                (m, base)
+            }
+            ItemKind::Col(v, gap) => {
+                let gap = gap.unwrap_or(st.controls.row_gap);
+                let ms: Vec<(Measure, i32)> = v.iter().map(|i| self.measure(i, st)).collect();
+                let gaps = gap * (v.len() as i32 - 1).max(0);
+                let mut m = Measure { h: gaps, min_h: gaps, ..Default::default() };
+                for (c, _) in &ms {
+                    m.h += c.h;
+                    m.min_h += c.min_h;
+                    m.w = m.w.max(c.w);
+                    m.min_w = m.min_w.max(c.min_w);
+                    m.grow_x |= c.grow_x;
+                    m.grow_y |= c.grow_y;
+                }
+                (m, ms.first().map_or(0, |m| m.1))
+            }
+            ItemKind::Group(g, inner) if self.heading_list(inner) => {
+                let (gm, _) = self.measure(g, st);
+                let (im, _) = self.measure(inner, st);
+                let m = Measure {
+                    w: im.w.max(gm.w - 2),
+                    min_w: im.min_w.max(gm.w - 2),
+                    h: im.h + 1,
+                    min_h: im.min_h + 1,
+                    grow_x: im.grow_x,
+                    grow_y: im.grow_y,
+                };
+                (m, 0)
+            }
+            ItemKind::Group(g, inner) => {
+                let (gm, _) = self.measure(g, st);
+                let (im, _) = self.measure(inner, st);
+                let m = Measure {
+                    w: im.w.max(gm.w - 4) + 4,
+                    min_w: im.min_w.max(gm.w - 4) + 4,
+                    h: im.h + 2,
+                    min_h: im.min_h + 2,
+                    grow_x: im.grow_x,
+                    grow_y: im.grow_y,
+                };
+                (m, 0)
+            }
+        };
+        if let Some(g) = item.hints.grow_x {
+            m.grow_x = g;
+        }
+        if let Some(g) = item.hints.grow_y {
+            m.grow_y = g;
+        }
+        (m, base)
     }
 
-    pub fn min_size(mut self, w: i32, h: i32) -> Self {
-        self.min = (w, h);
-        self
+    /// A group box around a single list is drawn as a heading above the
+    /// list instead (as the originals label their lists: "Files" over the
+    /// box), so a list never sits in two frames.
+    fn heading_list(&self, inner: &Item) -> bool {
+        matches!(inner.kind, ItemKind::Leaf(i) if matches!(self.controls[i].control, Control::List { .. }))
+    }
+
+    /// Where a control's main row goes, given the space laid out for it.
+    fn core(&self, i: usize, f: Rect, st: &ControlStyle) -> Rect {
+        match &self.controls[i].control {
+            Control::Input { label, .. } | Control::Combo { label, .. } => {
+                let dy = i32::from(st.controls.boxed() || !label.is_empty());
+                Rect::new(f.x, f.y + dy, f.w, 1)
+            }
+            Control::Button { .. } if st.controls.button == ButtonLook::Box3d => Rect::new(f.x + 1, f.y + 1, (f.w - 2).max(1), 1),
+            Control::Button { .. } if matches!(st.controls.button, ButtonLook::Bar { .. }) => Rect::new(f.x, f.y, (f.w - 1).max(1), 1),
+            Control::Button { .. } | Control::Check { .. } | Control::Radio { .. } => Rect::new(f.x, f.y, f.w, 1),
+            _ => f,
+        }
+    }
+
+    fn arrange(&mut self, item: &Item, r: Rect, st: &ControlStyle) {
+        match &item.kind {
+            ItemKind::Leaf(i) => {
+                let c = self.core(*i, r, st);
+                self.controls[*i].rect = c;
+            }
+            ItemKind::Rule => self.rules.push(r.bottom() - 1),
+            ItemKind::Control(_) | ItemKind::Stretch => {}
+            ItemKind::Row(v, gap) => {
+                let gap = gap.unwrap_or(st.controls.col_gap);
+                let ms: Vec<(Measure, i32)> = v.iter().map(|i| self.measure(i, st)).collect();
+                let base = ms.iter().map(|m| m.1).max().unwrap_or(0);
+                let gaps = gap * (v.len() as i32 - 1).max(0);
+                let ws = share(r.w - gaps, &ms.iter().map(|(m, _)| (m.w, m.min_w, m.grow_x)).collect::<Vec<_>>());
+                let mut x = r.x;
+                for (k, child) in v.iter().enumerate() {
+                    let (m, b) = ms[k];
+                    let dy = base - b;
+                    let h = if m.grow_y { r.h - dy } else { m.h.min(r.h - dy) };
+                    self.arrange(child, Rect::new(x, r.y + dy, ws[k], h.max(0)), st);
+                    x += ws[k] + gap;
+                }
+            }
+            ItemKind::Col(v, gap) => {
+                let gap = gap.unwrap_or(st.controls.row_gap);
+                let ms: Vec<(Measure, i32)> = v.iter().map(|i| self.measure(i, st)).collect();
+                let gaps = gap * (v.len() as i32 - 1).max(0);
+                let hs = share(r.h - gaps, &ms.iter().map(|(m, _)| (m.h, m.min_h, m.grow_y)).collect::<Vec<_>>());
+                let mut y = r.y;
+                for (k, child) in v.iter().enumerate() {
+                    let m = ms[k].0;
+                    let w = if m.grow_x { r.w } else { m.w.min(r.w) };
+                    self.arrange(child, Rect::new(r.x, y, w, hs[k]), st);
+                    y += hs[k] + gap;
+                }
+            }
+            ItemKind::Group(g, inner) if self.heading_list(inner) => {
+                // (The group's rect: just its heading row.)
+                self.arrange(g, Rect::new(r.x, r.y, r.w, 1), st);
+                self.arrange(inner, Rect::new(r.x, r.y + 1, r.w, (r.h - 1).max(0)), st);
+            }
+            ItemKind::Group(g, inner) => {
+                self.arrange(g, r, st);
+                self.arrange(inner, Rect::new(r.x + 2, r.y + 1, (r.w - 4).max(0), (r.h - 2).max(0)), st);
+            }
+        }
+    }
+
+    /// The whole contents with the buttons where this control style puts
+    /// them (see `ButtonPlace`). True when they're along the bottom edge.
+    fn whole(&self, st: &ControlStyle) -> (Item, bool) {
+        let body = self.body.clone();
+        if self.buttons.is_empty() {
+            return (body, false);
+        }
+        let look = &st.controls;
+        let tall = self.measure(&body, st).0.grow_y;
+        match look.buttons {
+            ButtonPlace::BottomRule => {
+                let mut bar = vec![stretch()];
+                for b in &self.buttons {
+                    bar.push(b.clone());
+                    bar.push(stretch());
+                }
+                let bar = Item::new(ItemKind::Row(bar, Some(0)));
+                (Item::new(ItemKind::Col(vec![body.grow_y(true), Item::new(ItemKind::Rule), bar], Some(0))), true)
+            }
+            ButtonPlace::Beside if tall => {
+                let mut buttons: Vec<Item> = self.buttons.iter().map(|b| b.clone().grow_x(true)).collect();
+                buttons.push(stretch().grow_x(false));
+                let column = Item::new(ItemKind::Col(buttons, Some(look.button_row_gap))).grow_y(true).grow_x(false);
+                (Item::new(ItemKind::Row(vec![body.grow_x(true), column], Some(look.col_gap + 1))), false)
+            }
+            ButtonPlace::Beside => {
+                let mut bar = vec![stretch()];
+                bar.extend(self.buttons.iter().cloned());
+                bar.push(stretch());
+                let bar = Item::new(ItemKind::Row(bar, Some(look.button_col_gap)));
+                (Item::new(ItemKind::Col(vec![body.grow_y(true), bar], Some(look.row_gap.max(1)))), false)
+            }
+        }
+    }
+
+    /// Lay the dialog out on the screen in this control style: the size its
+    /// contents want (or the size it was dragged to; never larger than the
+    /// screen nor smaller than its contents need), moved or centred, and
+    /// every control placed.
+    pub fn layout(&mut self, screen: Rect, theme: &Theme) {
+        let st = &theme.style;
+        self.screen = screen;
+        let (top, bottom_bar) = self.whole(st);
+        let (m, _) = self.measure(&top, st);
+        // The frame and the style's padding (buttons along the bottom edge
+        // sit right on it).
+        let look = &st.controls;
+        let pad_h = 2 + look.pad_top + if bottom_bar { 0 } else { look.pad_bottom };
+        let pad_w = 2 + 2 * look.pad_x;
+        let title_w = str_width(&self.title) as i32 + 8;
+        self.min = ((m.min_w + pad_w).max(title_w).min(screen.w), (m.min_h + pad_h).min(screen.h));
+        let want = self.size.unwrap_or(((m.w + pad_w).max(title_w), m.h + pad_h));
+        let w = want.0.clamp(self.min.0, screen.w.max(self.min.0)).min(screen.w);
+        let h = want.1.clamp(self.min.1, screen.h.max(self.min.1)).min(screen.h);
+        self.rect = match self.pos {
+            Some(p) => Rect::new(
+                p.x.clamp(screen.x, (screen.right() - w).max(screen.x)),
+                p.y.clamp(screen.y, (screen.bottom() - h).max(screen.y)),
+                w,
+                h,
+            ),
+            None => screen.centered(w, h),
+        };
+        let r = self.rect;
+        let inside = Rect::new(r.x + 1 + look.pad_x, r.y + 1 + look.pad_top, (r.w - pad_w).max(0), (r.h - pad_h).max(0));
+        self.rules.clear();
+        self.arrange(&top, inside, st);
+        let boxed = st.controls.boxed();
+        self.boxed = (0..self.controls.len()).map(|i| if boxed { self.box_of(i).map(|(_, inner)| inner) } else { None }).collect();
+    }
+
+    /// A control's place on screen (from the last layout).
+    pub fn control_rect(&self, i: usize) -> Rect {
+        self.controls[i].rect
     }
 
     fn fix_focus(&mut self) {
@@ -311,66 +738,15 @@ impl Dialog {
         }
     }
 
-    /// Change the text of the label at index `i` (labels have no ids).
-    pub fn set_label(&mut self, i: usize, v: &str) {
-        if let Some(Placed { control: Control::Label { text }, rect, .. }) = self.controls.get_mut(i) {
-            *text = v.to_string();
-            rect.w = rect.w.max(str_width(v) as i32);
+    /// Change a label's text (one made with `.id()`).
+    pub fn set_label(&mut self, id: &str, v: &str) {
+        for p in &mut self.controls {
+            if let Control::Label { id: i, text } = &mut p.control {
+                if i == id {
+                    *text = v.to_string();
+                }
+            }
         }
-    }
-
-    // ---- layout ------------------------------------------------------------------
-
-    fn default_anchors(&self, p: &Placed) -> Anchors {
-        let (w0, h0) = (self.w - 4, self.h - 2);
-        let low = p.rect.y >= h0 * 3 / 5;
-        let right = p.rect.x >= w0 / 2;
-        match p.control {
-            Control::List { .. } | Control::Group { .. } => Anchors::ALL,
-            Control::Input { .. } | Control::Combo { .. } => Anchors { left: true, right: true, top: !low, bottom: low },
-            Control::Button { .. } => Anchors { left: !right, right, top: !low, bottom: low },
-            _ => Anchors { left: true, right: false, top: !low, bottom: low },
-        }
-    }
-
-    /// Place the dialog on the screen: its current size (never larger than
-    /// the screen, never smaller than its minimum), where it was moved to or
-    /// centred.
-    pub fn layout(&mut self, screen: Rect) {
-        self.screen = screen;
-        let w = self.size.0.min(screen.w).max(self.min.0.min(screen.w));
-        let h = self.size.1.min(screen.h).max(self.min.1.min(screen.h));
-        self.rect = match self.pos {
-            Some(p) => Rect::new(
-                p.x.clamp(screen.x, (screen.right() - w).max(screen.x)),
-                p.y.clamp(screen.y, (screen.bottom() - h).max(screen.y)),
-                w,
-                h,
-            ),
-            None => screen.centered(w, h),
-        };
-    }
-
-    /// A control's place on screen now.
-    pub fn control_rect(&self, i: usize) -> Rect {
-        let p = &self.controls[i];
-        let a = p.anchors.unwrap_or_else(|| self.default_anchors(p));
-        // (Before the first layout the dialog is at its natural size.)
-        let (dx, dy) = if self.rect.w == 0 { (0, 0) } else { (self.rect.w - self.w, self.rect.h - self.h) };
-        let r = p.rect;
-        let (x, w) = match (a.left, a.right) {
-            (true, true) => (r.x, (r.w + dx).max(1)),
-            (false, true) => (r.x + dx, r.w),
-            (true, false) => (r.x, r.w),
-            (false, false) => (r.x + dx / 2, r.w),
-        };
-        let (y, h) = match (a.top, a.bottom) {
-            (true, true) => (r.y, (r.h + dy).max(1)),
-            (false, true) => (r.y + dy, r.h),
-            (true, false) => (r.y, r.h),
-            (false, false) => (r.y + dy / 2, r.h),
-        };
-        Rect::new(self.rect.x + 2 + x, self.rect.y + 1 + y, w, h)
     }
 
     fn step_focus(&mut self, dir: i32) {
@@ -393,6 +769,10 @@ impl Dialog {
     }
 
     /// Where a control's contents go: inside its box when it has one.
+    pub fn content_rect(&self, i: usize) -> Rect {
+        self.inner(i)
+    }
+
     fn inner(&self, i: usize) -> Rect {
         self.boxed.get(i).copied().flatten().unwrap_or_else(|| self.control_rect(i))
     }
@@ -413,14 +793,7 @@ impl Dialog {
                 room.then(|| (outer, Rect::new(x0 + 1, cr.y, outer.w - 2, 1)))
             }
             Control::List { .. } => {
-                // (A list filling a group box already has its box.)
-                let in_group = self.controls.iter().enumerate().any(|(j, p)| {
-                    matches!(p.control, Control::Group { .. }) && {
-                        let g = self.control_rect(j);
-                        g.inset(1) == cr
-                    }
-                });
-                (!in_group && cr.w >= 4 && cr.h >= 3).then(|| (cr, cr.inset(1)))
+                (cr.w >= 4 && cr.h >= 3).then(|| (cr, cr.inset(1)))
             }
             _ => None,
         }
@@ -698,7 +1071,7 @@ impl Dialog {
                     Drag::Resize { start, size, right, bottom } => {
                         let w = if right { size.0 + ev.pos.x - start.x } else { size.0 };
                         let h = if bottom { size.1 + ev.pos.y - start.y } else { size.1 };
-                        self.size = (w.max(self.min.0), h.max(self.min.1));
+                        self.size = Some((w.max(self.min.0), h.max(self.min.1)));
                         self.pos = Some(Point::new(self.rect.x, self.rect.y));
                     }
                     Drag::Thumb { i } => self.thumb_to(i, ev.pos.y),
@@ -868,34 +1241,21 @@ impl Dialog {
         if st.shadows {
             c.shadow(r, s.shadow);
         }
-        // (QBasic: a line across the box above the buttons, when they share a row.)
-        if st.dialog_rule {
-            let buttons: Vec<i32> = (0..self.controls.len())
-                .filter(|&i| matches!(self.controls[i].control, Control::Button { .. }))
-                .map(|i| self.control_rect(i).y)
-                .collect();
-            if let Some(&by) = buttons.iter().max() {
-                let y = by - 1;
-                let clear = (0..self.controls.len()).all(|j| {
-                    let o = self.control_rect(j);
-                    matches!(self.controls[j].control, Control::Button { .. }) || !(y >= o.y && y < o.bottom())
-                });
-                if y > r.y + 1 && clear && buttons.iter().all(|&b| b == by) {
-                    let fc = st.dialog_frame;
-                    c.print(r.x, y, if fc.v == "║" { "╟" } else { "├" }, s.dialog_frame);
-                    c.hline(r.x + 1, y, r.w - 2, "─", s.dialog_frame);
-                    c.print(r.right() - 1, y, if fc.v == "║" { "╢" } else { "┤" }, s.dialog_frame);
-                }
-            }
+        // (QBasic: a line across the box above the buttons.)
+        for &y in &self.rules {
+            let fc = st.dialog_frame;
+            c.print(r.x, y, if fc.v == "║" { "╟" } else { "├" }, s.dialog_frame);
+            c.hline(r.x + 1, y, r.w - 2, "─", s.dialog_frame);
+            c.print(r.right() - 1, y, if fc.v == "║" { "╢" } else { "┤" }, s.dialog_frame);
         }
         // (No resize grip: DOS dialogs never had one; the edges still drag.)
-        self.boxed = (0..self.controls.len()).map(|i| if st.boxed_fields { self.box_of(i).map(|(_, inner)| inner) } else { None }).collect();
-        let boxes: Vec<Option<Rect>> = (0..self.controls.len()).map(|i| if st.boxed_fields { self.box_of(i).map(|(outer, _)| outer) } else { None }).collect();
+        let boxed = st.controls.boxed();
+        let boxes: Vec<Option<Rect>> = (0..self.controls.len()).map(|i| if boxed { self.box_of(i).map(|(outer, _)| outer) } else { None }).collect();
         let mut c = c.sub(r.inset(1));
         // The boxes: QBasic's in the frame's colour, VB-DOS's sunken (dark
         // top and left, white bottom and right).
         for b in boxes.iter().flatten() {
-            let (lo, hi) = if st.title_bar { (s.dialog.fg(vga::BLACK), s.dialog.fg(vga::WHITE)) } else { (s.dialog_frame, s.dialog_frame) };
+            let (lo, hi) = if st.controls.field == FieldLook::Sunken { (s.dialog.fg(vga::BLACK), s.dialog.fg(vga::WHITE)) } else { (s.dialog_frame, s.dialog_frame) };
             let (x0, x1, y0, y1) = (b.x, b.right() - 1, b.y, b.bottom() - 1);
             c.print(x0, y0, "┌", lo);
             c.hline(x0 + 1, y0, x1 - x0 - 1, "─", lo);
@@ -914,14 +1274,22 @@ impl Dialog {
         for i in order {
             let cr = self.control_rect(i);
             let focused = i == self.focus;
-            let boxed_button = st.title_bar
-                && matches!(self.controls[i].control, Control::Button { .. })
-                && self.row_free(i, cr.y - 1, cr.x - 1, cr.right() + 1)
-                && self.row_free(i, cr.y + 1, cr.x - 1, cr.right() + 1);
+            // (The layout leaves VB-DOS buttons room for their boxes.)
+            let boxed_button = st.controls.button == ButtonLook::Box3d && matches!(self.controls[i].control, Control::Button { .. });
             let rows = if matches!(self.controls[i].control, Control::List { .. }) { self.list_rows(i) } else { 1 };
             match &mut self.controls[i].control {
-                Control::Label { text } => {
-                    c.print(cr.x, cr.y, text, s.dialog);
+                Control::Label { text, .. } => {
+                    let mut lc = c.sub(cr);
+                    for (k, line) in text.split('\n').enumerate() {
+                        lc.print(cr.x, cr.y + k as i32, line, s.dialog);
+                    }
+                }
+                Control::Group { title } if cr.h == 1 => {
+                    // A list's heading: centred over a boxed list (QBasic,
+                    // VB-DOS), at the left over a plain one (Turbo Vision).
+                    let tw = str_width(&title.replace('~', "")) as i32;
+                    let x = if st.controls.boxed() { cr.x + (cr.w - tw) / 2 } else { cr.x };
+                    c.print_hot(x, cr.y, title, s.dialog, s.label_hotkey);
                 }
                 Control::Group { title } => {
                     draw_frame(&mut c, cr, crate::theme::SINGLE, s.dialog_frame);
@@ -951,44 +1319,63 @@ impl Dialog {
                     }
                 }
                 Control::Button { label, default, .. } => {
-                    let (l, rr) = st.button;
-                    let text = format!("{l}{label}{rr}");
-                    let w = str_width(&text.replace('~', "")) as i32;
+                    let (l, rr) = match st.controls.button {
+                        ButtonLook::Brackets(l, r) => (l, r),
+                        _ => ("", ""),
+                    };
+                    let lw = str_width(&label.replace('~', "")) as i32;
+                    let lx = cr.x + (cr.w - lw) / 2;
                     if boxed_button {
-                        // VB-DOS: a 3-D box lit from the top left; the default
-                        // or focused button gets a heavier lower-right edge.
+                        // VB-DOS: a 3-D box lit from the top left (white top
+                        // and left, black bottom and right); the default or
+                        // focused one in double lines.
                         let hi = s.dialog.fg(vga::WHITE);
                         let lo = s.dialog.fg(vga::BLACK);
-                        let (x0, x1) = (cr.x - 1, cr.x + w);
-                        let strong = *default || focused;
-                        c.print(x0, cr.y - 1, "┌", hi);
-                        c.hline(x0 + 1, cr.y - 1, x1 - x0 - 1, "─", hi);
-                        c.print(x1, cr.y - 1, if strong { "╖" } else { "┐" }, lo);
-                        c.print(x0, cr.y, "│", hi);
-                        c.print(x1, cr.y, if strong { "║" } else { "│" }, lo);
-                        c.print(x0, cr.y + 1, "└", hi);
-                        c.hline(x0 + 1, cr.y + 1, x1 - x0 - 1, if strong { "═" } else { "─" }, lo);
-                        c.print(x1, cr.y + 1, if strong { "╝" } else { "┘" }, lo);
-                        c.fill(Rect::new(cr.x, cr.y, w, 1), " ", s.button);
-                        let lw = str_width(&label.replace('~', "")) as i32;
-                        let label_st = if focused { s.button_focused } else { s.button };
-                        c.print_hot(cr.x + (w - lw) / 2, cr.y, label, label_st, s.button_hotkey);
-                    } else if st.dos_status {
-                        // QBasic: "< OK >", the focused button's brackets bright.
+                        let (x0, x1) = (cr.x - 1, cr.right());
+                        let d = *default || focused;
+                        let (tl, h, tr, v, bl, br) = if d { ("╔", "═", "╗", "║", "╚", "╝") } else { ("┌", "─", "┐", "│", "└", "┘") };
+                        c.print(x0, cr.y - 1, tl, hi);
+                        c.hline(x0 + 1, cr.y - 1, x1 - x0 - 1, h, hi);
+                        c.print(x1, cr.y - 1, tr, lo);
+                        c.print(x0, cr.y, v, hi);
+                        c.print(x1, cr.y, v, lo);
+                        c.print(x0, cr.y + 1, bl, hi);
+                        c.hline(x0 + 1, cr.y + 1, x1 - x0 - 1, h, lo);
+                        c.print(x1, cr.y + 1, br, lo);
+                        c.fill(cr, " ", s.button);
+                        // (The focused button's label in reverse, as VB-DOS.)
+                        let label_st = if focused { s.list_selected } else { s.button };
+                        c.print_hot(lx, cr.y, label, label_st, s.button_hotkey);
+                        if focused {
+                            c.set_cursor(Point::new(lx, cr.y), CursorShape::Underline);
+                        }
+                    } else if !l.is_empty() {
+                        // "< OK >": the focused button's brackets bright (QBasic).
                         let br = if focused { s.button_focused } else { s.button };
-                        let x = c.print(cr.x, cr.y, l, br);
+                        let x0 = cr.x + (cr.w - lw - str_width(l) as i32 - str_width(rr) as i32) / 2;
+                        let x = c.print(x0, cr.y, l, br);
                         let x = c.print_hot(x, cr.y, label, s.button, s.button_hotkey);
                         c.print(x, cr.y, rr, br);
+                        if focused {
+                            c.set_cursor(Point::new(x0 + str_width(l) as i32, cr.y), CursorShape::Underline);
+                        }
                     } else {
                         let stl = if focused { s.button_focused } else if *default { s.button_default } else { s.button };
-                        c.print_hot(cr.x, cr.y, &text, stl, s.button_hotkey);
-                        if st.shadows && st.button.0.trim().is_empty() {
-                            c.print(cr.x + w, cr.y, "▄", s.dialog.fg(vga::BLACK));
-                            c.hline(cr.x + 1, cr.y + 1, w, "▀", s.dialog.fg(vga::BLACK));
+                        if matches!(st.controls.button, ButtonLook::Bar { .. }) {
+                            // Turbo Vision: a bar the button's width, its
+                            // label centred, a half-block shadow right and below.
+                            c.fill(cr, " ", stl);
+                            c.print_hot(lx, cr.y, label, stl, s.button_hotkey);
+                            c.print(cr.right(), cr.y, "▄", s.dialog.fg(vga::BLACK));
+                            c.hline(cr.x + 1, cr.y + 1, cr.w, "▀", s.dialog.fg(vga::BLACK));
+                        } else {
+                            let text = format!("{l}{label}{rr}");
+                            let tw = str_width(&text.replace('~', "")) as i32;
+                            c.print_hot(cr.x + (cr.w - tw) / 2, cr.y, &text, stl, s.button_hotkey);
                         }
-                    }
-                    if focused {
-                        c.set_cursor(Point::new(cr.x + str_width(l) as i32, cr.y), CursorShape::Underline);
+                        if focused {
+                            c.set_cursor(Point::new(lx, cr.y), CursorShape::Underline);
+                        }
                     }
                 }
                 Control::Check { label, checked, .. } => {
@@ -1016,7 +1403,7 @@ impl Dialog {
                     };
                     // Turbo Vision: a green ▐↓▌ beside the field (its history
                     // button); elsewhere a ↓ at the field's end.
-                    let tv = !boxed && st.shadows && st.button.0.trim().is_empty();
+                    let tv = !boxed && st.controls.combo_arrow_beside;
                     let cr = if tv { Rect::new(cr.x, cr.y, cr.w - 3, 1) } else { cr };
                     c.fill(self.boxed[i].unwrap_or(cr), " ", s.input);
                     let mut sub = c.sub(Rect::new(cr.x, cr.y, cr.w - if tv { 0 } else { 2 }, 1));
@@ -1155,40 +1542,96 @@ mod tests {
     use crate::event::Mods;
 
     fn dlg() -> Dialog {
-        Dialog::new("t", "Test", 40, 14)
-            .input("name", 1, 2, 24, "~N~ame:", "")
-            .button("ok", 28, 2, "O~K~", true)
-            .button("cancel", 28, 5, "Cancel", false)
-            .activating_list("files", Rect::new(1, 4, 24, 5), Some("Name"), (0..20).map(|i| format!("file{i}")).collect(), 0)
-            .check("hidden", 1, 10, "~H~idden", false)
+        Dialog::new("t", "Test")
+            .body(col(vec![
+                input("name", "~N~ame:", ""),
+                list("files", (0..20).map(|i| format!("file{i}")).collect(), 0).header("Name").activates().lines(5),
+                check("hidden", "~H~idden", false),
+            ]))
+            .buttons(vec![button("ok", "O~K~", true), button("cancel", "Cancel", false)])
+    }
+
+    fn themes() -> Vec<Theme> {
+        use crate::theme::Scheme;
+        vec![
+            Theme::default(),
+            Theme { scheme: Scheme::qbasic(), style: ControlStyle::qbasic() },
+            Theme { scheme: Scheme::vbdos(), style: ControlStyle::vbdos() },
+            Theme { scheme: Scheme::turbo(), style: ControlStyle::ascii() },
+        ]
+    }
+
+    /// The cells a control takes, its label, box and shadow included.
+    fn footprint(d: &Dialog, i: usize, st: &ControlStyle) -> Rect {
+        let r = d.control_rect(i);
+        match &d.controls[i].control {
+            Control::Input { label, .. } | Control::Combo { label, .. } if st.controls.boxed() || !label.is_empty() => {
+                Rect::new(r.x, r.y - 1, r.w, if st.controls.boxed() { 3 } else { 2 })
+            }
+            Control::Button { .. } if st.controls.button == ButtonLook::Box3d => Rect::new(r.x - 1, r.y - 1, r.w + 2, 3),
+            Control::Button { .. } if matches!(st.controls.button, ButtonLook::Bar { .. }) => Rect::new(r.x, r.y, r.w + 1, 2),
+            _ => r,
+        }
     }
 
     #[test]
-    fn anchors_stretch_and_follow() {
+    fn every_style_fits_its_controls_without_overlap() {
+        for theme in themes() {
+            for size in [None, Some((90, 36)), Some((10, 5))] {
+                let mut d = dlg();
+                d.size = size;
+                d.layout(Rect::new(0, 0, 100, 40), &theme);
+                let st = &theme.style;
+                let fp: Vec<Rect> = (0..d.controls.len()).map(|i| footprint(&d, i, st)).collect();
+                for (i, a) in fp.iter().enumerate() {
+                    assert!(d.rect.inset(1).contains_rect(*a), "{}: {i} {a:?} outside {:?}", st.name, d.rect);
+                    for (j, b) in fp.iter().enumerate().skip(i + 1) {
+                        assert!(a.intersect(b).is_empty(), "{}: {i} {a:?} overlaps {j} {b:?}", st.name);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_list_takes_the_room_and_buttons_go_where_the_style_puts_them() {
         let screen = Rect::new(0, 0, 100, 40);
+        let [tv, qb, vb, _] = <[Theme; 4]>::try_from(themes()).ok().unwrap();
+        // Turbo Vision: a column at the right; the list grows with the dialog.
         let mut d = dlg();
-        d.layout(screen);
-        let (list0, ok0, hid0, r0) = (d.control_rect(3), d.control_rect(1), d.control_rect(4), d.rect);
-        d.size = (60, 24);
-        d.layout(screen);
-        let (list1, ok1, hid1, r1) = (d.control_rect(3), d.control_rect(1), d.control_rect(4), d.rect);
-        assert_eq!((list1.w - list0.w, list1.h - list0.h), (20, 10), "the list stretches");
-        assert_eq!(r1.right() - ok1.right(), r0.right() - ok0.right(), "OK keeps to the right edge");
-        assert_eq!(r1.bottom() - hid1.y, r0.bottom() - hid0.y, "the check box keeps to the bottom");
+        d.layout(screen, &tv);
+        let (list0, ok0) = (d.control_rect(1), d.control_rect(3));
+        assert!(ok0.x > list0.right() && ok0.y <= list0.y + 1, "OK beside the list: {ok0:?} {list0:?}");
+        d.size = Some((d.rect.w + 20, d.rect.h + 10));
+        d.layout(screen, &tv);
+        let list1 = d.control_rect(1);
+        assert_eq!((list1.w - list0.w, list1.h - list0.h), (20, 10), "the list takes the new room");
+        // QBasic: buttons in a row along the bottom, under a line.
+        let mut d = dlg();
+        d.layout(screen, &qb);
+        let (ok, cancel) = (d.control_rect(3), d.control_rect(4));
+        assert_eq!(ok.y, cancel.y);
+        assert_eq!(ok.y, d.rect.bottom() - 2, "the buttons sit on the bottom edge");
+        assert_eq!(d.rules, vec![ok.y - 1]);
+        // VB-DOS: boxed buttons need three rows each.
+        let mut d = dlg();
+        d.layout(screen, &vb);
+        assert!(d.control_rect(4).y - d.control_rect(3).y >= 3);
     }
 
     #[test]
     fn resize_by_dragging_the_corner() {
+        let theme = Theme::default();
         let mut d = dlg();
-        d.layout(Rect::new(0, 0, 100, 40));
+        d.layout(Rect::new(0, 0, 100, 40), &theme);
         let r = d.rect;
         let corner = Point::new(r.right() - 1, r.bottom() - 1);
         let m = |kind, pos| MouseEvent { kind, pos, mods: Mods::NONE };
         d.handle_mouse(&m(MouseKind::Down(Button::Left), corner));
         d.handle_mouse(&m(MouseKind::Drag(Button::Left), Point::new(corner.x + 10, corner.y + 5)));
         d.handle_mouse(&m(MouseKind::Up(Button::Left), corner));
-        d.layout(Rect::new(0, 0, 100, 40));
-        assert_eq!((d.rect.w, d.rect.h), (50, 19));
+        d.layout(Rect::new(0, 0, 100, 40), &theme);
+        assert_eq!((d.rect.w, d.rect.h), (r.w + 10, r.h + 5));
     }
 
     #[test]
@@ -1205,7 +1648,7 @@ mod tests {
     #[test]
     fn list_scrolls_to_the_bottom_by_wheel_and_thumb_drag() {
         let mut d = dlg();
-        d.layout(Rect::new(0, 0, 100, 40));
+        d.layout(Rect::new(0, 0, 100, 40), &Theme::default());
         let i = d.controls.iter().position(|p| p.control.id() == Some("files")).unwrap();
         let cr = d.control_rect(i);
         let rows = d.list_rows(i);

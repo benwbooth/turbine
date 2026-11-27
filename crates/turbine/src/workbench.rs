@@ -118,7 +118,7 @@ use turbine_text::encoding::{LineEnding, TextEncoding};
 use turbine_text::Document;
 use turbine_ui::automation::Node;
 use crate::file_dialog::FileDialog;
-use turbine_ui::dialog::{Dialog, DialogResult};
+use turbine_ui::dialog::{self as ui, Dialog, DialogResult};
 use turbine_ui::editor::EditorView;
 use turbine_ui::event::{Button, Event, Key, KeyEvent, KeyKind, Mods, MouseEvent, MouseKind};
 use turbine_ui::menu::{Menu, MenuBar, MenuItem, MenuResult};
@@ -582,6 +582,19 @@ impl Workbench {
         self.sync_menu_checks();
     }
 
+    /// Lay out open dialogs for the screen and control style (their
+    /// controls' places come from this).
+    fn layout_dialogs(&mut self) {
+        let screen = self.screen();
+        let theme = self.theme.clone();
+        for d in [&mut self.dialog, &mut self.overwrite_q].into_iter().flatten() {
+            d.layout(screen, &theme);
+        }
+        if let (Some(f), Some(d)) = (&mut self.file_dlg, &mut self.dialog) {
+            f.fit(d);
+        }
+    }
+
     /// The colours and control style in use.
     pub fn theme(&self) -> &Theme {
         &self.theme
@@ -776,11 +789,12 @@ impl Workbench {
             return;
         };
         let args = self.run_config.get(&root).map(|(_, a)| a.join(" ")).unwrap_or_default();
-        let d = Dialog::new(&format!("arguments:{}", root.display()), "Program and Arguments", 60, 11)
-            .input("program", 1, 2, 54, "~P~rogram to run:", &program.display().to_string())
-            .input("args", 1, 5, 54, "~A~rguments:", &args)
-            .button("ok", 16, 7, "O~K~", true)
-            .button("cancel", 32, 7, "Cancel", false);
+        let d = Dialog::new(&format!("arguments:{}", root.display()), "Program and Arguments")
+            .body(ui::col(vec![
+                ui::input("program", "~P~rogram to run:", &program.display().to_string()).chars(50),
+                ui::input("args", "~A~rguments:", &args).chars(50),
+            ]))
+            .buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
         self.dialog = Some(d);
     }
 
@@ -951,12 +965,9 @@ impl Workbench {
                 keys.push(g.key().to_string());
             }
         }
-        let h = (self.size.1 - 4).clamp(10, 24);
-        let w = (self.size.0 - 4).clamp(40, 76);
-        let d = Dialog::new(&format!("guides:{}", keys.join("\u{1f}")), "Language Guides (√ = kept offline)", w, h)
-            .list("guides", Rect::new(0, 0, w - 18, h - 3), items, 0)
-            .button("ok", w - 16, 1, "~O~pen", true)
-            .button("cancel", w - 16, 4, "Cancel", false);
+        let d = Dialog::new(&format!("guides:{}", keys.join("\u{1f}")), "Language Guides (√ = kept offline)")
+            .body(ui::list("guides", items, 0).activates().lines(18))
+            .buttons(vec![ui::button("ok", "~O~pen", true), ui::button("cancel", "Cancel", false)]);
         self.dialog = Some(d);
     }
 
@@ -999,11 +1010,9 @@ impl Workbench {
         }
         let has_sel = self.windows.last().is_some_and(|w| w.ed.selection().is_some());
         let title = if has_sel { "Ask AI about the selection" } else { "Ask AI" };
-        let w = (self.size.0 - 6).clamp(40, 76);
-        let d = Dialog::new("ask", title, w, 8)
-            .input("q", 1, 2, w - 6, "~Q~uestion:", "")
-            .button("ok", w / 2 - 12, 4, "~A~sk", true)
-            .button("cancel", w / 2 + 2, 4, "Cancel", false);
+        let d = Dialog::new("ask", title)
+            .body(ui::input("q", "~Q~uestion:", "").chars(60))
+            .buttons(vec![ui::button("ok", "~A~sk", true), ui::button("cancel", "Cancel", false)]);
         self.dialog = Some(d);
     }
 
@@ -1087,11 +1096,9 @@ impl Workbench {
 
     fn agent_dialog(&mut self) {
         self.start_ai();
-        let w = (self.size.0 - 6).clamp(40, 76);
-        let d = Dialog::new("agent", "Agent: what should I do?", w, 8)
-            .input("task", 1, 2, w - 6, "~T~ask:", "")
-            .button("ok", w / 2 - 12, 4, "~S~tart", true)
-            .button("cancel", w / 2 + 2, 4, "Cancel", false);
+        let d = Dialog::new("agent", "Agent: what should I do?")
+            .body(ui::input("task", "~T~ask:", "").chars(60))
+            .buttons(vec![ui::button("ok", "~S~tart", true), ui::button("cancel", "Cancel", false)]);
         self.dialog = Some(d);
     }
 
@@ -1189,13 +1196,13 @@ impl Workbench {
             if in_terminal && runs && !a.terminal_ok {
                 let what = args["text"].as_str().unwrap_or("Enter").trim().to_string();
                 a.approving = Some((call_id, name, args));
-                let w = (self.size.0 - 6).clamp(40, 76);
-                let d = Dialog::new("agent_approve", "Agent wants to run a command", w, 9)
-                    .label(1, 1, "In the terminal:")
-                    .label(3, 2, &what.chars().take((w - 8) as usize).collect::<String>())
-                    .button("allow", 2, 4, "~A~llow", true)
-                    .button("always", 14, 4, "Allow A~l~ways", false)
-                    .button("deny", 32, 4, "~D~eny", false);
+                let d = Dialog::new("agent_approve", "Agent wants to run a command")
+                    .body(ui::col(vec![ui::label("In the terminal:"), ui::label(&format!("  {what}"))]))
+                    .buttons(vec![
+                        ui::button("allow", "~A~llow", true),
+                        ui::button("always", "Allow A~l~ways", false),
+                        ui::button("deny", "~D~eny", false),
+                    ]);
                 self.dialog = Some(d);
                 return;
             }
@@ -1249,13 +1256,9 @@ impl Workbench {
             })
             .collect();
         let sel = a.models.iter().position(|m| Some(&m.name) == cur.as_ref()).unwrap_or(0);
-        let w = (self.size.0 - 4).clamp(40, 78);
-        let h = (items.len() as i32 + 7).clamp(9, self.size.1 - 2);
-        let d = Dialog::new("models", &format!("AI Models ({})", a.source), w, h)
-            .label(1, 0, "Chat model:")
-            .list("models", Rect::new(1, 1, w - 18, h - 5), items, sel)
-            .button("ok", w - 15, 1, "O~K~", true)
-            .button("cancel", w - 15, 4, "Cancel", false);
+        let d = Dialog::new("models", &format!("AI Models ({})", a.source))
+            .body(ui::col(vec![ui::label("Chat model:"), ui::list("models", items, sel).activates()]))
+            .buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
         self.dialog = Some(d);
     }
 
@@ -1560,11 +1563,9 @@ impl Workbench {
                     return;
                 }
                 let lines: Vec<String> = text.lines().filter(|l| !l.starts_with("```")).map(str::to_string).collect();
-                let w = (lines.iter().map(|l| turbine_text::unicode::str_width(l)).max().unwrap_or(10) as i32 + 6).clamp(30, self.size.0 - 4);
-                let h = (lines.len() as i32 + 6).clamp(8, self.size.1 - 4);
-                let d = Dialog::new("hover", "Topic", w, h)
-                    .list("text", Rect::new(0, 0, w - 4, h - 5), lines, 0)
-                    .button("ok", (w - 10) / 2, h - 4, "O~K~", true);
+                let d = Dialog::new("hover", "Topic")
+                    .body(ui::list("text", lines, 0).lines(20))
+                    .buttons(vec![ui::button("ok", "O~K~", true)]);
                 self.dialog = Some(d);
             }
             LspEvent::Definition { id, locations } => {
@@ -1921,10 +1922,9 @@ impl Workbench {
                 self.say(msg.unwrap_or_else(|| "No problems".into()));
             }
             "search.goto" => {
-                let d = Dialog::new("goto", "Go to Line", 36, 8)
-                    .input("line", 1, 2, 30, "~L~ine number:", "")
-                    .button("ok", 6, 4, "O~K~", true)
-                    .button("cancel", 18, 4, "Cancel", false);
+                let d = Dialog::new("goto", "Go to Line")
+                    .body(ui::input("line", "~L~ine number:", "").chars(10))
+                    .buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
                 self.dialog = Some(d);
             }
             "view.line_numbers" => {
@@ -1940,21 +1940,17 @@ impl Workbench {
             "options.colors" => {
                 let names: Vec<String> = Scheme::all().iter().map(|s| s.name.to_string()).collect();
                 let cur = names.iter().position(|n| n == self.theme.scheme.name).unwrap_or(0);
-                let d = Dialog::new("colors", "Colors", 44, 12)
-                    .label(1, 0, "Color scheme:")
-                    .list("scheme", Rect::new(1, 1, 26, 8), names, cur)
-                    .button("ok", 30, 2, "O~K~", true)
-                    .button("cancel", 30, 5, "Cancel", false);
+                let d = Dialog::new("colors", "Colors")
+                    .body(ui::col(vec![ui::label("Color scheme:"), ui::list("scheme", names, cur).activates()]))
+                    .buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
                 self.dialog = Some(d);
             }
             "options.style" => {
                 let names: Vec<String> = ControlStyle::all().iter().map(|s| s.name.to_string()).collect();
                 let cur = names.iter().position(|n| n == self.theme.style.name).unwrap_or(0);
-                let d = Dialog::new("style", "Control Style", 44, 12)
-                    .label(1, 0, "Draw controls like:")
-                    .list("style", Rect::new(1, 1, 26, 8), names, cur)
-                    .button("ok", 30, 2, "O~K~", true)
-                    .button("cancel", 30, 5, "Cancel", false);
+                let d = Dialog::new("style", "Control Style")
+                    .body(ui::col(vec![ui::label("Draw controls like:"), ui::list("style", names, cur).activates()]))
+                    .buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
                 self.dialog = Some(d);
             }
             "window.tile" => self.tile(),
@@ -1989,10 +1985,9 @@ impl Workbench {
                 if items.is_empty() {
                     return;
                 }
-                let d = Dialog::new("winlist", "Window List", 56, 14)
-                    .list("windows", Rect::new(1, 1, 38, 9), items, 0)
-                    .button("ok", 41, 1, "~G~o to", true)
-                    .button("cancel", 41, 4, "Cancel", false);
+                let d = Dialog::new("winlist", "Window List")
+                    .body(ui::list("windows", items, 0).activates())
+                    .buttons(vec![ui::button("ok", "~G~o to", true), ui::button("cancel", "Cancel", false)]);
                 self.dialog = Some(d);
             }
             "file.save_all" => self.vim_actions(vec![ExAction::WriteAll(false)]),
@@ -2001,11 +1996,9 @@ impl Workbench {
             "options.keymap" => {
                 let names = vec![Keymap::Cua.name().to_string(), Keymap::Vim.name().to_string()];
                 let cur = if self.keymap == Keymap::Vim { 1 } else { 0 };
-                let d = Dialog::new("keymap", "Keymap", 40, 10)
-                    .label(1, 0, "Editor keys:")
-                    .list("keymap", Rect::new(1, 1, 22, 5), names, cur)
-                    .button("ok", 25, 1, "O~K~", true)
-                    .button("cancel", 25, 4, "Cancel", false);
+                let d = Dialog::new("keymap", "Keymap")
+                    .body(ui::col(vec![ui::label("Editor keys:"), ui::list("keymap", names, cur).activates()]))
+                    .buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)]);
                 self.dialog = Some(d);
             }
             "help.vim" => {
@@ -2029,10 +2022,9 @@ impl Workbench {
                 ] {
                     items.push(format!("{k:<14} {what}"));
                 }
-                let h = (self.size.1 - 4).clamp(10, 30);
-                let d = Dialog::new("vimhelp", "Vim Keys", 72.min(self.size.0 - 2), h)
-                    .list("keys", Rect::new(0, 0, 66.min(self.size.0 - 8), h - 5), items, 0)
-                    .button("ok", 28, h - 4, "O~K~", true);
+                let d = Dialog::new("vimhelp", "Vim Keys")
+                    .body(ui::list("keys", items, 0).lines(24))
+                    .buttons(vec![ui::button("ok", "O~K~", true)]);
                 self.dialog = Some(d);
             }
             "window.next" => {
@@ -2055,12 +2047,12 @@ impl Workbench {
                 }
             }
             "help.about" => {
-                let d = Dialog::new("about", "About", 46, 11)
-                    .label(15, 1, "T U R B I N E")
-                    .label(2, 3, "A retro, AI-first code editor and IDE")
-                    .label(2, 4, &format!("Version {}  -  MIT License", env!("CARGO_PKG_VERSION")))
-                    .label(2, 5, "github.com/benwbooth/turbine")
-                    .button("ok", 17, 7, "O~K~", true);
+                let d = Dialog::new("about", "About")
+                    .body(ui::label(&format!(
+                        "             T U R B I N E\n\nA retro, AI-first code editor and IDE\nVersion {}  -  MIT License\ngithub.com/benwbooth/turbine",
+                        env!("CARGO_PKG_VERSION")
+                    )))
+                    .buttons(vec![ui::button("ok", "O~K~", true)]);
                 self.dialog = Some(d);
             }
             "help.keys" => {
@@ -2074,11 +2066,7 @@ impl Workbench {
                     "Drag title to move, edges to resize",
                     "Agents: Esc stops, Space pauses/resumes",
                 ];
-                let mut d = Dialog::new("keys", "Keyboard", 50, lines.len() as i32 + 6);
-                for (i, l) in lines.iter().enumerate() {
-                    d = d.label(1, i as i32 + 1, l);
-                }
-                d = d.button("ok", 19, lines.len() as i32 + 2, "O~K~", true);
+                let d = Dialog::new("keys", "Keyboard").body(ui::label(&lines.join("\n"))).buttons(vec![ui::button("ok", "O~K~", true)]);
                 self.dialog = Some(d);
             }
             "agent.demo" => self.queue_demo(),
@@ -2148,7 +2136,7 @@ impl Workbench {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("/"));
         let project = cur.as_deref().map(turbine_services::lsp::project_root).or_else(|| std::env::current_dir().ok());
-        let (f, d) = FileDialog::new(save, dir, name, project, &self.recent_dirs, fmt.0, fmt.1, self.size);
+        let (f, d) = FileDialog::new(save, dir, name, project, &self.recent_dirs, fmt.0, fmt.1);
         self.file_dlg = Some(f);
         self.dialog = Some(d);
     }
@@ -2233,10 +2221,9 @@ impl Workbench {
         if p.exists() && !overwrite_ok {
             // Ask over the file dialog; Yes comes back here.
             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let q = Dialog::new("overwrite", "Replace File", 50, 7)
-                .label(1, 1, &format!("{name} already exists. Replace it?"))
-                .button("yes", 10, 3, "~Y~es", false)
-                .button("cancel", 26, 3, "~N~o", true);
+            let q = Dialog::new("overwrite", "Replace File")
+                .body(ui::label(&format!("{name} already exists. Replace it?")))
+                .buttons(vec![ui::button("yes", "~Y~es", false), ui::button("cancel", "~N~o", true)]);
             self.overwrite_q = Some(q);
             return;
         }
@@ -2321,11 +2308,13 @@ impl Workbench {
 
     fn unsaved_dialog(&mut self, then: &str) {
         let name = self.windows.iter().rev().find(|w| w.ed.doc.dirty).map(|w| w.ed.doc.title()).unwrap_or_default();
-        let d = Dialog::new(&format!("unsaved:{then}"), "Unsaved Changes", 50, 8)
-            .label(1, 1, &format!("{name} has unsaved changes."))
-            .button("save", 2, 3, "~S~ave", true)
-            .button("discard", 15, 3, "~D~on't Save", false)
-            .button("cancel", 33, 3, "Cancel", false);
+        let d = Dialog::new(&format!("unsaved:{then}"), "Unsaved Changes")
+            .body(ui::label(&format!("{name} has unsaved changes.")))
+            .buttons(vec![
+                ui::button("save", "~S~ave", true),
+                ui::button("discard", "~D~on't Save", false),
+                ui::button("cancel", "Cancel", false),
+            ]);
         self.dialog = Some(d);
     }
 
@@ -3236,6 +3225,7 @@ impl Workbench {
         let ok = json!({"ok": true});
         match name.as_str() {
             "snapshot" => {
+                self.layout_dialogs();
                 let mut v = json!({"ok": true, "tree": self.tree(), "focus": self.focus_summary()});
                 if cmd.get("screen").and_then(Value::as_bool).unwrap_or(false) {
                     let mut surf = Surface::new(self.size.0, self.size.1);
@@ -3342,7 +3332,10 @@ impl Workbench {
                 }
                 Output::Paste(s) => self.dispatch(Event::Paste(s)),
                 Output::Command(c) => self.run_command(&c),
-                Output::Resolve(t) => match self.tree().find_target(&t) {
+                Output::Resolve(t) => match {
+                    self.layout_dialogs();
+                    self.tree().find_target(&t).cloned()
+                } {
                     Some(n) if n.enabled => self.driver.push_front(Step::MoveTo(n.click_point())),
                     Some(_) => {
                         self.say(format!("Agent: {t} is disabled"));
@@ -3385,6 +3378,9 @@ impl App for Workbench {
     }
 
     fn tick(&mut self, now: Instant) -> Option<Instant> {
+        // (Agents find controls by where they are: lay dialogs out now, not
+        // only when the screen is drawn.)
+        self.layout_dialogs();
         let mut any_term = false;
         for w in &mut self.windows {
             if let Some(t) = &mut w.term {
@@ -3574,12 +3570,8 @@ impl App for Workbench {
                 comp.popup.draw(&mut c, at, desk, &theme);
             }
         }
-        if let (Some(f), Some(d)) = (&mut self.file_dlg, &mut self.dialog) {
-            d.layout(screen);
-            f.fit(d);
-        }
+        self.layout_dialogs();
         for d in [&mut self.dialog, &mut self.overwrite_q].into_iter().flatten() {
-            d.layout(screen);
             d.draw(&mut c, &theme);
             d.draw_overlays(&mut c, &theme);
         }
