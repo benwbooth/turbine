@@ -5377,6 +5377,15 @@ mod tests {
         wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: Point::new(at.x, at.y - 2), mods: Mods::NONE }));
         let (_, secs) = wb.shell.dock.sections_in(Side::Left, wb.layout().left.unwrap()).unwrap();
         assert_eq!(secs[0].2.unwrap().h, oh + 2);
+        // And down, with the Outline's own list under the pointer (it has the keys).
+        wb.shell.focus = shell::Focus::View(crate::dock::Tab::Outline);
+        let h = secs[0].1;
+        let at = Point::new(h.right() - 3, h.y);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: at, mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Drag(Button::Left), pos: Point::new(at.x, at.y + 3), mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: Point::new(at.x, at.y + 3), mods: Mods::NONE }));
+        let (_, secs) = wb.shell.dock.sections_in(Side::Left, wb.layout().left.unwrap()).unwrap();
+        assert_eq!(secs[0].2.unwrap().h, oh - 1);
         // Enter on the commit: its change as a diff page.
         let (_, secs) = wb.shell.dock.sections_in(Side::Left, wb.layout().left.unwrap()).unwrap();
         let b = secs[1].2.unwrap();

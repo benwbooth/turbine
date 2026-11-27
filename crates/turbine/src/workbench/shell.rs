@@ -1434,6 +1434,20 @@ impl Workbench {
         }
     }
 
+    /// An Outline row's tooltip: its whole name, then its first lines.
+    pub(super) fn outline_tip(&self, i: usize) -> Option<String> {
+        let name = self.shell.outline.list.rows.get(i)?.text.clone();
+        let &line = self.shell.outline.lines.get(i)?;
+        let ei = self.editor_index()?;
+        let doc = &self.windows[ei].ed.doc;
+        let mut out = vec![format!("{name}  (line {})", line + 1)];
+        for l in line..(line + 6).min(doc.len_lines()) {
+            let t = doc.line(l).replace('\t', "    ");
+            out.push(format!("  {}", t.chars().take(68).collect::<String>()));
+        }
+        Some(out.join("\n"))
+    }
+
     pub(super) fn outline_goto_pub(&mut self, i: usize, focus: bool) {
         self.outline_goto(i, focus);
     }
@@ -1451,6 +1465,9 @@ impl Workbench {
             let line = line.min(w.ed.doc.len_lines().saturating_sub(1));
             w.ed.cursor = w.ed.doc.rope.line_to_char(line);
             w.ed.anchor = None;
+            // (The view goes there too, a few lines of context above it,
+            // though the Outline keeps the keys.)
+            w.ed.scroll_y = line.saturating_sub(3);
             if focus {
                 self.focus_editor();
             }
@@ -1500,6 +1517,10 @@ impl Workbench {
                 }
             }
             self.layout_dock();
+            return true;
+        }
+        // A section's header being dragged (before any list sees the drag).
+        if self.shell.section_drag.is_some() && self.section_mouse(m) {
             return true;
         }
         // A view's list holding its scroll bar thumb gets the drag.
@@ -1977,6 +1998,13 @@ impl Workbench {
                     };
                     let mut ln = list.node(&format!("view.{}", t.key()), t.name(), self.shell.focus == Focus::View(t));
                     // (The Explorer's rows: where each is, its size, dates, permissions and git.)
+                    if t == Tab::Outline {
+                        for it in &mut ln.children {
+                            if let Some(i) = it.id.rsplit('.').next().and_then(|k| k.parse::<usize>().ok()) {
+                                it.tip = self.outline_tip(i);
+                            }
+                        }
+                    }
                     if t == Tab::Explorer {
                         for it in &mut ln.children {
                             if let Some(i) = it.id.rsplit('.').next().and_then(|k| k.parse::<usize>().ok()) {
@@ -1987,6 +2015,24 @@ impl Workbench {
                     pn = pn.child(ln);
                 }
                 None => {}
+            }
+            // The Explorer's sections (Outline, Timeline): their headers and lists.
+            if let Some((_, secs)) = self.shell.dock.sections_in(side, r) {
+                for (st, hdr, body) in secs {
+                    pn = pn.child(Node::new(format!("section.{}", st.key()), "button", st.name(), hdr).tip(format!("{}: click to fold or open, drag to resize", st.name())));
+                    let Some(b) = body else { continue };
+                    let list = if st == Tab::Timeline { &self.shell.timeline.list } else { &self.shell.outline.list };
+                    let mut ln = list.node(&format!("view.{}", st.key()), st.name(), self.shell.focus == Focus::View(st));
+                    ln.rect = b;
+                    if st == Tab::Outline {
+                        for it in &mut ln.children {
+                            if let Some(i) = it.id.rsplit('.').next().and_then(|k| k.parse::<usize>().ok()) {
+                                it.tip = self.outline_tip(i);
+                            }
+                        }
+                    }
+                    pn = pn.child(ln);
+                }
             }
             root = root.child(pn);
         }

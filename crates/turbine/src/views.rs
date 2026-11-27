@@ -628,6 +628,20 @@ fn symbol_icon(kind: &str) -> &'static str {
     }
 }
 
+/// A symbol's colour by kind, as the code's colours have them (functions
+/// light cyan, types light red, constants magenta, modules yellow).
+fn symbol_colour(kind: &str) -> turbine_ui::theme::Color {
+    use turbine_ui::theme::vga::*;
+    match kind {
+        "function" | "method" => LIGHT_CYAN,
+        "class" | "struct" | "enum" | "trait" | "interface" | "type" => LIGHT_RED,
+        "impl" | "module" => YELLOW,
+        "constant" => LIGHT_MAGENTA,
+        "heading" => YELLOW,
+        _ => LIGHT_GREEN,
+    }
+}
+
 impl Outline {
     /// Ask for the outline of this editor's text (when it changed).
     pub fn update(&mut self, win: u32, version: u64, lang: Option<&str>, text: impl FnOnce() -> String) {
@@ -678,7 +692,7 @@ impl Outline {
             let rows = if syms.is_empty() {
                 vec![Row::new("No symbols found")]
             } else {
-                syms.iter().map(|s| Row::new(s.name.clone()).indent(s.depth as u16).icon(symbol_icon(s.kind)).detail(format!("{}", s.line + 1))).collect()
+                syms.iter().map(|s| Row::new(s.name.clone()).indent(s.depth as u16).icon(symbol_icon(s.kind)).fg(symbol_colour(s.kind)).detail(format!("{}", s.line + 1))).collect()
             };
             self.list.set_rows(rows);
             changed = true;
