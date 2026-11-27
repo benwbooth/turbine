@@ -37,8 +37,20 @@ Contents (F1); Help > Index (Shift+F1) lists its topics.
   Source Control and tasks work in it.
 - In the Explorer, Enter opens, F2 renames, Delete moves to the trash,
   and the context menu makes files and folders.
-- Files keep their encoding and line endings. Right to Left (View) lays
-  out right-to-left text.
+- Files keep their encoding and line endings. The encoding is detected
+  (Unicode, the DOS code pages, Windows and ISO pages, KOI8, Mac,
+  Japanese, Chinese, Korean, EBCDIC and more); File > Reopen with
+  Encoding reads a file again in another, and Save with Encoding writes
+  it in another. Right to Left (View) lays out right-to-left text.
+- Pictures, PDFs, archives, media and office documents open in the
+  desktop's app for them; another binary file asks: its app, a hex view,
+  or as text.
+- File > Open Recent lists the files opened lately. Alt+Left and
+  Alt+Right go back and forward through the places you jumped from.
+- A new, untitled file guesses its language from what you type; Edit >
+  Change Language Mode sets it by hand.
+- View > Markdown Preview (Ctrl+Shift+V) shows a Markdown file rendered
+  beside it, following your edits. Enter or a click on a link follows it.
 
 ## Editing
 
@@ -62,6 +74,12 @@ Contents (F1); Help > Index (Shift+F1) lists its topics.
   A folded line ends in ⋯.
 - **Find and replace.** Ctrl+F finds in the file and Ctrl+H replaces.
   Ctrl+Shift+F searches every file in the project.
+- **More cursors.** Ctrl+Alt+Up and Ctrl+Alt+Down add a cursor above or
+  below; Ctrl+D selects the word, then each next match with a cursor of
+  its own. Selection > Column Selection Mode makes Shift+Up and Down
+  select a column. Typing happens at every cursor; Esc goes back to one.
+- **Word wrap.** View > Word Wrap (Alt+Z) wraps long lines at the
+  window's edge.
 - **Vim.** Options > Keymap (or Settings) switches to Vim keys; Help >
   Vim Keys lists them.
 
@@ -89,7 +107,7 @@ For each language, Turbine uses what is installed:
   its project, in a terminal.
 - **A debugger.** Run > Start Debugging uses the language's debug adapter
   (lldb-dap or gdb for native languages, debugpy for Python, dlv for Go,
-  and others).
+  tessh's own for tessh, and others).
 - **A guide.** Help > Language Guide opens the guide for the file's
   language; Help > Language Guides lists them all.
 
@@ -99,7 +117,10 @@ tessh is a shell that is Python underneath. Turbine colours tessh
 (`.tsh` files, and `#!/usr/bin/env tessh` scripts), including what its
 strings interpolate (`$x`, `$(...)`), outlines its `def`, `class`,
 `defmacro` and `defop` definitions, folds its blocks by indentation,
-checks files with `tessh --check`, and runs them with `tessh`. Its two
+checks files with `tessh --check`, runs them with `tessh`, and debugs
+them with tessh's own debugger (`tessh --dap`): breakpoints with
+conditions, stepping, variables, and an Immediate window that takes
+tessh or Python and can change the running script. Its two
 guides, the tessh guide and the Advanced tessh Scripting Guide, come
 from the installed tessh.
 
@@ -159,6 +180,13 @@ A tasks file looks like VS Code's:
 - Run > Arguments sets the program and its arguments when there is no
   configuration.
 
+## Tools
+
+Edit > Show Clipboard shows what's on it. Edit > Calculator works out
+an expression (`+ - * / % ^`, hex `0x1F` and binary `0b101`, `sqrt`,
+`sin`, `ln`, `pi` ...) and shows whole numbers in hex and binary too.
+File > New Window starts another Turbine.
+
 ## Terminals
 
 Terminal > New Terminal (Ctrl+Shift+`) opens your shell in the panel.
@@ -168,8 +196,22 @@ the program. Drag the scroll bar, or use the wheel, to read back.
 ## Source control
 
 The Source Control view shows what changed in the project's git
-repository. Enter opens a file, Space stages or unstages it, Tab goes to
-the message field, and Ctrl+Enter (or Enter in the field) commits.
+repository. Enter shows a file's changes (o opens the file), Space
+stages or unstages it, Tab goes to the message field, and Ctrl+Enter (or
+Enter in the field) commits.
+
+The Git menu shows a file's changes, all changes, the staged changes,
+the history (Enter on a commit shows it), a file's history and who
+changed the cursor's line; it switches branches, and pulls, pushes,
+fetches and stashes (their output in the Output window).
+
+Changes show as delta shows them: each file under a rule, each hunk
+under its line and the function it's in, removed lines on red and added
+ones on green with the words that changed picked out, the code coloured
+by its language. In a diff, s switches between one after another and
+side by side, n and p go to the next and previous change, and Enter
+opens the file at that line. A `.patch` or `.diff` file shows the same
+way with Ctrl+Shift+V.
 
 ## AI
 
@@ -242,4 +284,9 @@ example; `extensions/build.sh` builds one.
 | Ctrl+Shift+B | Run the build task |
 | Ctrl+Shift+Y | Immediate window |
 | Ctrl+Shift+` | New terminal |
+| Alt+Left / Alt+Right | Back / forward |
+| Alt+Z | Word wrap |
+| Ctrl+Alt+Up / Down | Add a cursor |
+| Ctrl+D | Select the next match too |
+| Ctrl+Shift+V | Markdown or patch preview |
 | Alt+X | Quit |
