@@ -1706,3 +1706,83 @@ impl Workbench {
         root
     }
 }
+
+/// A box character's arms (up, right, down, left) and weight (1 single,
+/// 2 double); None for anything else.
+fn arms(c: &str) -> Option<([bool; 4], u8)> {
+    Some(match c {
+        "─" => ([false, true, false, true], 1),
+        "│" => ([true, false, true, false], 1),
+        "┌" => ([false, true, true, false], 1),
+        "┐" => ([false, false, true, true], 1),
+        "└" => ([true, true, false, false], 1),
+        "┘" => ([true, false, false, true], 1),
+        "├" => ([true, true, true, false], 1),
+        "┤" => ([true, false, true, true], 1),
+        "┬" => ([false, true, true, true], 1),
+        "┴" => ([true, true, false, true], 1),
+        "┼" => ([true, true, true, true], 1),
+        "═" => ([false, true, false, true], 2),
+        "║" => ([true, false, true, false], 2),
+        "╔" => ([false, true, true, false], 2),
+        "╗" => ([false, false, true, true], 2),
+        "╚" => ([true, true, false, false], 2),
+        "╝" => ([true, false, false, true], 2),
+        "╠" => ([true, true, true, false], 2),
+        "╣" => ([true, false, true, true], 2),
+        "╦" => ([false, true, true, true], 2),
+        "╩" => ([true, true, false, true], 2),
+        "╬" => ([true, true, true, true], 2),
+        _ => return None,
+    })
+}
+
+fn box_char(a: [bool; 4], w: u8) -> Option<&'static str> {
+    let single = ["─", "│", "┌", "┐", "└", "┘", "├", "┤", "┬", "┴", "┼"];
+    let double = ["═", "║", "╔", "╗", "╚", "╝", "╠", "╣", "╦", "╩", "╬"];
+    let set = if w == 2 { double } else { single };
+    set.into_iter().find(|c| arms(c).is_some_and(|(b, _)| b == a))
+}
+
+/// Where frames meet along the side bars' and panel's edges, their lines
+/// join (┐ beside ─ becomes ┬; │ beside ─ becomes ├), so a part and the
+/// editor window share one border.
+pub(super) fn join_borders(surf: &mut turbine_ui::Surface, parts: &[Rect]) {
+    let at = |surf: &turbine_ui::Surface, x: i32, y: i32| surf.get(x, y).and_then(|c| arms(&c.text));
+    let mut changes = Vec::new();
+    for r in parts {
+        let mut cells = Vec::new();
+        for x in r.x..r.right() {
+            cells.push((x, r.y));
+            cells.push((x, r.bottom() - 1));
+        }
+        for y in r.y..r.bottom() {
+            cells.push((r.x, y));
+            cells.push((r.right() - 1, y));
+        }
+        for (x, y) in cells {
+            let Some((mut a, w)) = at(surf, x, y) else { continue };
+            let before = a;
+            // A neighbour of the same weight reaching toward this cell.
+            let near = [(0, -1, 2usize, 0usize), (1, 0, 3, 1), (0, 1, 0, 2), (-1, 0, 1, 3)];
+            for (dx, dy, back, mine) in near {
+                if let Some((n, nw)) = at(surf, x + dx, y + dy) {
+                    if nw == w && n[back] {
+                        a[mine] = true;
+                    }
+                }
+            }
+            if a != before {
+                if let Some(c) = box_char(a, w) {
+                    changes.push((x, y, c));
+                }
+            }
+        }
+    }
+    for (x, y, c) in changes {
+        if let Some(cell) = surf.get_mut(x, y) {
+            cell.text = c.into();
+        }
+    }
+}
+

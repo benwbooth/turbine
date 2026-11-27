@@ -101,6 +101,10 @@ pub struct Explorer {
     want: Option<PathBuf>,
     /// List names starting with a dot.
     pub show_hidden: bool,
+    /// Git's status of changed paths (absolute), and of the folders holding
+    /// them; read in the background with the listings.
+    git: HashMap<PathBuf, char>,
+    git_rx: Option<Receiver<HashMap<PathBuf, char>>>,
 }
 
 impl Explorer {
@@ -118,8 +122,11 @@ impl Explorer {
             refreshed: Instant::now(),
             want: None,
             show_hidden: false,
+            git: HashMap::new(),
+            git_rx: None,
         };
         e.request(&root);
+        e.read_git();
         e.rebuild();
         e
     }
@@ -152,6 +159,38 @@ impl Explorer {
         });
     }
 
+    /// Git's status for the project, off the UI thread.
+    fn read_git(&mut self) {
+        if self.git_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = channel();
+        self.git_rx = Some(rx);
+        let root = self.root.clone();
+        std::thread::spawn(move || {
+            let mut out = HashMap::new();
+            let top = std::process::Command::new("git").arg("-C").arg(&root).args(["rev-parse", "--show-toplevel"]).output().ok().filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
+            if let Some(top) = top {
+                if let Ok(o) = std::process::Command::new("git").arg("-C").arg(&top).args(["status", "--porcelain=v1", "-z", "--untracked-files=normal"]).output() {
+                    for (path, code) in crate::filetypes::parse_git_status(&String::from_utf8_lossy(&o.stdout)) {
+                        let p = top.join(&path);
+                        // (Its folders show that something in them changed.)
+                        let mut d = p.parent();
+                        while let Some(x) = d {
+                            if !x.starts_with(&top) {
+                                break;
+                            }
+                            out.entry(x.to_path_buf()).or_insert('•');
+                            d = x.parent();
+                        }
+                        out.insert(p, code);
+                    }
+                }
+            }
+            let _ = tx.send(out);
+        });
+    }
+
     /// Take finished listings; re-list open folders every few seconds while
     /// shown (files come and go). True when the tree changed.
     pub fn poll(&mut self, shown: bool) -> bool {
@@ -163,11 +202,21 @@ impl Explorer {
                 changed = true;
             }
         }
+        if let Some(rx) = &self.git_rx {
+            if let Ok(g) = rx.try_recv() {
+                self.git_rx = None;
+                if g != self.git {
+                    self.git = g;
+                    changed = true;
+                }
+            }
+        }
         if shown && self.refreshed.elapsed() > Duration::from_secs(3) {
             self.refreshed = Instant::now();
             for d in self.expanded.clone() {
                 self.request(&d);
             }
+            self.read_git();
         }
         if changed {
             self.rebuild();
@@ -207,7 +256,17 @@ impl Explorer {
             let p = dir.join(name);
             let open = self.expanded.contains(&p);
             let icon = if *is_dir { if open { "▾" } else { "▸" } } else { " " };
-            rows.push(Row::new(name.clone()).indent(depth).icon(icon));
+            // Its type's icon and colour, and git's mark.
+            let mut row = Row::new(name.clone()).indent(depth).icon(icon).glyph(crate::filetypes::icon(name, *is_dir, open)).fg(crate::filetypes::colour(name, *is_dir));
+            if let Some(code) = self.git.get(&p) {
+                let (b, c) = crate::filetypes::git_badge(*code);
+                row = row.badge(b, c);
+                // (A changed file's name takes git's colour, as in VS Code.)
+                if !*is_dir {
+                    row = row.fg(c);
+                }
+            }
+            rows.push(row);
             paths.push((p.clone(), *is_dir));
             if *is_dir && open {
                 self.walk(&p, depth + 1, rows, paths);
@@ -236,6 +295,7 @@ impl Explorer {
         for d in self.expanded.clone() {
             self.request(&d);
         }
+        self.read_git();
     }
 
     /// Close every folder.

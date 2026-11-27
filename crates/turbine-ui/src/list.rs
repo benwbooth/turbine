@@ -26,11 +26,47 @@ pub struct Row {
     pub fg: Option<crate::theme::Color>,
     /// A heading row (bold, not selectable by type-ahead).
     pub heading: bool,
+    /// The item's type icon after the mark (a monochrome glyph in the
+    /// row's colour).
+    pub glyph: String,
+    /// A status at the right in its own colour (git's M, U, A, D).
+    pub badge: Option<(String, crate::theme::Color)>,
+}
+
+/// A colour readable on a background: the EGA light colours become their
+/// dark halves on a light panel (VB-DOS's grey), as DOS programs did.
+pub fn readable(fg: crate::theme::Color, bg: crate::theme::Color) -> crate::theme::Color {
+    use crate::theme::vga::*;
+    let light = (bg.0 as u32 * 3 + bg.1 as u32 * 6 + bg.2 as u32) / 10 > 110;
+    let fg = if light {
+        match fg {
+            c if c == LIGHT_RED => RED,
+            c if c == LIGHT_GREEN => GREEN,
+            c if c == LIGHT_BLUE => BLUE,
+            c if c == LIGHT_CYAN => BLUE,
+            c if c == LIGHT_MAGENTA => MAGENTA,
+            c if c == YELLOW => BROWN,
+            c if c == WHITE => BLACK,
+            c if c == LIGHT_GRAY => DARK_GRAY,
+            c => c,
+        }
+    } else {
+        fg
+    };
+    if fg == bg { if light { BLACK } else { WHITE } } else { fg }
 }
 
 impl Row {
     pub fn new(text: impl Into<String>) -> Row {
         Row { text: text.into(), ..Default::default() }
+    }
+    pub fn glyph(mut self, g: impl Into<String>) -> Row {
+        self.glyph = g.into();
+        self
+    }
+    pub fn badge(mut self, b: impl Into<String>, c: crate::theme::Color) -> Row {
+        self.badge = Some((b.into(), c));
+        self
     }
     pub fn indent(mut self, n: u16) -> Row {
         self.indent = n;
@@ -251,7 +287,7 @@ impl ListView {
             } else if sel {
                 s.panel_selected
             } else {
-                Style { fg: row.fg.unwrap_or(base.fg), ..base }
+                Style { fg: row.fg.map(|f| readable(f, base.bg)).unwrap_or(base.fg), ..base }
             };
             let stl = if row.heading { Style { attrs: crate::theme::Attrs { bold: true, ..stl.attrs }, ..stl } } else { stl };
             let line = Rect::new(r.x, y, text_w, 1);
@@ -261,6 +297,17 @@ impl ListView {
             if !row.icon.is_empty() {
                 lc.print(x, y, &row.icon, stl);
                 x += str_width(&row.icon) as i32 + 1;
+            }
+            if !row.glyph.is_empty() {
+                lc.print(x, y, &row.glyph, stl);
+                x += str_width(&row.glyph) as i32 + 1;
+            }
+            // (The badge at the far right; the detail before it.)
+            let bw = row.badge.as_ref().map_or(0, |(b, _)| str_width(b) as i32 + 1);
+            let text_w = text_w - bw;
+            if let Some((b, col)) = &row.badge {
+                let bs = if sel { stl } else { Style { fg: readable(*col, base.bg), ..base } };
+                lc.print(r.x + text_w, y, b, bs);
             }
             // The name comes first: the detail gets what's left (cut at its
             // start, or dropped), never the name.

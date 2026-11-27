@@ -7,6 +7,7 @@ pub mod agent;
 pub mod dock;
 pub mod file_dialog;
 pub mod filekind;
+pub mod filetypes;
 pub mod diffview;
 pub mod markdown;
 pub mod mcp;

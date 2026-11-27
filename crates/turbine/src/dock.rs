@@ -226,7 +226,10 @@ impl Dock {
         }
         let left = (lw > 0).then(|| Rect::new(area.x, area.y, lw, area.h));
         let right = (rw > 0).then(|| Rect::new(area.right() - rw, area.y, rw, area.h));
-        let mid = Rect::new(area.x + lw, area.y, (area.w - lw - rw).max(0), area.h);
+        // (The editors start on the left part's last column: one border
+        // between them, not two side by side.)
+        let ol = i32::from(lw > 0);
+        let mid = Rect::new(area.x + lw - ol, area.y, (area.w - lw - rw + ol).max(0), area.h);
         let bh = if shown(&self.bottom) { self.bottom.size.clamp(4, (mid.h - 6).max(4)) } else { 0 };
         let bottom = (bh > 0 && mid.h > bh).then(|| Rect::new(mid.x, mid.bottom() - bh, mid.w, bh));
         let ed = Rect::new(mid.x, mid.y, mid.w, mid.h - bottom.map_or(0, |b| b.h));
@@ -375,7 +378,7 @@ mod tests {
         let l = d.layout(area);
         let (left, right, bottom) = (l.left.unwrap(), l.right.unwrap(), l.bottom.unwrap());
         assert_eq!((left.x, left.w, right.right(), right.w), (0, 30, 120, 46));
-        assert_eq!((bottom.x, bottom.w, bottom.bottom()), (30, 120 - 30 - 46, 41));
+        assert_eq!((bottom.x, bottom.w, bottom.bottom()), (29, 120 - 30 - 46 + 1, 41));
         // (The tabs are in the editors' top border, under the breadcrumbs.)
         assert_eq!((l.breadcrumbs.unwrap().y, l.editor_tabs.unwrap().y), (1, 2));
         assert_eq!((l.editors.y, l.editors.bottom()), (2, bottom.y));

@@ -4426,6 +4426,12 @@ impl App for Workbench {
                 c.set_style_at(p, st);
             }
         }
+        // (Side bars and the panel share their border with the editors.)
+        let l = self.layout();
+        let parts: Vec<Rect> = [l.left, l.bottom, l.right].into_iter().flatten().collect();
+        if self.dialog.is_none() && !self.menubar.is_open() {
+            shell::join_borders(surf, &parts);
+        }
         surf.cursor_blink = self.shell.cursor_blink;
         let in_editor = self.dialog.is_none() && self.overwrite_q.is_none() && self.shell.focus == Focus::Editors && self.shell.palette.is_none();
         if let Some((p, s)) = surf.cursor {
@@ -5829,6 +5835,47 @@ mod tests {
         click(&mut wb, i);
         assert_eq!(wb.windows.len(), n0 + 2);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resizing_keeps_the_explorer_still() {
+        let dir = std::env::temp_dir().join(format!("turbine-bounce-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..80 {
+            std::fs::write(dir.join(format!("f{i:02}.txt")), "x").unwrap();
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut wb = Workbench::new(&[dir.clone()]);
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(120, 36));
+        wait_until(&mut wb, "listed", |wb| wb.shell.explorer.list.rows.len() > 70);
+        wb.shell.explorer.list.select(40);
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let first = |wb: &Workbench| (wb.shell.explorer.list.scroll, wb.shell.explorer.list.selected);
+        let before = first(&wb);
+        // Dragging the side bar's edge a column at a time.
+        let l = wb.layout();
+        let edge = l.left.unwrap().right() - 1;
+        let y = 10;
+        let mut seen = vec![];
+        wb.dispatch(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(edge, y), mods: Mods::NONE }));
+        for dx in 1..12 {
+            wb.dispatch(Event::Mouse(MouseEvent { kind: MouseKind::Drag(Button::Left), pos: Point::new(edge + dx, y), mods: Mods::NONE }));
+            wb.render(&mut surf);
+            seen.push((wb.layout().left.unwrap().w, first(&wb), surf.to_text().lines().nth(3).unwrap_or("").chars().take(40).collect::<String>()));
+        }
+        wb.dispatch(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: Point::new(edge + 11, y), mods: Mods::NONE }));
+        // Resizing the whole window.
+        for w in (90..120).rev().step_by(3) {
+            wb.dispatch(Event::Resize(w, 36));
+            wb.render(&mut surf);
+            seen.push((wb.layout().left.unwrap().w, first(&wb), surf.to_text().lines().nth(3).unwrap_or("").chars().take(40).collect::<String>()));
+        }
+        let widths: Vec<i32> = seen[..11].iter().map(|s| s.0).collect();
+        assert!(widths.windows(2).all(|w| w[1] >= w[0]), "the edge followed the pointer: {widths:?}");
+        assert!(seen.iter().all(|s| s.1 == before), "the list stayed put: {before:?} {seen:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
