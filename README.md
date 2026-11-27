@@ -85,7 +85,7 @@ comes back once the action has finished on screen.
   pastes. Copies reach your system clipboard (OSC 52), even over SSH.
 - The automation socket, plus `--headless --script` for tests and screenshots
 
-The plan covers much more: LSP, DAP, tree-sitter, an embedded terminal
+The plan covers much more: LSP, DAP, tree-sitter,
 WASI extensions, Emacs and VS Code keymaps, AI completion and an
 assistant, hearth AI hub integration, a global menu, desktop and web front
 ends (a cxx-qt Qt app and a Leptos web app, no JavaScript), and retro
