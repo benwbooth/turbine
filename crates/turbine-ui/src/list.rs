@@ -351,7 +351,7 @@ impl ListView {
         }
         self.cut.extend(cut);
         if bar {
-            draw_vscroll(c, r.right() - 1, r.y, r.h, self.scroll, max + 1, s.scrollbar, theme.style.scroll);
+            draw_vscroll(c, r.right() - 1, r.y, r.h, self.scroll, n, self.rows.len(), s.scrollbar, theme.style.scroll);
         }
         if focused && !self.rows.is_empty() && self.selected >= self.scroll && self.selected < self.scroll + n {
             c.set_cursor(Point::new(r.x + 1, r.y + (self.selected - self.scroll) as i32), CursorShape::Underline);

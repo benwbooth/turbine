@@ -984,15 +984,35 @@ impl EditorView {
         }
     }
 
+    /// The sideways bar over the text's last row (when the window's bottom
+    /// edge is shared, as with the panel under it): only while lines are
+    /// wider than the window or it's scrolled sideways.
+    pub fn draw_hscroll_inside(&self, c: &mut Canvas, theme: &Theme) {
+        if self.wrap_width() > 0 {
+            return;
+        }
+        let w = (self.area.w - self.gutter_width()).max(1) as usize;
+        let lines = self.doc.len_lines();
+        let longest = (self.scroll_y..(self.scroll_y + self.area.h.max(1) as usize).min(lines)).map(|l| turbine_text::unicode::str_width(&self.doc.line(l).replace('\t', "    "))).max().unwrap_or(0);
+        if longest <= w && self.scroll_x == 0 {
+            return;
+        }
+        let x = self.area.x + self.gutter_width();
+        draw_hscroll(c, x, self.area.bottom() - 1, self.area.w - self.gutter_width(), self.scroll_x, w, longest.max(self.scroll_x + w), theme.scheme.scrollbar, theme.style.scroll);
+    }
+
     pub fn draw_scrollbars(&self, c: &mut Canvas, frame: Rect, theme: &Theme) {
-        let (line, col) = self.cursor_line_col();
         let ch = theme.style.scroll;
-        draw_vscroll(c, frame.right() - 1, frame.y + 1, frame.h - 2, line, self.doc.len_lines(), theme.scheme.scrollbar, ch);
-        let longest = 256.max(col + 1);
+        // (Thumbs as long as the share in view, where the view is.)
+        let rows = self.area.h.max(1) as usize;
+        draw_vscroll(c, frame.right() - 1, frame.y + 1, frame.h - 2, self.scroll_y, rows, self.doc.len_lines().max(self.scroll_y + rows), theme.scheme.scrollbar, ch);
+        let w = (self.area.w - self.gutter_width()).max(1) as usize;
+        let lines = self.doc.len_lines();
+        let longest = (self.scroll_y..(self.scroll_y + rows).min(lines)).map(|l| turbine_text::unicode::str_width(&self.doc.line(l).replace('\t', "    "))).max().unwrap_or(0).max(self.scroll_x + w);
         // (Borland's windows show line:column in the bottom edge's first
         // cells: the bar starts after them.)
         let skip = if theme.style.window_numbers && frame.w > 20 { 13 } else { 2 };
-        draw_hscroll(c, frame.x + skip, frame.bottom() - 1, frame.w - skip - 2, self.scroll_x, longest, theme.scheme.scrollbar, ch);
+        draw_hscroll(c, frame.x + skip, frame.bottom() - 1, frame.w - skip - 2, self.scroll_x, w, longest, theme.scheme.scrollbar, ch);
     }
 }
 

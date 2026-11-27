@@ -151,7 +151,7 @@ impl ListPopup {
             }
         }
         if self.items.len() > rows as usize {
-            crate::frame::draw_vscroll(c, self.rect.right() - 1, y + 1, rows, self.sel, self.items.len(), s.menu, theme.style.scroll);
+            crate::frame::draw_vscroll(c, self.rect.right() - 1, y + 1, rows, self.scroll, rows as usize, self.items.len(), s.menu, theme.style.scroll);
         }
     }
 }

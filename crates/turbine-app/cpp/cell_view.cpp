@@ -635,6 +635,15 @@ void CellView::paintVga(QPainter* p)
                     // Braille (the minimap): lit dots only, as blocks on the
                     // VGA grid (fonts draw the unlit ones as circles).
                     brailleDots(p, QRectF(x * gw, y * gh, gw, gh), ch, fg);
+                } else if (ch >= 0x2580 && ch <= 0x259F) {
+                    // Blocks and shades (scroll bars' tracks): fills on the
+                    // screen's own pixels, so cells meet without gaps.
+                    const QRectF dev = p->transform().mapRect(QRectF(x * gw, y * gh, gw, gh));
+                    const QRectF snapped(std::round(dev.left()), std::round(dev.top()), std::round(dev.right()) - std::round(dev.left()), std::round(dev.bottom()) - std::round(dev.top()));
+                    p->save();
+                    p->resetTransform();
+                    if (!drawShape(p, ch, snapped, fg, rgb((c.flags & 8) ? c.fg : c.bg))) p->fillRect(snapped, fg);
+                    p->restore();
                 } else if (capShape(p, ch, QRectF(x * gw, y * gh, gw, gh), fg)) {
                     // (A pill's end: a shape, not the font's glyph.)
                 } else {

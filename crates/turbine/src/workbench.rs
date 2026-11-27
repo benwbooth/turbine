@@ -4400,6 +4400,7 @@ impl App for Workbench {
         c.fill(desk, theme.scheme.desktop_char, theme.scheme.desktop);
         let n = self.windows.len();
         let has_modal = self.dialog.is_some() || self.menubar.is_open();
+        let panel_top = self.layout().bottom.map(|b| b.y);
         self.image_places.clear();
         let mut to_view: Vec<(u32, Rect)> = Vec::new();
         for (i, w) in self.windows.iter_mut().enumerate() {
@@ -4440,7 +4441,7 @@ impl App for Workbench {
                     if total > len {
                         let r = w.win.rect;
                         let max = total - len;
-                        turbine_ui::frame::draw_vscroll(&mut wc, r.right() - 1, r.y + 1, r.h - 2, offset.min(max), max + 1, theme.scheme.scrollbar, theme.style.scroll);
+                        turbine_ui::frame::draw_vscroll(&mut wc, r.right() - 1, r.y + 1, r.h - 2, offset.min(max), len, total, theme.scheme.scrollbar, theme.style.scroll);
                     }
                 }
                 continue;
@@ -4453,6 +4454,10 @@ impl App for Workbench {
             }
             if active && !viewed {
                 w.ed.draw_scrollbars(&mut wc, w.win.rect, &theme);
+                // (Its bottom edge is the panel's top: the bar over the last row.)
+                if panel_top == Some(w.win.rect.bottom() - 1) {
+                    w.ed.draw_hscroll_inside(&mut wc, &theme);
+                }
                 if w.ed.doc.dirty {
                     wc.print(w.win.rect.x + 1, w.win.rect.bottom() - 1, "*", theme.scheme.frame_icons);
                 }

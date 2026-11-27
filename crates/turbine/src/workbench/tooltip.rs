@@ -95,58 +95,121 @@ impl Workbench {
     }
 
     /// Draw the tip under the mouse (above it at the bottom of the screen),
-    /// kept on the screen: one line, or a few when it's long.
+    /// kept on the screen, its parts in colours: a path's folders, its
+    /// slashes and its name (in the tree's colour); sizes, dates,
+    /// permissions and git's status each their own.
     pub(super) fn draw_tip(&self, c: &mut Canvas, theme: &Theme) {
         let (Some((_, text)), Some((p, _))) = (&self.tip.shown, self.tip.at) else { return };
         let screen = self.screen();
         let max_w = (screen.w - 4).clamp(10, 70) as usize;
-        let mut lines: Vec<String> = Vec::new();
-        for para in text.lines() {
-            let mut line = String::new();
-            for word in para.split(' ') {
-                if !line.is_empty() && str_width(&line) + 1 + str_width(word) > max_w {
-                    lines.push(std::mem::take(&mut line));
-                }
-                if !line.is_empty() {
-                    line.push(' ');
-                }
-                line.push_str(word);
-            }
-            lines.push(line);
-            // (A word longer than the box, a long path: cut into pieces.)
-            while lines.last().is_some_and(|l| str_width(l) > max_w) {
-                let l = lines.pop().unwrap();
-                let mut head = String::new();
-                let mut rest = l.chars();
-                for ch in rest.by_ref() {
-                    head.push(ch);
-                    if str_width(&head) >= max_w {
-                        break;
+        let base = theme.scheme.tooltip;
+        let is_dir = text.lines().any(|l| l.starts_with("Folder"));
+        // Each line as coloured pieces, then cut to the box's width.
+        let mut lines: Vec<Vec<(String, Style)>> = Vec::new();
+        for line in text.lines() {
+            let pieces = colour_line(line, is_dir, base);
+            let mut cur: Vec<(String, Style)> = Vec::new();
+            let mut w = 0;
+            for (t, st) in pieces {
+                for ch in t.chars() {
+                    let cw = str_width(&ch.to_string());
+                    if w + cw > max_w {
+                        lines.push(std::mem::take(&mut cur));
+                        w = 0;
                     }
+                    match cur.last_mut() {
+                        Some((s, x)) if *x == st => s.push(ch),
+                        _ => cur.push((ch.to_string(), st)),
+                    }
+                    w += cw;
                 }
-                lines.push(head);
-                lines.push(rest.collect());
             }
-            if lines.len() >= 8 {
+            lines.push(cur);
+            if lines.len() >= 10 {
                 break;
             }
         }
-        lines.truncate(8);
-        let w = lines.iter().map(|l| str_width(l)).max().unwrap_or(0).min(max_w) as i32 + 2;
+        lines.truncate(10);
+        let w = lines.iter().map(|l| l.iter().map(|(t, _)| str_width(t)).sum::<usize>()).max().unwrap_or(0) as i32 + 2;
         let h = lines.len() as i32;
         let x = p.x.min(screen.right() - w).max(0);
         let y = if p.y + 1 + h <= screen.bottom() { p.y + 1 } else { (p.y - h).max(0) };
-        let st = theme.scheme.tooltip;
         let r = Rect::new(x, y, w, h);
-        c.fill(r, " ", st);
+        c.fill(r, " ", base);
         for (i, l) in lines.iter().enumerate() {
-            c.print(x + 1, y + i as i32, l, st);
+            let mut cx = x + 1;
+            for (t, st) in l {
+                cx = c.print(cx, y + i as i32, t, *st);
+            }
         }
         // (A shadow, as DOS windows have one.)
         if theme.style.shadows {
             c.shadow(r, theme.scheme.shadow);
         }
     }
+}
+
+/// A tooltip line's colours (on the tip's black).
+fn colour_line(line: &str, is_dir: bool, base: Style) -> Vec<(String, Style)> {
+    let fg = |c| Style { fg: c, ..base };
+    // A path: folders, slashes, and the name in the tree's colour.
+    if line.starts_with('/') || line.starts_with("~/") {
+        let mut out = Vec::new();
+        let parts: Vec<&str> = line.split('/').collect();
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                out.push(("/".to_string(), fg(vga::YELLOW)));
+            }
+            let last = i + 1 == parts.len();
+            let st = if last { fg(crate::filetypes::colour(part, is_dir)) } else { fg(vga::LIGHT_CYAN) };
+            out.push((part.to_string(), st));
+        }
+        return out;
+    }
+    if let Some(v) = line.strip_prefix("Git: ") {
+        let c = match v {
+            "changed" => vga::YELLOW,
+            "added" | "untracked (new)" => vga::LIGHT_GREEN,
+            "deleted" | "in conflict" => vga::LIGHT_RED,
+            "renamed" => vga::LIGHT_CYAN,
+            _ => vga::YELLOW,
+        };
+        return vec![("Git: ".into(), fg(vga::WHITE)), (v.to_string(), fg(c))];
+    }
+    if let Some(v) = line.strip_prefix("Size: ") {
+        return vec![("Size: ".into(), fg(vga::WHITE)), (v.to_string(), fg(vga::LIGHT_GREEN))];
+    }
+    for pre in ["Error: ", "Warning: ", "Info: ", "Hint: "] {
+        if let Some(v) = line.strip_prefix(pre) {
+            let c = match pre {
+                "Error: " => vga::LIGHT_RED,
+                "Warning: " => vga::YELLOW,
+                _ => vga::LIGHT_CYAN,
+            };
+            return vec![(pre.to_string(), fg(c)), (v.to_string(), base)];
+        }
+    }
+    // Facts apart by " · ": sizes, dates, permissions, a folder's count.
+    if line.contains("  ·  ") {
+        let mut out = Vec::new();
+        for (i, f) in line.split("  ·  ").enumerate() {
+            if i > 0 {
+                out.push(("  ·  ".into(), fg(vga::DARK_GRAY)));
+            }
+            if let Some(d) = f.strip_prefix("modified ") {
+                out.push(("modified ".into(), fg(vga::WHITE)));
+                out.push((d.to_string(), fg(vga::YELLOW)));
+            } else if f.len() == 9 && f.chars().all(|c| matches!(c, 'r' | 'w' | 'x' | '-')) {
+                out.push((f.to_string(), fg(vga::LIGHT_MAGENTA)));
+            } else if f.starts_with("Folder") {
+                out.push((f.to_string(), fg(vga::LIGHT_BLUE)));
+            } else {
+                out.push((f.to_string(), fg(vga::LIGHT_GREEN)));
+            }
+        }
+        return out;
+    }
+    vec![(line.to_string(), base)]
 }
 
 /// The innermost node under the point, the one drawn last winning.

@@ -197,22 +197,28 @@ fn borland_blue_syntax() -> [Option<Color>; 19] {
 /// identifiers), strings light cyan, numbers light green, types magenta.
 fn qbasic_syntax() -> [Option<Color>; 19] {
     use vga::*;
+    // (No light grey: the controls and frames are light grey already. Few
+    // yellows: keywords only.)
     syntax_table(&[
-        ("keyword", WHITE),
+        ("keyword", YELLOW),
+        ("variable", WHITE),
+        ("property", WHITE),
+        ("operator", WHITE),
+        ("punctuation", WHITE),
         ("comment", CYAN),
-        ("string", LIGHT_CYAN),
-        ("number", LIGHT_GREEN),
-        ("constant", LIGHT_GREEN),
-        ("function", YELLOW),
+        ("string", LIGHT_GREEN),
+        ("escape", LIGHT_RED),
+        ("number", LIGHT_MAGENTA),
+        ("constant", LIGHT_MAGENTA),
+        ("function", LIGHT_CYAN),
         ("attribute", LIGHT_GREEN),
         ("label", LIGHT_GREEN),
-        ("type", LIGHT_MAGENTA),
-        ("constructor", LIGHT_MAGENTA),
-        ("namespace", LIGHT_MAGENTA),
-        ("escape", LIGHT_RED),
+        ("type", LIGHT_RED),
+        ("constructor", LIGHT_RED),
+        ("namespace", LIGHT_CYAN),
         ("special", LIGHT_RED),
         ("embedded", LIGHT_RED),
-        ("tag", WHITE),
+        ("tag", YELLOW),
     ])
 }
 
@@ -270,7 +276,7 @@ impl Scheme {
             help_mark: s!(YELLOW on CYAN),
             help_code: s!(BLUE on CYAN),
             help_key: s!(WHITE on BLUE),
-            tooltip: s!(BLACK on CYAN),
+            tooltip: s!(WHITE on BLACK),
             tab_bar: s!(LIGHT_GRAY on BLUE),
             tab_active: s!(BLACK on GREEN),
             tab_inactive: s!(LIGHT_GRAY on BLUE),
@@ -347,7 +353,7 @@ impl Scheme {
             help_mark: s!(LIGHT_GREEN on BLACK),
             help_code: s!(LIGHT_CYAN on BLACK),
             help_key: s!(BLACK on LIGHT_GRAY),
-            tooltip: s!(BLACK on CYAN),
+            tooltip: s!(WHITE on BLACK),
             tab_bar: s!(LIGHT_GRAY on BLACK),
             tab_active: s!(WHITE on BLUE),
             tab_inactive: s!(LIGHT_GRAY on BLACK),

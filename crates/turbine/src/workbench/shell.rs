@@ -1805,7 +1805,7 @@ impl Workbench {
                         if let Some((total, offset, len)) = t.terminal().and_then(|t| t.scrollbar()) {
                             if total > len {
                                 let max = total - len;
-                                turbine_ui::frame::draw_vscroll(c, r.right() - 1, r.y + 1, r.h - 2, offset.min(max), max + 1, s.scrollbar, theme.style.scroll);
+                                turbine_ui::frame::draw_vscroll(c, r.right() - 1, r.y + 1, r.h - 2, offset.min(max), len, total, s.scrollbar, theme.style.scroll);
                             }
                         }
                     } else {

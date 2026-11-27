@@ -95,14 +95,13 @@ pub fn icon(name: &str, dir: bool, open: bool) -> &'static str {
     }
 }
 
-/// A file's colour by type (folders white, as XTree and Norton showed
-/// them; dotfiles dim).
+/// A file's colour by type (folders bright blue; dotfiles dim).
 pub fn colour(name: &str, dir: bool) -> Color {
     if name.starts_with('.') {
         return vga::DARK_GRAY;
     }
     if dir {
-        return vga::WHITE;
+        return vga::LIGHT_BLUE;
     }
     let lower = name.to_ascii_lowercase();
     if matches!(lower.as_str(), "makefile" | "dockerfile" | "justfile" | "containerfile") {
@@ -171,7 +170,7 @@ mod tests {
     #[test]
     fn types_and_git() {
         assert_eq!(colour("main.rs", false), vga::LIGHT_RED);
-        assert_eq!(colour("src", true), vga::WHITE);
+        assert_eq!(colour("src", true), vga::LIGHT_BLUE);
         assert_eq!(colour(".env", false), vga::DARK_GRAY);
         assert_ne!(icon("a.py", false, false), icon("a.rs", false, false));
         assert_ne!(icon("x", true, true), icon("x", true, false));

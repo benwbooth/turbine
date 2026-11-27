@@ -402,7 +402,7 @@ impl Explorer {
         let mut paths = Vec::new();
         // "..": up a folder (the project becomes its parent).
         if let Some(parent) = self.root.parent() {
-            rows.push(Row::new("..").glyph(crate::filetypes::icon("..", true, false)).fg(turbine_ui::theme::vga::WHITE));
+            rows.push(Row::new("..").glyph(crate::filetypes::icon("..", true, false)).fg(turbine_ui::theme::vga::LIGHT_BLUE));
             paths.push((parent.to_path_buf(), true));
         }
         let name = self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.root.display().to_string());

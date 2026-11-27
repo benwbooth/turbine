@@ -1501,7 +1501,7 @@ impl Dialog {
                     if bar {
                         // (The thumb shows where the view is, so it can be dragged.)
                         let max = items.len().saturating_sub(rows);
-                        draw_vscroll(&mut c, outer.right() - 1, y0, rows as i32, *scroll, max + 1, s.scrollbar, st.scroll);
+                        draw_vscroll(&mut c, outer.right() - 1, y0, rows as i32, (*scroll).min(max), rows, items.len(), s.scrollbar, st.scroll);
                     }
                     if focused {
                         let y = y0 + (*selected as i32 - *scroll as i32).max(0);
@@ -1524,7 +1524,7 @@ impl Dialog {
         }
         let (top, rows) = (self.combo_top(i, pr), (pr.h - 2).max(0) as usize);
         if items.len() > rows {
-            draw_vscroll(c, pr.right() - 1, pr.y + 1, rows as i32, *selected, items.len(), s.scrollbar, theme.style.scroll);
+            draw_vscroll(c, pr.right() - 1, pr.y + 1, rows as i32, top, rows, items.len(), s.scrollbar, theme.style.scroll);
         }
         for (row, it) in items.iter().enumerate().skip(top).take(rows) {
             let y = pr.y + 1 + (row - top) as i32;
