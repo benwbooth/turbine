@@ -848,11 +848,13 @@ impl EditorView {
                         let semantic = if self.semantic_version == self.doc.version { find(self.semantic.get(li)) } else { None };
                         let kind = semantic.or_else(|| find(self.highlights.get(li)));
                         match kind {
-                            Some(k) if self.help_look && matches!(crate::theme::SYNTAX_KINDS.get(k).copied(), Some("keyword" | "type" | "function" | "label" | "punctuation" | "comment" | "attribute" | "constant")) => {
+                            Some(k) if self.help_look && matches!(crate::theme::SYNTAX_KINDS.get(k).copied(), Some("keyword" | "type" | "function" | "label" | "punctuation" | "comment" | "attribute" | "constant" | "string" | "escape")) => {
                                 match crate::theme::SYNTAX_KINDS[k] {
                                     "keyword" | "type" | "constant" => s.help_heading,
                                     "function" => s.help_link,
                                     "label" => s.help_mark,
+                                    "string" => s.help_code,
+                                    "escape" => s.help_key,
                                     "attribute" => Style { attrs: crate::theme::Attrs { bold: true, ..s.help.attrs }, ..s.help_heading },
                                     _ => s.help,
                                 }

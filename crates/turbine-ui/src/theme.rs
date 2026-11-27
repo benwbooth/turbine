@@ -118,6 +118,9 @@ pub struct Scheme {
     pub help_heading: Style,
     pub help_link: Style,
     pub help_mark: Style,
+    /// The guide's inline code, and key combinations (drawn like key caps).
+    pub help_code: Style,
+    pub help_key: Style,
     /// The editor tabs' row, the front tab and the others; the
     /// breadcrumbs' row, its separators and its last (current) item.
     pub tab_bar: Style,
@@ -239,6 +242,8 @@ impl Scheme {
             help_heading: s!(WHITE on CYAN),
             help_link: s!(YELLOW on CYAN),
             help_mark: s!(YELLOW on CYAN),
+            help_code: s!(BLUE on CYAN),
+            help_key: s!(WHITE on BLUE),
             tab_bar: s!(LIGHT_GRAY on BLUE),
             tab_active: s!(BLACK on GREEN),
             tab_inactive: s!(LIGHT_GRAY on BLUE),
@@ -311,6 +316,8 @@ impl Scheme {
             help_heading: s!(WHITE on BLACK),
             help_link: s!(WHITE on BLACK),
             help_mark: s!(LIGHT_GREEN on BLACK),
+            help_code: s!(LIGHT_CYAN on BLACK),
+            help_key: s!(BLACK on LIGHT_GRAY),
             tab_bar: s!(LIGHT_GRAY on BLACK),
             tab_active: s!(WHITE on BLUE),
             tab_inactive: s!(LIGHT_GRAY on BLACK),
@@ -452,6 +459,8 @@ impl Scheme {
             help_heading: Style { attrs: Attrs { bold: true, ..Attrs::default() }, ..n },
             help_link: Style { attrs: Attrs { underline: true, ..Attrs::default() }, ..n },
             help_mark: n,
+            help_code: Style { attrs: Attrs { bold: true, ..Attrs::default() }, ..n },
+            help_key: r,
             tab_bar: n,
             tab_active: r,
             tab_inactive: Style::new(dim, k),

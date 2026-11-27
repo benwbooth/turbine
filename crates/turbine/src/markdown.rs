@@ -144,6 +144,13 @@ impl Out {
             if let Some(k) = k {
                 self.spans.push((a as u32, self.line.len() as u32, k));
             }
+            // Key combinations (Ctrl+S, F5, Alt+F1) in their own colour, in
+            // text, bold and code alike (not links or headings).
+            if link.is_none() && k.is_none_or(|k| k == kind("string") || k == kind("constant")) {
+                if let Some((ka, kb)) = key_combo(word) {
+                    self.spans.push(((a + ka) as u32, (a + kb) as u32, kind("escape")));
+                }
+            }
             if let Some(t) = link {
                 self.links.push((a, self.line.len(), t.to_string()));
             }
@@ -174,6 +181,43 @@ impl Out {
 }
 
 /// Render Markdown for a screen `width` columns wide.
+/// Where in a word a key combination is (punctuation around it left out):
+/// modifiers joined by + to a key (Ctrl+Shift+P, Alt+F1, Ctrl+`), or a
+/// key alone that's never a word (F1-F12, Esc, PgUp, PgDn).
+fn key_combo(word: &str) -> Option<(usize, usize)> {
+    let start = word.find(|c: char| !matches!(c, '(' | '"' | '\'' | '[' | '“'))?;
+    let mut end = word.len();
+    while end > start {
+        let c = word[..end].chars().next_back()?;
+        if matches!(c, ',' | '.' | ';' | ':' | ')' | '"' | '\'' | ']' | '”' | '!' | '?') && end - c.len_utf8() > start {
+            end -= c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let w = &word[start..end];
+    let lone = |k: &str| {
+        let lower = k.to_ascii_lowercase();
+        matches!(lower.as_str(), "esc" | "pgup" | "pgdn") || (lower.len() >= 2 && lower.starts_with('f') && lower[1..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n)))
+    };
+    let key = |k: &str| {
+        lone(k)
+            || k.chars().count() == 1
+            || matches!(
+                k.to_ascii_lowercase().as_str(),
+                "enter" | "return" | "tab" | "space" | "backspace" | "delete" | "del" | "ins" | "insert" | "home" | "end" | "up" | "down" | "left" | "right" | "plus" | "minus"
+            )
+    };
+    let modifier = |m: &str| matches!(m.to_ascii_lowercase().as_str(), "ctrl" | "alt" | "shift" | "cmd" | "super" | "meta" | "win");
+    let ok = match w.rsplit_once('+') {
+        // ("Ctrl++": the + key.)
+        Some((mods, "")) if mods.ends_with('+') => mods[..mods.len() - 1].split('+').all(modifier),
+        Some((mods, k)) => !mods.is_empty() && mods.split('+').all(modifier) && key(k),
+        None => lone(w),
+    };
+    ok.then_some((start, end))
+}
+
 pub fn render(md: &str, width: usize) -> Rendered {
     let mut o = Out::new(width);
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_HEADING_ATTRIBUTES;
@@ -588,6 +632,24 @@ mod tests {
         // `fn` coloured as a keyword in the code box.
         let li = lines.iter().position(|l| l.starts_with("│ fn")).unwrap();
         assert!(r.spans[li].iter().any(|(a, _, k)| *a == "│ ".len() as u32 && *k == kind("keyword")), "{:?}", r.spans[li]);
+    }
+
+    #[test]
+    fn key_combinations() {
+        assert_eq!(key_combo("Ctrl+Shift+P"), Some((0, 12)));
+        assert_eq!(key_combo("(F5),"), Some((1, 3)));
+        assert_eq!(key_combo("Ctrl+`."), Some((0, 6)));
+        assert_eq!(key_combo("Ctrl++"), Some((0, 6)));
+        assert_eq!(key_combo("Enter"), None);
+        assert_eq!(key_combo("C++"), None);
+        assert_eq!(key_combo("a+b"), None);
+        let r = render("Press **Ctrl+S** or F2 to save, `x+1` stays code.", 80);
+        let line = r.text.lines().next().unwrap();
+        let at = |w: &str| line.find(w).unwrap() as u32;
+        let esc = kind("escape");
+        assert!(r.spans[0].iter().any(|s| s.0 == at("Ctrl+S") && s.2 == esc), "{:?}", r.spans[0]);
+        assert!(r.spans[0].iter().any(|s| s.0 == at("F2") && s.2 == esc));
+        assert!(!r.spans[0].iter().any(|s| s.0 == at("x+1") && s.2 == esc));
     }
 
     #[test]
