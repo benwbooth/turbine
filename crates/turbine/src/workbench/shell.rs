@@ -1578,17 +1578,6 @@ impl Workbench {
             self.layout_dock();
             return true;
         }
-        // (The right side bar's left edge is also the editor's right, its
-        // scroll bar: the editor has those rows; the rest resize the bar.)
-        if self.shell.dock.drag.is_none() {
-            if let Some(r) = self.layout().right {
-                let on_bar = m.pos.x == r.x
-                    && self.windows.iter().rev().find(|w| w.dock.is_none()).is_some_and(|w| w.win.rect.right() - 1 == r.x && m.pos.y > w.win.rect.y && m.pos.y < w.win.rect.bottom() - 1);
-                if on_bar {
-                    return false;
-                }
-            }
-        }
         // A section's header being dragged (before any list sees the drag).
         if self.shell.section_drag.is_some() && self.section_mouse(m) {
             return true;

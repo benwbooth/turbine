@@ -107,6 +107,9 @@ pub struct EditorView {
     pub wrap: bool,
     /// Spaces, tabs and line ends drawn faintly (· → ¶).
     pub show_whitespace: bool,
+    /// The up-down bar inside the window's last column, not on its edge
+    /// (the edge being the right side bar's, which drags to resize it).
+    pub vbar_inside: bool,
     /// Brackets coloured by depth (VS Code's bracket pair colourization).
     pub rainbow_brackets: bool,
     /// The bracket at the cursor and its partner marked.
@@ -193,6 +196,7 @@ impl EditorView {
             block: Vec::new(),
             cursors: Vec::new(),
             column_mode: false,
+            vbar_inside: false,
             rainbow_brackets: true,
             match_brackets: true,
             brackets: Default::default(),
@@ -1196,14 +1200,16 @@ impl EditorView {
         }
         // (Across the whole window, the minimap's columns too.)
         let x = self.area.x + self.gutter_width();
-        draw_hscroll(c, x, self.area.bottom() - 1, frame.right() - 1 - x, self.scroll_x, w, longest.max(self.scroll_x + w), theme.scheme.scrollbar, theme.style.scroll);
+        let end = frame.right() - 1 - i32::from(self.vbar_inside);
+        draw_hscroll(c, x, self.area.bottom() - 1, end - x, self.scroll_x, w, longest.max(self.scroll_x + w), theme.scheme.scrollbar, theme.style.scroll);
     }
 
     pub fn draw_scrollbars(&self, c: &mut Canvas, frame: Rect, theme: &Theme) {
         let ch = theme.style.scroll;
         // (Thumbs as long as the share in view, where the view is.)
         let rows = self.area.h.max(1) as usize;
-        draw_vscroll(c, frame.right() - 1, frame.y + 1, frame.h - 2, self.scroll_y, rows, self.doc.len_lines().max(self.scroll_y + rows), theme.scheme.scrollbar, ch);
+        let vx = if self.vbar_inside { frame.right() - 2 } else { frame.right() - 1 };
+        draw_vscroll(c, vx, frame.y + 1, frame.h - 2, self.scroll_y, rows, self.doc.len_lines().max(self.scroll_y + rows), theme.scheme.scrollbar, ch);
         let w = (self.area.w - self.gutter_width()).max(1) as usize;
         let longest = self.longest_in_view().max(self.scroll_x + w);
         // (Borland's windows show line:column in the bottom edge's first

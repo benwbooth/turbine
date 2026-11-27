@@ -4270,6 +4270,11 @@ impl Workbench {
                 let double = self.last_click.is_some_and(|(p, t)| p == m.pos && t.elapsed() < Duration::from_millis(400));
                 self.last_click = Some((m.pos, Instant::now()));
                 let on_inside_bar = self.windows[i].term.is_none() && self.hbar_inside(i) && m.pos.y == self.windows[i].ed.area().bottom() - 1;
+                let on_inside_vbar = {
+                    let w = &self.windows[i];
+                    let r = w.win.rect;
+                    w.ed.vbar_inside && m.pos.x == r.right() - 2 && m.pos.y > r.y && m.pos.y < r.bottom() - 1
+                };
                 let skip = if self.theme.style.window_numbers && self.windows[i].win.rect.w > 20 { 13 } else { 2 };
                 let w = &mut self.windows[i];
                 // (A docked window's frame belongs to its part: no moving,
@@ -4292,6 +4297,12 @@ impl Workbench {
                         let horizontal = hit == Hit::HScroll;
                         if let Some(grab) = self.bar_at(i, |w| bar_press(w, horizontal, false, skip, m.pos)) {
                             self.scroll_drag = Some((i, horizontal, grab));
+                        }
+                    }
+                    // The up-down bar a column in (the right side bar beside it).
+                    Hit::Inside if on_inside_vbar => {
+                        if let Some(grab) = self.bar_at(i, |w| bar_press(w, false, true, skip, m.pos)) {
+                            self.scroll_drag = Some((i, false, grab));
                         }
                     }
                     // The sideways bar over the last row (the panel under it).
@@ -4935,6 +4946,7 @@ impl Workbench {
         let n = self.windows.len();
         let has_modal = self.dialog.is_some() || self.menubar.is_open();
         let panel_top = self.layout().bottom.map(|b| b.y);
+        let right_edge = self.layout().right.map(|r| r.x);
         self.image_places.clear();
         let mut to_view: Vec<(u32, Rect)> = Vec::new();
         for (i, w) in self.windows.iter_mut().enumerate() {
@@ -4982,8 +4994,13 @@ impl Workbench {
             }
             // (Markdown and data files: a toolbar, and Preview or Tree.)
             let viewed = docview::draw(w, self.docviews.get_mut(&w.win.id), &mut wc, &theme, active && !has_modal);
+            // (Against the right side bar: the bar a column in, the edge its.)
+            w.ed.vbar_inside = w.term.is_none() && right_edge == Some(w.win.rect.right() - 1);
             if !viewed {
-                let body = Self::doc_body(w);
+                let mut body = Self::doc_body(w);
+                if w.ed.vbar_inside {
+                    body.w -= 1;
+                }
                 w.ed.draw(&mut wc, body, &theme, active && !has_modal, active);
             }
             if active && !viewed {
@@ -5017,22 +5034,7 @@ impl Workbench {
         }
         self.sync_mirrors();
         self.layout_dock();
-        // (The right side bar's left edge is the editors' right, where their
-        // scroll bars are: the windows' cells there are kept over its frame.)
-        let shared: Vec<(i32, i32, turbine_ui::surface::Cell)> = match self.layout().right {
-            Some(r) => self
-                .windows
-                .iter()
-                .filter(|w| w.dock.is_none() && w.win.rect.right() - 1 == r.x)
-                .flat_map(|w| (w.win.rect.y..w.win.rect.bottom()).map(move |y| (r.x, y)))
-                .filter_map(|(x, y)| c.cell(x, y).map(|cell| (x, y, cell)))
-                .collect(),
-            None => Vec::new(),
-        };
         self.draw_shell(&mut c, &theme);
-        for (x, y, cell) in shared {
-            c.put_cell(x, y, cell);
-        }
         // Status bar.
         let info = self
             .windows
@@ -5769,9 +5771,23 @@ mod tests {
         assert_eq!(ed.right() - 1, right.x, "one column between them");
         let y = ed.y + ed.h / 2;
         let col = |x: i32| surf.get(x, y).unwrap().text.clone();
-        // (The editor's scroll bar on the shared edge; no second line beside it.)
-        assert!(["▒", "░", "█", "▓"].contains(&col(right.x).as_str()), "{:?}", col(right.x));
-        assert!(!["│", "║"].contains(&col(right.x + 1).as_str()) && !["│", "║"].contains(&col(right.x - 1).as_str()));
+        // (The shared edge is the side bar's; the editor's bar a column in;
+        // no second line anywhere beside them.)
+        assert!(["│", "║"].contains(&col(right.x).as_str()), "{:?}", col(right.x));
+        assert!(["▒", "░", "█", "▓"].contains(&col(right.x - 1).as_str()), "{:?}", col(right.x - 1));
+        assert!(!["│", "║"].contains(&col(right.x + 1).as_str()) && !["│", "║"].contains(&col(right.x - 2).as_str()));
+        // The edge drags to resize the side bar, beside the editor's rows too.
+        let w0 = right.w;
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(right.x, y), mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Drag(Button::Left), pos: Point::new(right.x - 6, y), mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: Point::new(right.x - 6, y), mods: Mods::NONE }));
+        assert_eq!(wb.layout().right.unwrap().w, w0 + 6);
+        // And the editor's bar still scrolls it: a click low on its track.
+        wb.render(&mut surf);
+        let ed = wb.windows.iter().rev().find(|w| w.dock.is_none()).unwrap().win.rect;
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(ed.right() - 2, ed.bottom() - 4), mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: Point::new(ed.right() - 2, ed.bottom() - 4), mods: Mods::NONE }));
+        assert!(wb.windows.iter().rev().find(|w| w.dock.is_none()).unwrap().ed.scroll_y > 100);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
