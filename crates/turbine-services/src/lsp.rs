@@ -190,12 +190,20 @@ pub fn project_root(file: &Path) -> PathBuf {
     // The outermost Cargo workspace wins over a member crate.
     let mut found: Option<PathBuf> = None;
     while let Some(d) = dir {
-        if MARKERS.iter().any(|m| d.join(m).exists()) {
+        // (Above the first project, only a Cargo workspace holding it counts:
+        // a stray Makefile in /tmp isn't the project.)
+        let counts = match &found {
+            None => MARKERS.iter().any(|m| d.join(m).exists()),
+            Some(_) => d.join("Cargo.toml").exists() && std::fs::read_to_string(d.join("Cargo.toml")).is_ok_and(|t| t.contains("[workspace]")),
+        };
+        if counts {
             let is_git = d.join(".git").exists();
             found = Some(d.to_path_buf());
             if is_git {
                 break;
             }
+        } else if found.is_some() && d.join(".git").exists() {
+            break;
         }
         dir = d.parent();
     }
@@ -349,6 +357,8 @@ pub enum LspEvent {
     WorkspaceSymbols { id: i64, symbols: Vec<WorkspaceSymbol> },
     /// The server asks to apply edits (after a command it ran).
     ApplyEdit { edits: WorkspaceEdit },
+    /// The server asks for its hints and colours to be fetched again.
+    Refresh,
     /// A request failed (or got an error back).
     Failed { id: i64, message: String },
     Log(String),
@@ -446,7 +456,7 @@ impl LspClient {
                             "formats": ["relative"]
                         }
                     },
-                    "workspace": {"workspaceFolders": true, "configuration": false, "applyEdit": true, "symbol": {}, "workspaceEdit": {"documentChanges": true}}
+                    "workspace": {"workspaceFolders": true, "configuration": false, "applyEdit": true, "symbol": {}, "workspaceEdit": {"documentChanges": true}, "inlayHint": {"refreshSupport": true}, "semanticTokens": {"refreshSupport": true}}
                 }
             }),
         );
@@ -575,7 +585,8 @@ impl LspClient {
     }
 
     pub fn inlay_hints(&mut self, path: &Path, from_line: u32, to_line: u32) -> i64 {
-        let p = json!({"textDocument": {"uri": path_to_uri(path)}, "range": {"start": {"line": from_line, "character": 0}, "end": {"line": to_line, "character": 0}}});
+        // (To the end of the last line asked for.)
+        let p = json!({"textDocument": {"uri": path_to_uri(path)}, "range": {"start": {"line": from_line, "character": 0}, "end": {"line": to_line, "character": 10000}}});
         self.request_kind(Kind::InlayHint, "textDocument/inlayHint", p)
     }
 
@@ -627,6 +638,11 @@ impl LspClient {
                     Value::Array(vec![Value::Null; n])
                 }
                 "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" => Value::Null,
+                // (The server knows more now, its indexing done: ask again.)
+                "workspace/inlayHint/refresh" | "workspace/semanticTokens/refresh" | "workspace/codeLens/refresh" | "workspace/diagnostic/refresh" => {
+                    evs.push(LspEvent::Refresh);
+                    Value::Null
+                }
                 "workspace/applyEdit" => {
                     evs.push(LspEvent::ApplyEdit { edits: workspace_edit(&m["params"]["edit"]) });
                     json!({"applied": true})

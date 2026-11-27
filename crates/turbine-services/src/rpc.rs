@@ -109,11 +109,17 @@ impl RpcProcess {
             loop {
                 match read_message(&mut r) {
                     Ok(Some(v)) => {
+                        if trace() {
+                            eprintln!("lsp <- {}", v.to_string().chars().take(20000).collect::<String>());
+                        }
                         if tx.send(Incoming::Message(v)).is_err() {
                             return;
                         }
                     }
                     Ok(None) => {
+                        if trace() {
+                            eprintln!("lsp: closed its output");
+                        }
                         let _ = tx.send(Incoming::Exited("closed its output".into()));
                         return;
                     }
@@ -127,6 +133,9 @@ impl RpcProcess {
         if let Some(stderr) = stderr {
             std::thread::Builder::new().name(format!("rpc-e-{name}")).spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    if trace() {
+                        eprintln!("lsp log: {line}");
+                    }
                     if inc_tx.send(Incoming::Log(line)).is_err() {
                         return;
                     }
@@ -137,6 +146,9 @@ impl RpcProcess {
     }
 
     pub fn send(&self, v: Value) {
+        if trace() {
+            eprintln!("lsp -> {}", v.to_string().chars().take(20000).collect::<String>());
+        }
         let _ = self.out.send(v);
     }
 
@@ -169,4 +181,10 @@ mod tests {
         assert_eq!(read_message(&mut r).unwrap(), Some(json!([1, 2])));
         assert_eq!(read_message(&mut r).unwrap(), None);
     }
+}
+
+/// TURBINE_LSP_TRACE=1: every message to and from servers on stderr.
+fn trace() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var_os("TURBINE_LSP_TRACE").is_some_and(|v| !v.is_empty()))
 }

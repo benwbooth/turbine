@@ -37,6 +37,9 @@ pub(super) struct LspExtra {
     /// Languages already offered a server install.
     pub offered: HashSet<String>,
     pub inlays_off: bool,
+    /// When a window's hints came back empty (a server still indexing):
+    /// asked again a few seconds on.
+    pub inlay_empty_at: HashMap<u32, Instant>,
     pub semantic_off: bool,
 }
 
@@ -205,8 +208,11 @@ impl Workbench {
                 let idle = now.duration_since(since) > Duration::from_millis(400);
                 let ready = self.lsp.get(&key).is_some_and(|c| c.is_ready() && c.is_open(&path)) && w.lsp_sent == Some(v);
                 if idle && ready {
-                    let (from, to) = (w.ed.scroll_y as u32, (w.ed.scroll_y + 200) as u32);
-                    let want_inlay = w.ed.inlays_version != v && self.lspx.inlay_req.get(&id).is_none_or(|r| r.2 != v);
+                    // (Inside the file: a range past its end gets refused.)
+                    let last = w.ed.doc.len_lines().saturating_sub(1);
+                    let (from, to) = (w.ed.scroll_y.min(last) as u32, (w.ed.scroll_y + 200).min(last) as u32);
+                    let retry_ok = self.lspx.inlay_empty_at.get(&id).is_none_or(|t| now.duration_since(*t) > Duration::from_secs(3));
+                    let want_inlay = w.ed.inlays_version != v && retry_ok && self.lspx.inlay_req.get(&id).is_none_or(|r| r.2 != v || self.lspx.inlay_empty_at.contains_key(&id));
                     let want_sem = w.ed.semantic_version != v && self.lspx.sem_req.get(&id).is_none_or(|r| r.2 != v);
                     let has_inlay = self.lsp.get(&key).is_some_and(|c| !c.capabilities["inlayHintProvider"].is_null());
                     if let Some(c) = self.lsp.get_mut(&key) {
@@ -292,6 +298,15 @@ impl Workbench {
                 self.lspx.sig_req = None;
                 self.lspx.signature = sig.clone().map(|s| (win, line, s));
             }
+            LspEvent::Refresh => {
+                // (Everything this server shows: asked again on the next tick.)
+                for w in self.windows.iter_mut().filter(|w| w.lsp_key.as_ref() == Some(key)) {
+                    w.ed.inlays_version = u64::MAX;
+                    w.ed.semantic_version = u64::MAX;
+                }
+                self.lspx.inlay_req.retain(|_, r| &r.0 != key);
+                self.lspx.sem_req.retain(|_, r| &r.0 != key);
+            }
             LspEvent::InlayHints { id, hints } => {
                 let Some((win, v)) = self.lspx.inlay_req.iter().find(|(_, r)| (&r.0, r.1) == (key, *id)).map(|(w, r)| (*w, r.2)) else { return true };
                 if let Some(w) = self.windows.iter_mut().find(|w| w.win.id == win) {
@@ -307,8 +322,16 @@ impl Workbench {
                             let label = format!("{}{label}{}", if *pad_l { " " } else { "" }, if *pad_r { " " } else { "" });
                             map.entry(line).or_default().push((byte, label));
                         }
-                        w.ed.inlays = map;
-                        w.ed.inlays_version = v;
+                        // (None yet: the server may still be indexing; ask
+                        // again in a moment rather than settle for nothing.)
+                        if hints.is_empty() {
+                            self.lspx.inlay_empty_at.insert(win, Instant::now());
+                            self.lspx.inlay_req.remove(&win);
+                        } else {
+                            self.lspx.inlay_empty_at.remove(&win);
+                            w.ed.inlays = map;
+                            w.ed.inlays_version = v;
+                        }
                     }
                 }
             }
