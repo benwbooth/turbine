@@ -301,11 +301,15 @@ impl Workbench {
             }
         }
         // (A long one scrolls with the wheel over it.)
-        let skip = self.tip.scroll.get().min(lines.len().saturating_sub(1));
-        self.tip.scroll.set(skip);
-        let lines: Vec<Vec<(String, Style)>> = lines.into_iter().skip(skip).take(16).collect();
+        // (Its size from all of it, so scrolling never shrinks the box: at
+        // most 16 rows, scrolled no further than its last line at the bottom.)
         let w = lines.iter().map(|l| l.iter().map(|(t, _)| str_width(t)).sum::<usize>()).max().unwrap_or(0) as i32 + 2;
-        let h = lines.len() as i32;
+        let rows = lines.len().min(16);
+        let skip = self.tip.scroll.get().min(lines.len() - rows);
+        self.tip.scroll.set(skip);
+        let more_below = skip + rows < lines.len();
+        let lines: Vec<Vec<(String, Style)>> = lines.into_iter().skip(skip).take(rows).collect();
+        let h = rows as i32;
         let x = p.x.min(screen.right() - w).max(0);
         let y = if p.y + 1 + h <= screen.bottom() { p.y + 1 } else { (p.y - h).max(0) };
         let r = Rect::new(x, y, w, h);
@@ -315,6 +319,13 @@ impl Workbench {
             let mut cx = x + 1;
             for (t, st) in l {
                 cx = c.print(cx, y + i as i32, t, *st);
+            }
+            // (More above or below: an arrow at the right edge.)
+            if i == 0 && skip > 0 {
+                c.print(x + w - 1, y, "↑", Style { fg: vga::YELLOW, ..base });
+            }
+            if i + 1 == rows && more_below {
+                c.print(x + w - 1, y + i as i32, "↓", Style { fg: vga::YELLOW, ..base });
             }
         }
         // (A shadow, as DOS windows have one.)

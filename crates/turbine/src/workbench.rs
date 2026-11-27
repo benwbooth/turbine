@@ -6208,6 +6208,25 @@ mod tests {
     }
 
     #[test]
+    fn a_long_tooltip_scrolls_without_shrinking() {
+        let mut wb = bench();
+        wb.dispatch(Event::Resize(100, 40));
+        let text: String = (0..30).map(|i| format!("line {i}\n")).collect();
+        wb.tip.at = Some((Point::new(10, 5), Instant::now()));
+        wb.tip.shown = Some((Rect::new(10, 5, 1, 1), text));
+        let mut surf = Surface::new(100, 40);
+        wb.render(&mut surf);
+        let r = wb.tip.drawn.get().unwrap();
+        assert_eq!(r.h, 16);
+        for _ in 0..40 {
+            wb.event(Event::Mouse(MouseEvent { kind: MouseKind::ScrollDown, pos: Point::new(r.x + 1, r.y + 1), mods: Mods::NONE }));
+        }
+        wb.render(&mut surf);
+        assert_eq!(wb.tip.drawn.get().unwrap().h, 16, "the box keeps its size");
+        assert!(surf.to_text().contains("line 29") && !surf.to_text().contains("line 13 "), "scrolled to its last line");
+    }
+
+    #[test]
     fn scrolling_sideways() {
         let (dir, mut wb) = project("hscroll");
         std::fs::write(dir.join("wide.txt"), format!("{}\n", "x".repeat(400))).unwrap();
