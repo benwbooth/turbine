@@ -35,12 +35,12 @@ QFont baseFont()
         bool ok = false;
         const double size = sp > 0 ? env.mid(sp + 1).toDouble(&ok) : 0;
         f.setFamilies({ ok ? env.left(sp) : env, QStringLiteral("PxPlus IBM VGA 9x16"), QStringLiteral("UbuntuMono Nerd Font Mono"), QStringLiteral("Hack") });
-        f.setPixelSize(ok && size > 0 ? int(size) : 16);
+        f.setPixelSize(ok && size > 0 ? int(size) : 14);
     } else if (QFontDatabase::hasFamily(QStringLiteral("PxPlus IBM VGA 9x16")) || QFontDatabase::hasFamily(QStringLiteral("Ac437 IBM VGA 9x16"))) {
         f.setFamilies({ QStringLiteral("PxPlus IBM VGA 9x16"), QStringLiteral("Ac437 IBM VGA 9x16"),
                         QStringLiteral("UbuntuMono Nerd Font Mono"), QStringLiteral("Hack"), QStringLiteral("DejaVu Sans Mono") });
-        // 16 pixels: the font's own cell height.
-        f.setPixelSize(16);
+        // 14 pixels: a little under the font's own 16, so more fits.
+        f.setPixelSize(14);
     } else {
         f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     }

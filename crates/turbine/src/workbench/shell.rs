@@ -197,7 +197,7 @@ impl Workbench {
         if on_term {
             items.push(("new_terminal", "New Terminal", if icons { "\u{ea60}" } else { "+" }));
         }
-        items.push(if max { ("maximize", "Restore Panel Size", if icons { "\u{eab4}" } else { "↓" }) } else { ("maximize", "Maximize Panel Size", if icons { "\u{eab7}" } else { "↑" }) });
+        items.push(if max { ("maximize", "Restore Panel Size", "↓") } else { ("maximize", "Maximize Panel Size", "↑") });
         items.push(("close", "Close Panel", if icons { "\u{ea76}" } else { "■" }));
         // (Right to left from the corner, a space apart, as [■] sits in a
         // DOS window's frame.)

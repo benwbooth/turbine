@@ -303,8 +303,9 @@ impl Scheme {
             shadow: s!(DARK_GRAY on BLACK),
             agent_pointer: s!(BLACK on YELLOW),
             terminal: s!(LIGHT_GRAY on BLACK),
-            // QBasic and Edit never coloured code.
-            syntax: [None; 19],
+            // (QBasic and Edit never coloured code; Turbine does, in EGA's
+            // bright colours on the blue, as Borland's editors did.)
+            syntax: borland_blue_syntax(),
             bold_keywords: false,
             diag_error: vga::LIGHT_RED,
             diag_warning: vga::LIGHT_MAGENTA,
