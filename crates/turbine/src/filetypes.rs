@@ -95,13 +95,14 @@ pub fn icon(name: &str, dir: bool, open: bool) -> &'static str {
     }
 }
 
-/// A file's colour by type (folders bright blue; dotfiles dim).
+/// A file's colour by type (folders bright cyan, the only ones that are,
+/// and bold in lists; dotfiles dim).
 pub fn colour(name: &str, dir: bool) -> Color {
     if name.starts_with('.') {
         return vga::DARK_GRAY;
     }
     if dir {
-        return vga::LIGHT_BLUE;
+        return vga::LIGHT_CYAN;
     }
     let lower = name.to_ascii_lowercase();
     if matches!(lower.as_str(), "makefile" | "dockerfile" | "justfile" | "containerfile") {
@@ -111,7 +112,7 @@ pub fn colour(name: &str, dir: bool) -> Color {
         "rs" | "java" | "jar" | "class" | "scala" | "rb" | "erl" | "swift" => vga::LIGHT_RED,
         "py" | "pyi" | "pyw" | "sh" | "bash" | "zsh" | "fish" | "ksh" | "tsh" | "tessh" | "nu" | "ps1" | "bat" | "cmd" | "pl" | "pm" | "lua" => vga::LIGHT_GREEN,
         "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" | "cs" | "zig" | "dart" | "bas" | "bi" | "pas" | "asm" | "s" => vga::LIGHT_BLUE,
-        "go" | "md" | "markdown" | "mdx" | "txt" | "rst" | "org" | "tex" | "typ" | "html" | "htm" | "css" | "scss" | "sass" | "vue" | "svelte" | "qml" => vga::LIGHT_CYAN,
+        "go" | "md" | "markdown" | "mdx" | "txt" | "rst" | "org" | "tex" | "typ" | "html" | "htm" | "css" | "scss" | "sass" | "vue" | "svelte" | "qml" => vga::WHITE,
         "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "tsx" | "kt" | "kts" | "php" | "hs" | "ml" | "mli" | "ex" | "exs" | "clj" | "cljs" | "jl" | "r" => vga::YELLOW,
         "json" | "jsonc" | "json5" | "toml" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "nix" | "xml" | "lock" | "env" | "properties" | "sql" => vga::LIGHT_MAGENTA,
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "ico" | "mp3" | "flac" | "ogg" | "wav" | "mp4" | "mkv" | "webm" | "mov" | "pdf" | "ttf" | "otf" => vga::MAGENTA,
@@ -170,7 +171,7 @@ mod tests {
     #[test]
     fn types_and_git() {
         assert_eq!(colour("main.rs", false), vga::LIGHT_RED);
-        assert_eq!(colour("src", true), vga::LIGHT_BLUE);
+        assert_eq!(colour("src", true), vga::LIGHT_CYAN);
         assert_eq!(colour(".env", false), vga::DARK_GRAY);
         assert_ne!(icon("a.py", false, false), icon("a.rs", false, false));
         assert_ne!(icon("x", true, true), icon("x", true, false));

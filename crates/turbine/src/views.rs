@@ -408,7 +408,7 @@ impl Explorer {
         let mut paths = Vec::new();
         // "..": up a folder (the project becomes its parent).
         if let Some(parent) = self.root.parent() {
-            rows.push(Row::new("..").glyph(crate::filetypes::icon("..", true, false)).fg(turbine_ui::theme::vga::LIGHT_BLUE));
+            rows.push(Row::new("..").glyph(crate::filetypes::icon("..", true, false)).fg(turbine_ui::theme::vga::LIGHT_CYAN).bold());
             paths.push((parent.to_path_buf(), true));
         }
         let name = self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.root.display().to_string());
@@ -442,6 +442,9 @@ impl Explorer {
             let icon = if *is_dir { if open { "▾" } else { "▸" } } else { " " };
             // Its type's icon and colour, and git's mark.
             let mut row = Row::new(name.clone()).indent(depth).icon(icon).glyph(crate::filetypes::icon(name, *is_dir, open)).fg(crate::filetypes::colour(name, *is_dir));
+            if *is_dir {
+                row = row.bold();
+            }
             if let Some(code) = self.git.get(&p) {
                 let (b, c) = crate::filetypes::git_badge(*code);
                 row = row.badge(b, c);

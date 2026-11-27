@@ -31,6 +31,8 @@ pub struct Row {
     pub glyph: String,
     /// A status at the right in its own colour (git's M, U, A, D).
     pub badge: Option<(String, crate::theme::Color)>,
+    /// Drawn bold (folders, to stand out).
+    pub bold: bool,
 }
 
 /// A colour readable on a background: the EGA light colours become their
@@ -86,6 +88,10 @@ impl Row {
     }
     pub fn heading(mut self) -> Row {
         self.heading = true;
+        self
+    }
+    pub fn bold(mut self) -> Row {
+        self.bold = true;
         self
     }
 }
@@ -296,7 +302,7 @@ impl ListView {
             } else {
                 Style { fg: row.fg.map(|f| readable(f, base.bg)).unwrap_or(base.fg), ..base }
             };
-            let stl = if row.heading { Style { attrs: crate::theme::Attrs { bold: true, ..stl.attrs }, ..stl } } else { stl };
+            let stl = if row.heading || row.bold { Style { attrs: crate::theme::Attrs { bold: true, ..stl.attrs }, ..stl } } else { stl };
             let line = Rect::new(r.x, y, text_w, 1);
             c.fill(line, " ", stl);
             let mut lc = c.sub(line);

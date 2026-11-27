@@ -18,6 +18,10 @@ pub(super) struct SessionState {
     backed_up: HashMap<u32, u64>,
     /// Restored already (the look can be set again in tests).
     pub restored: bool,
+    /// Each write's number, and the newest written: a slow write of older
+    /// state never lands after a newer one (the last save at exit).
+    generation: u64,
+    written: std::sync::Arc<std::sync::Mutex<u64>>,
 }
 
 impl Workbench {
@@ -107,7 +111,15 @@ impl Workbench {
             return;
         }
         self.session.last = text.clone();
+        self.session.generation += 1;
+        let generation = self.session.generation;
+        let written = self.session.written.clone();
         let job = move || {
+            let mut newest = written.lock().unwrap_or_else(|e| e.into_inner());
+            if *newest > generation {
+                return;
+            }
+            *newest = generation;
             let _ = std::fs::create_dir_all(&dir);
             for (p, t) in writes {
                 let _ = std::fs::write(&p, t);
