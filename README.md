@@ -79,6 +79,10 @@ comes back once the action has finished on screen.
   Ctrl+F9 run, F7 trace into, F8 step over, F4 go to cursor, Ctrl+F2 reset;
   red breakpoint bars, a cyan execution bar, Output and Debug (call stack,
   variables) windows along the bottom
+- Help: F1 opens the guide for your file's language (one of ~230, from the
+  language's own site, fetched once and kept for offline reading), Shift+F1
+  lists them all, Ctrl+F1 asks the language server about the word under
+  the cursor
 - Unicode: grapheme clusters, East Asian wide characters (two cells each),
   combining marks, emoji, and bidirectional text with an RTL mode
 - Encodings detected on open and kept on save: UTF-8/16 (with or without

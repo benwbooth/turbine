@@ -40,7 +40,9 @@
 | WASI extension host (wasmtime, `wit/turbine.wit`) | interface drafted |
 | AI providers, tab completion, assistant, agent tools | planned |
 | hearth AI hub provider + MCP server for hearth's assistant | planned |
-| Markdown help window, language guides download | planned |
+| Docs service: Tessera's ~230 language guides fetched from official sites, converted to Markdown, kept offline (turbine/guides) | done |
+| Help windows (read-only, Markdown highlighting): F1 guide for the file's language, Shift+F1 index, Download All Guides | done |
+| QBasic-style rendered help with links (<Contents> <Index> <Back>), search across guides | planned |
 | File viewers (hex, images, tables, archives, PDF) | planned |
 | Desktop app: cxx-qt Qt Quick, QPainter cell rows, native menus (global menu via Qt's dbusmenu) | planned |
 | Web front end: Leptos (wasm, no hand-written JS) and `turbine serve` (Leptos server) | planned |

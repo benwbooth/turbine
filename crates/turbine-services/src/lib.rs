@@ -3,5 +3,7 @@
 
 pub mod dap;
 pub mod fake;
+#[allow(unused_variables, unused_mut, unused_assignments)] // (as in Tessera)
+pub mod guides;
 pub mod lsp;
 pub mod rpc;

@@ -169,6 +169,10 @@ pub struct Workbench {
     dap_spawn: DapSpawner,
     /// What Run starts, per project: (program, arguments).
     run_config: HashMap<PathBuf, (PathBuf, Vec<String>)>,
+    /// Guides fetched in the background: (key, title, Markdown or error).
+    guide_tx: std::sync::mpsc::Sender<(String, String, Result<String, String>)>,
+    guide_rx: Receiver<(String, String, Result<String, String>)>,
+    guides_fetching: usize,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -368,11 +372,13 @@ fn menus() -> Vec<Menu> {
         Menu::new(
             "~H~elp",
             vec![
-                soon("~C~ontents", "", "help.contents"),
-                soon("~I~ndex", "Shift+F1", "help.index"),
+                it("~C~ontents", "F1", "help.contents"),
+                it("~I~ndex", "Shift+F1", "help.index"),
                 it("~T~opic Search", "Ctrl+F1", "lsp.hover"),
                 sep(),
-                it("~K~eyboard...", "F1", "help.keys"),
+                it("Download ~A~ll Guides", "", "help.download_all"),
+                sep(),
+                it("~K~eyboard...", "", "help.keys"),
                 it("~V~im Keys...", "", "help.vim"),
                 sep(),
                 it("~A~bout...", "", "help.about"),
@@ -385,12 +391,13 @@ const DEMO_CODE: &str = "fn main() {\n    let name = \"Turbine\";\n    for i in 
 
 impl Workbench {
     pub fn new(files: &[PathBuf]) -> Self {
+        let (guide_tx, guide_rx) = std::sync::mpsc::channel();
         let mut wb = Workbench {
             theme: Theme::default(),
             menubar: MenuBar::new(menus()),
             status: StatusBar {
                 items: vec![
-                    StatusItem::new("F1", "Help", "help.keys"),
+                    StatusItem::new("F1", "Help", "help.contents"),
                     StatusItem::new("F2", "Save", "file.save"),
                     StatusItem::new("F3", "Open", "file.open"),
                     StatusItem::new("Alt+F3", "Close", "window.close"),
@@ -426,6 +433,9 @@ impl Workbench {
             debug: None,
             dap_spawn: default_dap_spawner(),
             run_config: HashMap::new(),
+            guide_tx,
+            guide_rx,
+            guides_fetching: 0,
         };
         for f in files {
             wb.open_path(f);
@@ -704,6 +714,101 @@ impl Workbench {
             }
             _ if self.debug.as_ref().is_some_and(|d| d.client.running) => self.say("The program is running (Run > Pause stops it)"),
             _ => {}
+        }
+    }
+
+    /// Open a language's guide in a Help window (fetched in the background
+    /// the first time, then kept for offline reading).
+    fn open_guide(&mut self, key: &str) {
+        use turbine_services::guides;
+        let Some(g) = guides::find(key) else {
+            self.say(format!("No guide for {key}"));
+            return;
+        };
+        let (key, title) = (g.key().to_string(), g.title.to_string());
+        if let Some(i) = self.windows.iter().position(|w| w.special == Some("help") && w.win.title == format!("Help: {title}")) {
+            let w = self.windows.remove(i);
+            self.windows.push(w);
+            self.renumber();
+            return;
+        }
+        self.show_help(&title, &format!("# {title}\n\nFetching this guide from its site... (it's kept for offline reading after this)\n"));
+        if !guides::is_kept(&key) {
+            self.say(format!("Fetching the {title} guide..."));
+        }
+        let tx = self.guide_tx.clone();
+        self.guides_fetching += 1;
+        std::thread::spawn(move || {
+            let r = guides::guide_markdown(&key, false);
+            let _ = tx.send((key, title, r));
+        });
+    }
+
+    /// Show Markdown in a read-only Help window (one per title).
+    fn show_help(&mut self, title: &str, md: &str) {
+        let name = format!("Help: {title}");
+        let i = match self.windows.iter().position(|w| w.special == Some("help") && w.win.title == name) {
+            Some(i) => i,
+            None => {
+                let d = self.desktop();
+                let mut win = Window::new(self.next_id, &name, Rect::new(d.x + 2, d.y + 1, (d.w - 4).max(20), (d.h - 2).max(6)));
+                win.min_h = 4;
+                self.next_id += 1;
+                let mut ed = EditorView::new(Document::new());
+                ed.line_numbers = false;
+                self.windows.push(EdWin {
+                    win,
+                    ed,
+                    vim: None,
+                    term: None,
+                    term_text: String::new(),
+                    lang: Some("markdown".into()),
+                    lang_for: Some(None),
+                    hl_sent: None,
+                    lsp_key: None,
+                    lsp_sent: None,
+                    was_dirty: false,
+                    special: Some("help"),
+                });
+                self.renumber();
+                self.windows.len() - 1
+            }
+        };
+        let w = &mut self.windows[i];
+        w.ed.doc = Document::from_str(md);
+        w.ed.cursor = 0;
+        w.ed.scroll_y = 0;
+        w.hl_sent = None;
+    }
+
+    fn guides_index(&mut self) {
+        use turbine_services::guides;
+        let mut seen = HashSet::new();
+        let mut items = Vec::new();
+        let mut keys = Vec::new();
+        for g in guides::GUIDES {
+            if seen.insert(g.key()) {
+                items.push(format!("{}{}", if guides::is_kept(g.key()) { "√ " } else { "  " }, g.title));
+                keys.push(g.key().to_string());
+            }
+        }
+        let h = (self.size.1 - 4).clamp(10, 24);
+        let w = (self.size.0 - 4).clamp(40, 76);
+        let d = Dialog::new(&format!("guides:{}", keys.join("\u{1f}")), "Language Guides (√ = kept offline)", w, h)
+            .list("guides", Rect::new(0, 0, w - 18, h - 3), items, 0)
+            .button("ok", w - 16, 1, "~O~pen", true)
+            .button("cancel", w - 16, 4, "Cancel", false);
+        self.dialog = Some(d);
+    }
+
+    fn update_guides(&mut self) {
+        let done: Vec<_> = self.guide_rx.try_iter().collect();
+        for (_key, title, r) in done {
+            self.guides_fetching = self.guides_fetching.saturating_sub(1);
+            match r {
+                Ok(md) => self.show_help(&title, &md),
+                Err(e) => self.show_help(&title, &format!("# {title}\n\nThis guide couldn't be fetched:\n\n    {e}\n")),
+            }
         }
     }
 
@@ -1089,7 +1194,9 @@ impl Workbench {
             }
             let path = w.ed.doc.path.clone();
             // Untitled documents are checked again as they're typed (a #! line).
-            let stale = w.lang_for.as_ref() != Some(&path) || (path.is_none() && w.hl_sent != Some(w.ed.doc.version));
+            // (Help windows say their language themselves.)
+            let fixed = w.special == Some("help");
+            let stale = !fixed && (w.lang_for.as_ref() != Some(&path) || (path.is_none() && w.hl_sent != Some(w.ed.doc.version)));
             if stale {
                 let lang = turbine_syntax::detect(path.as_deref(), &w.ed.doc.line(0));
                 if lang != w.lang {
@@ -1237,6 +1344,24 @@ impl Workbench {
                 }
             }
             "lsp.complete" => self.start_completion(),
+            "help.contents" => {
+                let lang = self.windows.last().and_then(|w| w.lang.clone()).filter(|_| self.windows.last().is_some_and(|w| w.special.is_none()));
+                match lang.filter(|l| turbine_services::guides::find(l).is_some()) {
+                    Some(l) => self.open_guide(&l),
+                    None => self.run_command("help.keys"),
+                }
+            }
+            "help.index" => self.guides_index(),
+            "help.download_all" => {
+                let tx = self.guide_tx.clone();
+                self.say("Downloading every language guide in the background...");
+                self.guides_fetching += 1;
+                std::thread::spawn(move || {
+                    let (n, failed) = turbine_services::guides::download_all(|_, _, _| {});
+                    let msg = format!("# Language guides\n\n{n} guides fetched and kept for offline reading.\n\n{}", if failed.is_empty() { String::new() } else { format!("Couldn't fetch:\n\n{}\n", failed.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n")) });
+                    let _ = tx.send(("all".into(), "Download Report".into(), Ok(msg)));
+                });
+            }
             "run.run" | "run.debug" | "run.step_into" | "run.step_over" | "run.step_out" | "run.pause" | "run.reset"
             | "run.to_cursor" | "run.breakpoint" | "run.stack" => self.debug_command(cmd),
             "run.arguments" => self.arguments_dialog(),
@@ -1505,6 +1630,15 @@ impl Workbench {
             return;
         }
         let kind = d.kind.clone();
+        if let Some(keys) = kind.strip_prefix("guides:") {
+            if let Some(i) = d.selected_index("guides") {
+                if let Some(k) = keys.split('\u{1f}').nth(i) {
+                    let k = k.to_string();
+                    self.open_guide(&k);
+                }
+            }
+            return;
+        }
         if let Some(root) = kind.strip_prefix("arguments:") {
             let program = PathBuf::from(d.value("program").unwrap_or_default().trim());
             let args: Vec<String> = d.value("args").unwrap_or_default().split_whitespace().map(str::to_string).collect();
@@ -1793,7 +1927,9 @@ impl Workbench {
         } else if k.is(Key::F(3), Mods::ALT) || k.is_ctrl('w') {
             Some("window.close")
         } else if k.is(Key::F(1), Mods::NONE) {
-            Some("help.keys")
+            Some("help.contents")
+        } else if k.is(Key::F(1), Mods::SHIFT) {
+            Some("help.index")
         } else if k.is_ctrl('g') {
             Some("search.goto")
         } else {
@@ -1810,6 +1946,14 @@ impl Workbench {
                     self.windows.push(w);
                     self.renumber();
                 }
+                return;
+            }
+        }
+        // Help, Debug and Output windows are read-only: only moving around.
+        if self.windows.last().is_some_and(|w| w.special.is_some()) {
+            let editing = matches!(k.key, Key::Char(_) | Key::Enter | Key::Backspace | Key::Delete | Key::Tab)
+                && !(k.mods.ctrl && matches!(k.key, Key::Char('c' | 'C' | 'a' | 'A')));
+            if editing {
                 return;
             }
         }
@@ -2505,6 +2649,7 @@ impl App for Workbench {
         self.update_highlights();
         self.update_lsp();
         self.update_debug();
+        self.update_guides();
         if let Some(rx) = &self.requests {
             let reqs: Vec<Request> = rx.try_iter().collect();
             for r in reqs {
@@ -2543,7 +2688,7 @@ impl App for Workbench {
         let msg_tick = self.message.as_ref().map(|(_, t)| *t + Duration::from_secs(4));
         let poll = self.requests.as_ref().map(|_| now + Duration::from_millis(50));
         // Terminals are read on ticks: ~60 a second while one is open.
-        let lsp_waiting = self.lsp.values().any(|c| c.waiting() > 0) || self.debug.is_some();
+        let lsp_waiting = self.lsp.values().any(|c| c.waiting() > 0) || self.debug.is_some() || self.guides_fetching > 0;
         let term_tick = (any_term || self.hl_pending > 0 || lsp_waiting).then(|| now + Duration::from_millis(16));
         // Servers send diagnostics unasked: look a few times a second.
         let lsp_tick = (!self.lsp.is_empty()).then(|| now + Duration::from_millis(100));
@@ -3009,6 +3154,21 @@ mod tests {
         keys(&mut wb, &["F8"]);
         assert!(wb.debug.is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn help_windows_are_read_only_markdown_and_the_index_lists_guides() {
+        let mut wb = bench();
+        wb.show_help("Test Guide", "# Title\n\nSome `code` here.\n");
+        assert_eq!(wb.windows.last().unwrap().win.title, "Help: Test Guide");
+        wait_until(&mut wb, "markdown highlighting", |wb| !wb.windows.last().unwrap().ed.highlights.is_empty());
+        assert_eq!(wb.windows.last().unwrap().lang.as_deref(), Some("markdown"));
+        run(&mut wb, json!({"cmd": "type", "text": "xyz"}));
+        assert!(wb.windows.last().unwrap().ed.doc.line(0) == "# Title", "typing doesn't change help");
+        keys(&mut wb, &["Shift+F1"]);
+        let d = wb.dialog.as_ref().expect("guide index");
+        assert!(d.kind.starts_with("guides:"));
+        assert!(d.kind.contains("rust") && d.kind.contains("python"));
     }
 
     #[test]
