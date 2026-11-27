@@ -9,6 +9,7 @@ pub mod dialog;
 pub mod editor;
 pub mod event;
 pub mod frame;
+pub mod list;
 pub mod geom;
 pub mod menu;
 pub mod popup;

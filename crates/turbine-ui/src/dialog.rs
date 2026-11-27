@@ -1168,6 +1168,9 @@ impl Dialog {
                         let changed = *selected != idx;
                         *selected = idx;
                         if double && *activates {
+                            // (A third click starts over: the list may have
+                            // changed under the pointer.)
+                            self.last_click = None;
                             return DialogResult::Activated(id.clone());
                         }
                         if changed {
@@ -1632,6 +1635,19 @@ mod tests {
         d.handle_mouse(&m(MouseKind::Up(Button::Left), corner));
         d.layout(Rect::new(0, 0, 100, 40), &theme);
         assert_eq!((d.rect.w, d.rect.h), (r.w + 10, r.h + 5));
+    }
+
+    #[test]
+    fn a_third_click_does_not_activate_again() {
+        let mut d = dlg();
+        d.layout(Rect::new(0, 0, 100, 40), &Theme::default());
+        let i = d.controls.iter().position(|p| p.control.id() == Some("files")).unwrap();
+        let ir = d.content_rect(i);
+        let at = Point::new(ir.x + 2, ir.y + 2);
+        let press = MouseEvent { kind: MouseKind::Down(Button::Left), pos: at, mods: Mods::NONE };
+        assert_eq!(d.handle_mouse(&press), DialogResult::Changed("files".into()));
+        assert_eq!(d.handle_mouse(&press), DialogResult::Activated("files".into()));
+        assert_ne!(d.handle_mouse(&press), DialogResult::Activated("files".into()));
     }
 
     #[test]

@@ -255,11 +255,12 @@ fn kind_of(name: &str) -> &str {
 pub type LineSpans = Vec<(u32, u32, u8)>;
 
 /// Highlight a whole text: spans per line. None when there's no grammar.
-pub fn highlight(lang: &str, text: &str, deadline: Duration) -> Option<Vec<LineSpans>> {
+/// A language's grammar and query, made once per thread.
+fn cached(lang: &str) -> Option<std::rc::Rc<Lang>> {
     thread_local! {
         static CACHE: std::cell::RefCell<HashMap<String, Option<std::rc::Rc<Lang>>>> = Default::default();
     }
-    let l = CACHE.with(|c| {
+    CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if let Some(l) = c.get(lang) {
             return l.clone();
@@ -267,7 +268,11 @@ pub fn highlight(lang: &str, text: &str, deadline: Duration) -> Option<Vec<LineS
         let l = make(lang).map(std::rc::Rc::new);
         c.insert(lang.to_string(), l.clone());
         l
-    })?;
+    })
+}
+
+pub fn highlight(lang: &str, text: &str, deadline: Duration) -> Option<Vec<LineSpans>> {
+    let l = cached(lang)?;
     let end = Instant::now() + deadline;
     let mut p = Parser::new();
     p.set_language(&l.language).ok()?;
@@ -310,6 +315,110 @@ pub fn highlight(lang: &str, text: &str, deadline: Duration) -> Option<Vec<LineS
         }
     }
     Some(lines)
+}
+
+/// A named definition in a file (the Outline): functions, types, classes,
+/// modules, ... `depth` is how many other symbols it sits inside.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Symbol {
+    pub name: String,
+    /// "function", "method", "class", "struct", "enum", "trait", "interface",
+    /// "impl", "module", "type", "constant", "heading".
+    pub kind: &'static str,
+    /// 0-based line of the definition.
+    pub line: usize,
+    pub depth: usize,
+}
+
+/// What kind of symbol a tree-sitter node is, from its node type (grammars
+/// name their definitions alike: function_item, function_definition,
+/// class_declaration, ...).
+fn symbol_kind(node_kind: &str) -> Option<&'static str> {
+    let k = node_kind;
+    if k.ends_with("_call") || k.contains("call_expression") || k.ends_with("_reference") || k.ends_with("_identifier") {
+        return None;
+    }
+    let def = k.ends_with("_item") || k.ends_with("_definition") || k.ends_with("_declaration") || k.ends_with("_specifier") || k.ends_with("_statement");
+    if !def && !matches!(k, "atx_heading" | "setext_heading" | "section") {
+        return None;
+    }
+    Some(match () {
+        _ if k.starts_with("function") || k.starts_with("func_") || k == "function_signature_item" => "function",
+        _ if k.starts_with("method") => "method",
+        _ if k.starts_with("class") => "class",
+        _ if k.starts_with("struct") => "struct",
+        _ if k.starts_with("enum") => "enum",
+        _ if k.starts_with("trait") => "trait",
+        _ if k.starts_with("interface") || k.starts_with("protocol") => "interface",
+        _ if k.starts_with("impl") => "impl",
+        _ if k.starts_with("mod") || k.starts_with("namespace") || k.starts_with("module") => "module",
+        _ if k.starts_with("type") || k.starts_with("union") => "type",
+        _ if k.starts_with("const") || k.starts_with("static") => "constant",
+        _ if k.contains("heading") || k == "section" => "heading",
+        _ => return None,
+    })
+}
+
+/// The definitions in a text, in order (the editor's Outline). None when
+/// there's no grammar for the language.
+pub fn symbols(lang: &str, text: &str, deadline: Duration) -> Option<Vec<Symbol>> {
+    let l = cached(lang)?;
+    let end = Instant::now() + deadline;
+    let mut p = Parser::new();
+    p.set_language(&l.language).ok()?;
+    let mut over = |_: &tree_sitter::ParseState| {
+        if Instant::now() > end { std::ops::ControlFlow::Break(()) } else { std::ops::ControlFlow::Continue(()) }
+    };
+    let bytes = text.as_bytes();
+    let mut read = |i: usize, _: tree_sitter::Point| -> &[u8] { if i < bytes.len() { &bytes[i..] } else { b"" } };
+    let tree = p.parse_with_options(&mut read, None, Some(tree_sitter::ParseOptions::new().progress_callback(&mut over)))?;
+    let mut out = Vec::new();
+    let mut cursor = tree.walk();
+    // Depth-first, counting the symbols we're inside.
+    let mut stack: Vec<bool> = Vec::new();
+    let mut depth = 0usize;
+    'walk: loop {
+        let node = cursor.node();
+        let mut is_sym = false;
+        if let Some(kind) = symbol_kind(node.kind()) {
+            let name = node
+                .child_by_field_name("name")
+                .or_else(|| node.child_by_field_name("type"))
+                .or_else(|| node.child_by_field_name("declarator").map(|d| d.child_by_field_name("declarator").unwrap_or(d)))
+                .and_then(|n| n.utf8_text(bytes).ok())
+                .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+                .or_else(|| {
+                    // (Markdown headings: their text.)
+                    (kind == "heading").then(|| node.utf8_text(bytes).ok()).flatten().map(|s| s.lines().next().unwrap_or("").trim_start_matches('#').trim().to_string())
+                });
+            if let Some(name) = name.filter(|n| !n.is_empty()) {
+                out.push(Symbol { name, kind, line: node.start_position().row, depth });
+                is_sym = true;
+            }
+        }
+        if cursor.goto_first_child() {
+            stack.push(is_sym);
+            if is_sym {
+                depth += 1;
+            }
+            continue;
+        }
+        if Instant::now() > end {
+            break;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                continue 'walk;
+            }
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
+            if stack.pop() == Some(true) {
+                depth -= 1;
+            }
+        }
+    }
+    Some(out)
 }
 
 /// The result for one request.
@@ -377,6 +486,32 @@ impl Highlighter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rust_symbols_nest() {
+        let src = "mod m {\n    pub struct S;\n    impl S {\n        fn go(&self) {}\n    }\n}\nfn main() {}\nconst N: u8 = 1;\n";
+        let syms = super::symbols("rust", src, std::time::Duration::from_secs(1)).unwrap();
+        let got: Vec<(String, &str, usize, usize)> = syms.into_iter().map(|s| (s.name, s.kind, s.line, s.depth)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("m".into(), "module", 0, 0),
+                ("S".into(), "struct", 1, 1),
+                ("S".into(), "impl", 2, 1),
+                ("go".into(), "function", 3, 2),
+                ("main".into(), "function", 6, 0),
+                ("N".into(), "constant", 7, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn python_symbols() {
+        let src = "class A:\n    def f(self):\n        pass\n\ndef g():\n    pass\n";
+        let syms = super::symbols("python", src, std::time::Duration::from_secs(1)).unwrap();
+        let got: Vec<(String, &str, usize)> = syms.into_iter().map(|s| (s.name, s.kind, s.depth)).collect();
+        assert_eq!(got, vec![("A".into(), "class", 0), ("f".into(), "function", 1), ("g".into(), "function", 0)]);
+    }
+
     use super::*;
 
     #[test]

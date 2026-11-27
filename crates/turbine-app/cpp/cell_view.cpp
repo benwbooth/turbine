@@ -302,8 +302,10 @@ void CellView::mousePressEvent(QMouseEvent* e)
 
 void CellView::mouseDoubleClickEvent(QMouseEvent* e)
 {
-    // Turbine counts clicks itself.
-    mousePressEvent(e);
+    // Turbine counts clicks itself, and Qt has already sent this click as a
+    // press: passing it on again made a double-click a triple (a folder
+    // opened, then the one that moved under the pointer).
+    e->accept();
 }
 
 void CellView::mouseReleaseEvent(QMouseEvent* e)
