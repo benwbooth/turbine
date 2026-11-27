@@ -69,6 +69,7 @@ impl Workbench {
             "project": self.shell.explorer.root.display().to_string(),
             "files": files,
             "expanded": expanded,
+            "folders": self.shell.explorer.extra.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "breakpoints": bps,
             "terminal": self.windows.iter().any(|w| w.term.is_some() && w.dock.is_some()),
         })
@@ -155,6 +156,12 @@ impl Workbench {
         let Some(dir) = self.session_dir() else { return };
         let Ok(text) = std::fs::read_to_string(dir.join("session.json")) else { return };
         let Ok(v) = serde_json::from_str::<Value>(&text) else { return };
+        // The workspace's other folders.
+        for f in v["folders"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(PathBuf::from) {
+            if f.is_dir() {
+                self.shell.explorer.add_root(f);
+            }
+        }
         if let Some(a) = v["expanded"].as_array() {
             self.shell.explorer.restore_expanded(a.iter().filter_map(|x| x.as_str().map(PathBuf::from)));
         }

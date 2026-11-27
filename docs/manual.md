@@ -53,6 +53,11 @@ Contents (F1); Help > Index (Shift+F1) lists its topics, and the
   File > Save As saves under another name.
 - File > Open Folder makes a folder the project: the Explorer, Search,
   Source Control and tasks work in it.
+- File > Add Folder to Workspace (or right-click in the Explorer) opens
+  another project beside it: each folder is a tree of its own under its
+  name, and its files' language servers, terminals and builds go by
+  their own project (and its direnv environment). Right-click a folder's
+  name to take it out again. The workspace comes back next time.
 - In the Explorer, Enter opens, F2 renames, Delete moves to the trash,
   and the context menu makes files and folders.
 - Files keep their encoding and line endings. The encoding is detected

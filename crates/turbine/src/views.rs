@@ -88,6 +88,9 @@ impl LineInput {
 /// folder listings are read in the background.
 pub struct Explorer {
     pub root: PathBuf,
+    /// More folders in the workspace, each its own tree under the first
+    /// (File > Add Folder to Workspace).
+    pub extra: Vec<PathBuf>,
     pub expanded: HashSet<PathBuf>,
     children: HashMap<PathBuf, Vec<(String, bool)>>,
     pending: HashSet<PathBuf>,
@@ -174,6 +177,7 @@ impl Explorer {
         let (size_tx, size_rx) = channel();
         let mut e = Explorer {
             root: root.clone(),
+            extra: Vec::new(),
             expanded: HashSet::from([root.clone()]),
             children: HashMap::new(),
             pending: HashSet::new(),
@@ -305,7 +309,7 @@ impl Explorer {
     /// Folders open last time (the session), read again.
     pub fn restore_expanded(&mut self, dirs: impl IntoIterator<Item = PathBuf>) {
         for d in dirs {
-            if d.starts_with(&self.root) && d.is_dir() && self.expanded.insert(d.clone()) {
+            if self.roots().iter().any(|r| d.starts_with(r)) && d.is_dir() && self.expanded.insert(d.clone()) {
                 self.request(&d);
             }
         }
@@ -340,9 +344,10 @@ impl Explorer {
         }
         let (tx, rx) = channel();
         self.git_rx = Some(rx);
-        let root = self.root.clone();
+        let roots = self.roots();
         std::thread::spawn(move || {
             let mut out = HashMap::new();
+            for root in roots {
             let top = std::process::Command::new("git").arg("-C").arg(&root).args(["rev-parse", "--show-toplevel"]).output().ok().filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
             if let Some(top) = top {
                 if let Ok(o) = std::process::Command::new("git").arg("-C").arg(&top).args(["status", "--porcelain=v1", "-z", "--untracked-files=normal"]).output() {
@@ -360,6 +365,7 @@ impl Explorer {
                         out.insert(p, code);
                     }
                 }
+            }
             }
             let _ = tx.send(out);
         });
@@ -406,15 +412,19 @@ impl Explorer {
     fn rebuild(&mut self) {
         let mut rows = Vec::new();
         let mut paths = Vec::new();
-        // "..": up a folder (the project becomes its parent).
-        if let Some(parent) = self.root.parent() {
+        // "..": up a folder (the project becomes its parent); not in a
+        // workspace of several folders.
+        if let (Some(parent), true) = (self.root.parent(), self.extra.is_empty()) {
             rows.push(Row::new("..").glyph(crate::filetypes::icon("..", true, false)).fg(turbine_ui::theme::vga::LIGHT_CYAN).bold());
             paths.push((parent.to_path_buf(), true));
         }
-        let name = self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.root.display().to_string());
-        rows.push(Row::new(name).heading());
-        paths.push((self.root.clone(), true));
-        self.walk(&self.root.clone(), 0, &mut rows, &mut paths);
+        // Each folder of the workspace: its name, then its tree.
+        for root in self.roots() {
+            let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+            rows.push(Row::new(name).heading());
+            paths.push((root.clone(), true));
+            self.walk(&root, 0, &mut rows, &mut paths);
+        }
         self.paths = paths;
         self.list.set_rows(rows);
         if let Some(w) = self.want.clone() {
@@ -519,12 +529,41 @@ impl Explorer {
 
     /// The ".." row (up a folder), when there is one.
     pub fn is_up(&self, i: usize) -> bool {
-        i == 0 && self.root.parent().is_some()
+        i == 0 && self.root.parent().is_some() && self.extra.is_empty()
     }
 
     /// The row of the project folder itself.
     pub fn root_row(&self) -> usize {
-        usize::from(self.root.parent().is_some())
+        usize::from(self.root.parent().is_some() && self.extra.is_empty())
+    }
+
+    /// The workspace's folders: the project, then those added.
+    pub fn roots(&self) -> Vec<PathBuf> {
+        std::iter::once(self.root.clone()).chain(self.extra.iter().cloned()).collect()
+    }
+
+    /// Whether a row is one of the workspace's folders (its heading).
+    pub fn is_root_row(&self, i: usize) -> bool {
+        self.paths.get(i).is_some_and(|(p, _)| self.roots().contains(p))
+    }
+
+    /// Another folder beside the project (its tree read in the background).
+    pub fn add_root(&mut self, dir: PathBuf) {
+        if dir == self.root || self.extra.contains(&dir) {
+            return;
+        }
+        self.extra.push(dir.clone());
+        self.expanded.insert(dir.clone());
+        self.request(&dir);
+        self.git_rx = None;
+        self.read_git();
+        self.rebuild();
+    }
+
+    /// A folder out of the workspace (not the project itself).
+    pub fn remove_root(&mut self, dir: &Path) {
+        self.extra.retain(|d| d != dir);
+        self.rebuild();
     }
 
     pub fn activate(&mut self, i: usize) -> Option<PathBuf> {

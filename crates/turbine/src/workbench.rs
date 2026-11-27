@@ -350,6 +350,7 @@ fn menus() -> Vec<Menu> {
                 sep(),
                 it("~O~pen File...", "F3", "file.open"),
                 it("Open ~F~older...", "", "file.open_folder"),
+                it("Add Folder to ~W~orkspace...", "", "file.add_folder"),
                 it("Open ~R~ecent", "", "file.recent"),
                 sep(),
                 it("~S~ave", "F2", "file.save"),
@@ -2502,6 +2503,15 @@ impl Workbench {
             }
             "file.open" => self.open_dialog(std::env::current_dir().unwrap_or_default()),
             "options.settings" => self.open_settings(),
+            "file.add_folder" => {
+                let root = self.shell.explorer.root.clone();
+                let start = root.parent().map(Path::to_path_buf).unwrap_or(root.clone());
+                let (mut f, mut d) = FileDialog::folder(start, Some(root), &self.recent_dirs);
+                f.add_to_workspace = true;
+                d.title = "Add Folder to Workspace".into();
+                self.file_dlg = Some(f);
+                self.dialog = Some(d);
+            }
             "file.open_folder" => {
                 let root = self.shell.explorer.root.clone();
                 let start = root.parent().map(Path::to_path_buf).unwrap_or(root.clone());
@@ -3044,9 +3054,15 @@ impl Workbench {
         let (Some(f), Some(d)) = (self.file_dlg.as_ref(), self.dialog.as_ref()) else { return };
         let Some(p) = f.target(d) else { return };
         if f.folder {
+            let add = f.add_to_workspace;
             self.dialog = None;
             self.file_dlg = None;
-            if p.is_dir() {
+            if p.is_dir() && add {
+                // (Another folder beside the project; its files' servers go
+                // by their own projects.)
+                self.shell.explorer.add_root(p.clone());
+                self.say(format!("Added {} to the workspace", p.display()));
+            } else if p.is_dir() {
                 self.open_folder(&p);
             } else {
                 self.say(format!("{} isn't a folder", p.display()));
@@ -6123,6 +6139,31 @@ mod tests {
         let cmds = wb.ed_menu.as_ref().map(|m| m.2.clone()).unwrap_or_default();
         assert!(cmds.contains(&"terminal.paste") && cmds.contains(&"terminal.kill"), "{cmds:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_holds_several_folders() {
+        let (dir, mut wb) = project("workspace");
+        let other = std::env::temp_dir().join(format!("turbine-workspace2-{}", std::process::id()));
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("second.txt"), "hi").unwrap();
+        wait_until(&mut wb, "the listing", |wb| wb.shell.explorer.list.rows.len() >= 4);
+        // File > Add Folder to Workspace: the folder, typed, Select.
+        wb.run_command("file.add_folder");
+        assert_eq!(wb.dialog.as_ref().map(|d| d.title.as_str()), Some("Add Folder to Workspace"));
+        run(&mut wb, json!({"cmd": "type", "text": other.display().to_string()}));
+        keys(&mut wb, &["Enter"]);
+        assert_eq!(wb.shell.explorer.extra, vec![other.clone()]);
+        // Both trees in the Explorer, each under its name.
+        let name = other.file_name().unwrap().to_string_lossy().into_owned();
+        wait_until(&mut wb, "both trees", |wb| wb.shell.explorer.list.rows.iter().any(|r| r.text == "second.txt") && wb.shell.explorer.list.rows.iter().any(|r| r.text == "notes.md"));
+        assert!(wb.shell.explorer.list.rows.iter().any(|r| r.heading && r.text == name));
+        // Right-click its heading: Remove Folder from Workspace.
+        let i = wb.shell.explorer.list.rows.iter().position(|r| r.heading && r.text == name).unwrap();
+        wb.ex_command("remove_root", i);
+        assert!(wb.shell.explorer.extra.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
     }
 
     #[test]

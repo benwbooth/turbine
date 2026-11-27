@@ -75,6 +75,8 @@ pub struct FileDialog {
     pub save: bool,
     /// Open Folder: only folders listed; OK picks the folder shown.
     pub folder: bool,
+    /// Add Folder to Workspace (a folder picked to go beside the project).
+    pub add_to_workspace: bool,
     pub dir: PathBuf,
     pub entries: Vec<Entry>,
     /// Indexes into `entries` of the rows shown (the first may be "..").
@@ -178,7 +180,7 @@ impl FileDialog {
             .body(ui::col(rows))
             .buttons(vec![ui::button("ok", if save { "~S~ave" } else { "~O~pen" }, true), ui::button("cancel", "Cancel", false)]);
         d.focus_id("fname");
-        let mut f = FileDialog { save, folder: false, dir, entries: Vec::new(), shown: Vec::new(), places, width: 62 };
+        let mut f = FileDialog { save, folder: false, add_to_workspace: false, dir, entries: Vec::new(), shown: Vec::new(), places, width: 62 };
         f.read_dir();
         f.refresh(&mut d);
         (f, d)

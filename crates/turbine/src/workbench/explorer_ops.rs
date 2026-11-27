@@ -114,6 +114,12 @@ impl Workbench {
                     self.shell.explorer.count_size(&d);
                 }
             }
+            "remove_root" => {
+                if let Some(p) = path.clone() {
+                    self.shell.explorer.remove_root(&p);
+                }
+            }
+            "add_root" => self.run_command("file.add_folder"),
             "set_root" => {
                 if let Some(p) = path.filter(|p| p.is_dir()) {
                     self.open_folder(&p);
@@ -262,7 +268,8 @@ impl Workbench {
     }
 
     pub(super) fn open_ex_menu(&mut self, row: usize, at: Point) {
-        let is_root = self.shell.explorer.path_at(row).is_some_and(|(p, _)| *p == self.shell.explorer.root) || self.shell.explorer.is_up(row);
+        let is_root = self.shell.explorer.is_root_row(row) || self.shell.explorer.is_up(row);
+        let is_extra = self.shell.explorer.path_at(row).is_some_and(|(p, _)| self.shell.explorer.extra.contains(p));
         let is_dir = self.shell.explorer.path_at(row).is_some_and(|(_, d)| *d);
         let mut items: Vec<(&'static str, &'static str, &'static str)> = vec![
             ("New File...", "", "new_file"),
@@ -282,6 +289,10 @@ impl Workbench {
             items.push(("Rename...", "F2", "rename"));
             items.push(("Delete", "Del", "delete"));
         }
+        if is_extra {
+            items.push(("Remove Folder from Workspace", "", "remove_root"));
+        }
+        items.push(("Add Folder to Workspace...", "", "add_root"));
         items.push(("Copy Path", "", "copy_path"));
         items.push(("Copy Relative Path", "", "copy_relative"));
         items.push(("Refresh", "", "refresh"));
