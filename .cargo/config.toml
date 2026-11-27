@@ -1,0 +1,6 @@
+
+[env]
+# Ghostty's terminal engine (Zig) builds in Zig's Debug mode whenever
+# cargo's dev profile has debug info, which made the terminal crawl
+# (seconds for a few MB of output). Always its fast build.
+LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast"

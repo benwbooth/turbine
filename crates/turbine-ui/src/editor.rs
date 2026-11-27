@@ -885,9 +885,8 @@ impl EditorView {
                         let k = self.found.partition_point(|&(_, e)| e <= ch);
                         self.found.get(k).filter(|&&(a, _)| a <= ch).map(|_| self.found_current == Some(k))
                     };
-                    let st = if selected {
-                        s.editor_selection
-                    } else if let Some(cur) = found {
+                    // (Selected text: its own colours inverted, below.)
+                    let st = if let Some(cur) = found.filter(|_| !selected) {
                         if cur { s.find_current } else { s.find_match }
                     } else if let Some(b) = bar.filter(|_| !diff_line) {
                         b
@@ -946,6 +945,8 @@ impl EditorView {
                         }
                         _ => st,
                     };
+                    // Selected: the colours swapped, each character's own.
+                    let st = if selected { Style { fg: st.bg, bg: st.fg, ..st } } else { st };
                     let g = &text[p.offset..p.offset + p.len];
                     if g == "\t" {
                         tc.fill(Rect::new(x, y, p.width as i32, 1), " ", st);
@@ -967,7 +968,7 @@ impl EditorView {
                 let eol = line_start + text.chars().count();
                 if sel.is_some_and(|(a, b)| eol >= a && eol < b) {
                     let x = text_x + total as i32 - sx as i32;
-                    tc.print(x, y, " ", s.editor_selection);
+                    tc.print(x, y, " ", Style { fg: base.bg, bg: base.fg, ..base });
                 }
                 if li == cur_line {
                     if let Some(g) = &self.ghost {

@@ -5391,6 +5391,28 @@ mod tests {
     }
 
     #[test]
+    fn markdown_outline_jumps() {
+        let (dir, mut wb) = project("mdoutline");
+        std::fs::write(dir.join("doc.md"), "# One\n\ntext\n\n## Two\n\nmore\n\n## Three\n\nend\n").unwrap();
+        wb.goto_file(&dir.join("doc.md"), Some(0), 0);
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        wait_until(&mut wb, "the outline", |wb| wb.shell.outline.list.rows.iter().any(|r| r.text.contains("Three")));
+        let rows: Vec<String> = wb.shell.outline.list.rows.iter().map(|r| r.text.clone()).collect();
+        let i = rows.iter().position(|r| r.contains("Three")).unwrap();
+        wb.outline_goto_pub(i, true);
+        assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, 8, "{rows:?} {:?}", wb.shell.outline.lines);
+        // In Preview: the page scrolls to the heading.
+        let id = wb.windows.last().unwrap().win.id;
+        wb.set_doc_mode(id, docview::Mode::Preview);
+        wait_until(&mut wb, "the page", |wb| wb.docviews[&id].alt.doc.rope.to_string().contains("Three"));
+        wb.outline_goto_pub(i, true);
+        let alt = &wb.docviews[&id].alt;
+        assert!(alt.doc.line(alt.scroll_y).contains("Three"), "{}", alt.doc.line(alt.scroll_y));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn scrolling_sideways() {
         let (dir, mut wb) = project("hscroll");
         std::fs::write(dir.join("wide.txt"), format!("{}\n", "x".repeat(400))).unwrap();

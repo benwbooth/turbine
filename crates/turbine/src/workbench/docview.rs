@@ -173,6 +173,16 @@ impl Workbench {
         }
     }
 
+    /// Scroll a window's Preview to a heading (from the Outline).
+    pub(super) fn preview_to_heading(&mut self, id: u32, heading: &str) {
+        let Some(line) = self.preview.previews.get(&(PREVIEW_ID | id)).and_then(|p| p.rendered.as_ref()).and_then(|r| r.headings.iter().find(|(_, _, t)| t.trim() == heading).map(|h| h.0)) else { return };
+        if let Some(dv) = self.docviews.get_mut(&id) {
+            let l = line.min(dv.alt.doc.len_lines().saturating_sub(1));
+            dv.alt.cursor = dv.alt.doc.rope.line_to_char(l);
+            dv.alt.scroll_y = l;
+        }
+    }
+
     fn goto_line_in(&mut self, id: u32, line: usize) {
         if let Some(w) = self.windows.iter_mut().find(|w| w.win.id == id) {
             let l = line.min(w.ed.doc.len_lines().saturating_sub(1));

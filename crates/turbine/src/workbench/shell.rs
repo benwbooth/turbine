@@ -4,6 +4,7 @@
 
 use super::*;
 use super::sections;
+use super::docview;
 use crate::dock::{Dock, Layout, Tab};
 use crate::palette::{self, Palette, Pick};
 use std::collections::HashMap;
@@ -1440,6 +1441,12 @@ impl Workbench {
     fn outline_goto(&mut self, i: usize, focus: bool) {
         let Some(&line) = self.shell.outline.lines.get(i) else { return };
         if let Some(ei) = self.editor_index() {
+            // (A Markdown file shown as its Preview: the page goes to the heading.)
+            let id = self.windows[ei].win.id;
+            if self.doc_mode(id) == docview::Mode::Preview {
+                let heading = self.windows[ei].ed.doc.line(line).trim().trim_start_matches('#').trim().to_string();
+                self.preview_to_heading(id, &heading);
+            }
             let w = &mut self.windows[ei];
             let line = line.min(w.ed.doc.len_lines().saturating_sub(1));
             w.ed.cursor = w.ed.doc.rope.line_to_char(line);
