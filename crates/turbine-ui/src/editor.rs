@@ -57,6 +57,9 @@ pub struct DiagMark {
 
 /// The minimap's width in cells (eight chars of text each, as braille
 /// dots), and the lines in each of its rows.
+mod structure;
+pub use structure::Structure;
+
 pub const MINIMAP_W: i32 = 10;
 const MINIMAP_LINES: usize = 4;
 
@@ -96,6 +99,21 @@ pub struct EditorView {
     /// over the tree-sitter colours; for the version it was made for.
     pub semantic: Vec<Vec<(u32, u32, u8)>>,
     pub semantic_version: u64,
+    /// The text's shape from its syntax tree (folds, nodes, definitions),
+    /// for the version it was made for.
+    pub structure: Structure,
+    pub structure_version: u64,
+    /// Folded regions: first line → last hidden line.
+    pub folds: std::collections::BTreeMap<usize, usize>,
+    /// (version, line count, cursor line) when the folds last followed an
+    /// edit.
+    fold_sync: (u64, usize, usize, bool),
+    /// Selections Expand Selection grew from (Shrink goes back).
+    expand_stack: Vec<(usize, usize)>,
+    /// The language's line comment ("//", "#"), and whether a line ending
+    /// in ':' opens a block (Python, YAML).
+    pub line_comment: Option<String>,
+    pub colon_indents: bool,
     /// Find's matches (char ranges, in order) and the current one.
     pub found: Vec<(usize, usize)>,
     pub found_current: Option<usize>,
@@ -133,6 +151,13 @@ impl EditorView {
             block: Vec::new(),
             found: Vec::new(),
             found_current: None,
+            structure: Structure::default(),
+            structure_version: u64::MAX,
+            folds: Default::default(),
+            fold_sync: (u64::MAX, 0, 0, false),
+            expand_stack: Vec::new(),
+            line_comment: None,
+            colon_indents: false,
             inlays: std::collections::BTreeMap::new(),
             inlays_version: u64::MAX,
             semantic: Vec::new(),
@@ -209,7 +234,10 @@ impl EditorView {
     pub fn cursor_screen_pos(&self) -> Option<Point> {
         let (line, col) = self.cursor_line_col();
         let x = self.area.x + self.gutter_width() + col as i32 - self.scroll_x as i32;
-        let y = self.area.y + line as i32 - self.scroll_y as i32;
+        if self.hidden(line) {
+            return None;
+        }
+        let y = self.area.y + self.rows_between(self.scroll_y, line);
         let p = Point::new(x, y);
         self.area.contains(p).then_some(p)
     }
@@ -353,8 +381,8 @@ impl EditorView {
     fn vertical(&mut self, delta: isize, select: bool) {
         let (line, col) = self.cursor_line_col();
         let col = *self.pref_col.get_or_insert(col);
-        let last = self.doc.len_lines().saturating_sub(1) as isize;
-        let target = (line as isize + delta).clamp(0, last) as usize;
+        // (Folded lines are stepped over.)
+        let target = self.step_visible(line, delta);
         let byte = self.byte_at_col(target, col);
         let ch = self.doc.line_byte_to_char(target, byte);
         let pref = self.pref_col;
@@ -370,6 +398,14 @@ impl EditorView {
         let m = ev.mods;
         let sel = m.shift;
         let page = self.area.h.max(1) as isize;
+        self.sync_folds();
+        if !matches!(ev.key, Key::Right | Key::Left) || !(m.shift && m.alt) {
+            self.expand_stack.clear();
+        }
+        if self.structure_key(ev) {
+            self.pref_col = None;
+            return true;
+        }
         match ev.key {
             Key::Char(c) if !m.ctrl && !m.alt && !m.meta => {
                 self.insert_text(&c.to_string());
@@ -417,11 +453,11 @@ impl EditorView {
                 Key::Up => self.vertical(-1, sel),
                 Key::Down => self.vertical(1, sel),
                 Key::PageUp => {
-                    self.scroll_y = self.scroll_y.saturating_sub(page as usize);
+                    self.scroll_y = self.step_visible(self.scroll_y, -page);
                     self.vertical(-page, sel)
                 }
                 Key::PageDown => {
-                    self.scroll_y += page as usize;
+                    self.scroll_y = self.step_visible(self.scroll_y, page);
                     self.vertical(page, sel)
                 }
                 Key::Home if m.ctrl => self.move_to(0, sel),
@@ -440,12 +476,9 @@ impl EditorView {
                 }
                 // Shift+Enter: a bare newline (agents type literal text this way).
                 Key::Enter if m.shift && !m.ctrl && !m.alt => self.insert_text("\n"),
-                Key::Enter if !m.ctrl && !m.alt => {
-                    let (line, _) = self.doc.char_to_line_byte(self.cursor);
-                    let text = self.doc.line(line);
-                    let indent: String = text.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
-                    self.insert_text(&format!("\n{indent}"));
-                }
+                Key::Enter if !m.ctrl && !m.alt => self.smart_newline(),
+                Key::Tab if !m.ctrl && !m.alt && m.shift => self.indent_lines(false),
+                Key::Tab if !m.ctrl && !m.alt && self.selection().is_some_and(|(a, b)| self.doc.rope.char_to_line(a) != self.doc.rope.char_to_line(b)) => self.indent_lines(true),
                 Key::Tab if !m.ctrl && !m.alt => {
                     if let Some(g) = self.ghost.take() {
                         self.insert_text(&g);
@@ -485,8 +518,7 @@ impl EditorView {
     }
 
     fn pos_to_char(&self, p: Point) -> usize {
-        let line = (self.scroll_y as i32 + p.y - self.area.y).max(0) as usize;
-        let line = line.min(self.doc.len_lines().saturating_sub(1));
+        let line = self.step_visible(self.scroll_y, (p.y - self.area.y).max(0) as isize);
         let col = (self.scroll_x as i32 + p.x - self.area.x - self.gutter_width()).max(0) as usize;
         let byte = self.byte_at_col(line, col);
         self.doc.line_byte_to_char(line, byte)
@@ -588,6 +620,15 @@ impl EditorView {
             }
         }
         match ev.kind {
+            // The gutter's fold marker.
+            MouseKind::Down(Button::Left) if self.area.contains(ev.pos) && self.line_numbers && ev.pos.x == self.area.x + self.gutter_width() - 1 => {
+                let line = self.step_visible(self.scroll_y, (ev.pos.y - self.area.y) as isize);
+                if !self.toggle_fold_at(line) {
+                    let ch = self.doc.rope.line_to_char(line);
+                    self.move_to(ch, false);
+                }
+                true
+            }
             MouseKind::Down(Button::Left) if self.area.contains(ev.pos) => {
                 let ch = self.pos_to_char(ev.pos);
                 self.move_to(ch, ev.mods.shift);
@@ -607,11 +648,11 @@ impl EditorView {
                 true
             }
             MouseKind::ScrollUp if self.area.contains(ev.pos) => {
-                self.scroll_y = self.scroll_y.saturating_sub(3);
+                self.scroll_y = self.step_visible(self.scroll_y, -3);
                 true
             }
             MouseKind::ScrollDown if self.area.contains(ev.pos) => {
-                self.scroll_y = (self.scroll_y + 3).min(self.doc.len_lines().saturating_sub(1));
+                self.scroll_y = self.step_visible(self.scroll_y, 3);
                 true
             }
             _ => false,
@@ -628,13 +669,16 @@ impl EditorView {
     }
 
     pub fn ensure_cursor_visible(&mut self) {
+        self.sync_folds();
         let (line, col) = self.cursor_line_col();
-        let h = self.area.h.max(1) as usize;
+        // (A cursor put inside a fold opens it.)
+        self.unfold_around(line);
+        let h = self.area.h.max(1);
         let w = (self.area.w - self.gutter_width()).max(1) as usize;
         if line < self.scroll_y {
             self.scroll_y = line;
-        } else if line >= self.scroll_y + h {
-            self.scroll_y = line + 1 - h;
+        } else if self.rows_between(self.scroll_y, line) >= h {
+            self.scroll_y = self.step_visible(line, -(h as isize - 1));
         }
         if col < self.scroll_x {
             self.scroll_x = col;
@@ -667,11 +711,13 @@ impl EditorView {
         let sel = self.selection();
         let (cur_line, cur_col) = self.cursor_line_col();
         let mut c = c.sub(area);
-        for row in 0..area.h {
-            let li = self.scroll_y + row as usize;
-            if li >= self.doc.len_lines() {
-                break;
-            }
+        self.sync_folds();
+        if self.hidden(self.scroll_y) {
+            self.scroll_y = self.step_visible(self.scroll_y, 0);
+        }
+        let shown = self.visible_lines(self.scroll_y, area.h.max(0) as usize);
+        for (row, &li) in shown.iter().enumerate() {
+            let row = row as i32;
             let y = area.y + row;
             if gw > 0 {
                 let n = format!("{:>w$} ", li + 1, w = (gw - 1) as usize);
@@ -679,6 +725,10 @@ impl EditorView {
                 if let Some(sev) = self.diagnostics.iter().filter(|d| d.line == li).map(|d| d.severity).min() {
                     let color = if sev == 1 { s.diag_error } else if sev == 2 { s.diag_warning } else { s.editor_gutter.fg };
                     c.print(area.x + gw - 1, y, "■", s.editor_gutter.fg(color));
+                } else if self.folds.contains_key(&li) {
+                    c.print(area.x + gw - 1, y, "▸", s.editor_gutter);
+                } else if self.foldable(li).is_some() {
+                    c.print(area.x + gw - 1, y, "▾", s.editor_gutter);
                 }
             }
             let text = self.doc.line(li);
@@ -765,6 +815,11 @@ impl EditorView {
                 let x = text_x + self.col_of(li, *b) as i32 - self.scroll_x as i32;
                 tc.print(x, y, t, s.editor_ghost);
             }
+            // A folded line ends in ⋯ (what's hidden).
+            if self.folds.contains_key(&li) {
+                let x = text_x + total as i32 - self.scroll_x as i32;
+                tc.print(x + 1, y, "⋯", s.editor_ghost);
+            }
             // Selected newline shows as one highlighted cell.
             let eol = line_start + text.chars().count();
             if sel.is_some_and(|(a, b)| eol >= a && eol < b) {
@@ -781,7 +836,7 @@ impl EditorView {
         }
         if focused {
             let x = text_x + cur_col as i32 - self.scroll_x as i32;
-            let y = area.y + cur_line as i32 - self.scroll_y as i32;
+            let y = area.y + if self.hidden(cur_line) { -1 } else { self.rows_between(self.scroll_y, cur_line) };
             let shape = self.cursor_shape.unwrap_or(if self.overwrite { CursorShape::Block } else { CursorShape::Underline });
             c.set_cursor(Point::new(x, y), shape);
         }

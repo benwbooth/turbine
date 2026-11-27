@@ -21,6 +21,22 @@ pub const KINDS: &[&str] = &[
     "type", "constructor", "punctuation", "escape", "attribute", "tag", "label", "namespace", "special",
 ];
 
+/// A language's line comment, if it has one.
+pub fn line_comment(lang: &str) -> Option<&'static str> {
+    Some(match lang {
+        "rust" | "c" | "cpp" | "java" | "javascript" | "typescript" | "tsx" | "go" | "c-sharp" | "kotlin" | "swift" | "dart" | "zig" | "php" | "qml" | "scala"
+        | "jsonc" | "glsl" | "wgsl" | "proto" => "//",
+        "python" | "bash" | "ruby" | "yaml" | "toml" | "nix" | "make" | "cmake" | "perl" | "r" | "elixir" | "julia" | "dockerfile" | "fish" | "tessh"
+        | "nim" | "powershell" | "gdscript" => "#",
+        "lua" | "haskell" | "sql" | "elm" | "ada" => "--",
+        "lisp" | "scheme" | "clojure" | "commonlisp" | "racket" | "fennel" | "ini" | "asm" | "nasm" => ";",
+        "erlang" | "latex" | "matlab" => "%",
+        "vim" => "\"",
+        "ocaml" | "html" | "css" | "markdown" | "json" | "xml" => return None,
+        _ => return None,
+    })
+}
+
 pub fn kind_index(name: &str) -> Option<u8> {
     KINDS.iter().position(|k| *k == name).map(|i| i as u8)
 }
@@ -271,7 +287,87 @@ fn cached(lang: &str) -> Option<std::rc::Rc<Lang>> {
     })
 }
 
+/// A text's shape, from its syntax tree: what folds, what selections grow
+/// through, and where definitions start.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Structure {
+    /// Foldable regions: (first line, last line hidden), by first line.
+    pub folds: Vec<(usize, usize)>,
+    /// Named nodes' byte ranges (selection grows through them), sorted by
+    /// start, the outer one first.
+    pub nodes: Vec<(u32, u32)>,
+    /// Lines where definitions (functions, types, ...) start.
+    pub defs: Vec<usize>,
+}
+
 pub fn highlight(lang: &str, text: &str, deadline: Duration) -> Option<Vec<LineSpans>> {
+    analyze(lang, text, deadline).map(|(h, _)| h)
+}
+
+/// The structure of a parsed tree.
+fn structure(tree: &tree_sitter::Tree, text: &str, end: Instant) -> Structure {
+    let bytes = text.as_bytes();
+    let mut st = Structure::default();
+    let mut folds: HashMap<usize, usize> = HashMap::new();
+    let mut cursor = tree.walk();
+    let root = tree.root_node().id();
+    'walk: loop {
+        let node = cursor.node();
+        if node.is_named() && node.id() != root {
+            if st.nodes.len() < 200_000 {
+                st.nodes.push((node.start_byte() as u32, node.end_byte() as u32));
+            }
+            let (a, b) = (node.start_position(), node.end_position());
+            // (A body that starts below its header folds with the header.)
+            let body_below = (node.kind() == "block" || node.kind().contains("body")) && node.parent().is_some_and(|p| p.start_position().row < a.row);
+            if b.row > a.row && !body_below {
+                // A closing bracket's line stays shown (`fn main() {⋯` then `}`).
+                let line_start = bytes[..node.end_byte().min(bytes.len())].iter().rposition(|&c| c == b'\n').map(|i| i + 1).unwrap_or(0);
+                let before = &text[line_start..node.end_byte().min(text.len())];
+                let last = if !before.trim().is_empty() && before.trim().chars().all(|c| matches!(c, '}' | ')' | ']' | ';' | ',')) || before.trim().starts_with("end") && before.trim().len() <= 4 {
+                    b.row - 1
+                } else if before.trim().is_empty() {
+                    // (Ends at the start of the next line.)
+                    b.row - 1
+                } else {
+                    b.row
+                };
+                if last > a.row {
+                    let e = folds.entry(a.row).or_insert(last);
+                    *e = (*e).max(last);
+                }
+            }
+            if symbol_kind(node.kind()).is_some() && st.defs.last() != Some(&a.row) {
+                st.defs.push(a.row);
+            }
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        if Instant::now() > end {
+            break;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                continue 'walk;
+            }
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
+        }
+    }
+    st.folds = folds.into_iter().collect();
+    st.folds.sort();
+    st.nodes.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    st.nodes.dedup();
+    st.defs.sort();
+    st.defs.dedup();
+    st
+}
+
+/// Highlight spans per line, and the text's structure. None when there's
+/// no grammar.
+pub fn analyze(lang: &str, text: &str, deadline: Duration) -> Option<(Vec<LineSpans>, Structure)> {
     let l = cached(lang)?;
     let end = Instant::now() + deadline;
     let mut p = Parser::new();
@@ -314,7 +410,8 @@ pub fn highlight(lang: &str, text: &str, deadline: Duration) -> Option<Vec<LineS
             li += 1;
         }
     }
-    Some(lines)
+    let st = structure(&tree, text, end + Duration::from_millis(500));
+    Some((lines, st))
 }
 
 /// A named definition in a file (the Outline): functions, types, classes,
@@ -428,6 +525,7 @@ pub struct Highlights {
     pub version: u64,
     /// None: no grammar for that language here.
     pub lines: Option<Vec<LineSpans>>,
+    pub structure: Option<Structure>,
 }
 
 struct Job {
@@ -464,8 +562,11 @@ impl Highlighter {
                         latest.insert(j.id, j);
                     }
                     for (_, j) in latest {
-                        let lines = highlight(&j.lang, &j.text, Duration::from_secs(2));
-                        if done.send(Highlights { id: j.id, version: j.version, lines }).is_err() {
+                        let (lines, structure) = match analyze(&j.lang, &j.text, Duration::from_secs(2)) {
+                            Some((l, s)) => (Some(l), Some(s)),
+                            None => (None, None),
+                        };
+                        if done.send(Highlights { id: j.id, version: j.version, lines, structure }).is_err() {
                             return;
                         }
                     }
@@ -486,6 +587,23 @@ impl Highlighter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn structure_folds_nodes_defs() {
+        let src = "fn main() {\n    let x = 1;\n    if x > 0 {\n        go();\n    }\n}\n\nfn go() {}\n";
+        let (_, st) = super::analyze("rust", src, std::time::Duration::from_secs(2)).unwrap();
+        // `fn main() {` folds to before its `}`; the if too.
+        assert!(st.folds.contains(&(0, 4)), "{:?}", st.folds);
+        assert!(st.folds.contains(&(2, 3)), "{:?}", st.folds);
+        assert_eq!(st.defs, vec![0, 7]);
+        // `1` sits inside `let x = 1;` inside the block inside main.
+        let one = src.find('1').unwrap() as u32;
+        let around: Vec<_> = st.nodes.iter().filter(|(a, b)| *a <= one && *b > one).collect();
+        assert!(around.len() >= 4, "{around:?}");
+        let py = "def f(a):\n    if a:\n        return 1\n    return 2\n";
+        let (_, st) = super::analyze("python", py, std::time::Duration::from_secs(2)).unwrap();
+        assert!(st.folds.contains(&(0, 3)) && st.folds.contains(&(1, 2)), "{:?}", st.folds);
+    }
+
     #[test]
     fn rust_symbols_nest() {
         let src = "mod m {\n    pub struct S;\n    impl S {\n        fn go(&self) {}\n    }\n}\nfn main() {}\nconst N: u8 = 1;\n";

@@ -322,7 +322,7 @@ fn menus() -> Vec<Menu> {
                 it("~C~opy", "Ctrl+C", "edit.copy"),
                 it("~P~aste", "Ctrl+V", "edit.paste"),
                 sep(),
-                soon("Toggle Line ~C~omment", "Ctrl+/", "edit.comment"),
+                it("Toggle Line ~C~omment", "Ctrl+/", "edit.comment"),
                 it("~F~ormat Document", "Ctrl+Shift+I", "edit.format"),
                 sep(),
                 it("Trigger ~S~uggest", "Ctrl+Space", "lsp.complete"),
@@ -336,13 +336,13 @@ fn menus() -> Vec<Menu> {
             "Se~l~ection",
             vec![
                 it("Select ~A~ll", "Ctrl+A", "edit.select_all"),
-                soon("~E~xpand Selection", "Shift+Alt+Right", "selection.expand"),
-                soon("~S~hrink Selection", "Shift+Alt+Left", "selection.shrink"),
+                it("~E~xpand Selection", "Shift+Alt+Right", "selection.expand"),
+                it("~S~hrink Selection", "Shift+Alt+Left", "selection.shrink"),
                 sep(),
-                soon("Copy Line ~U~p", "Shift+Alt+Up", "selection.copy_up"),
-                soon("Copy Line ~D~own", "Shift+Alt+Down", "selection.copy_down"),
-                soon("Mo~v~e Line Up", "Alt+Up", "selection.move_up"),
-                soon("Move Line Do~w~n", "Alt+Down", "selection.move_down"),
+                it("Copy Line ~U~p", "Shift+Alt+Up", "selection.copy_up"),
+                it("Copy Line ~D~own", "Shift+Alt+Down", "selection.copy_down"),
+                it("Mo~v~e Line Up", "Alt+Up", "selection.move_up"),
+                it("Move Line Do~w~n", "Alt+Down", "selection.move_down"),
                 sep(),
                 soon("Add Cursor A~b~ove", "Ctrl+Alt+Up", "selection.cursor_above"),
                 soon("Add Cursor Be~l~ow", "Ctrl+Alt+Down", "selection.cursor_below"),
@@ -393,6 +393,11 @@ fn menus() -> Vec<Menu> {
                 it("~L~ine Numbers", "", "view.line_numbers"),
                 it("Right to Le~f~t", "", "view.rtl"),
                 soon("~W~ord Wrap", "Alt+Z", "view.wrap"),
+                sep(),
+                it("~F~old", "Ctrl+Shift+[", "view.fold"),
+                it("~U~nfold", "Ctrl+Shift+]", "view.unfold"),
+                it("Fold ~A~ll", "", "view.fold_all"),
+                it("U~n~fold All", "", "view.unfold_all"),
             ],
         ),
         Menu::new(
@@ -407,7 +412,9 @@ fn menus() -> Vec<Menu> {
                 it("Go to ~D~efinition", "F12", "go.definition"),
                 it("Go to ~R~eferences", "Shift+F12", "go.references"),
                 it("Go to ~L~ine...", "Ctrl+G", "search.goto"),
-                soon("Go to ~B~racket", "Ctrl+Shift+\\", "go.bracket"),
+                it("Go to ~B~racket", "Ctrl+Shift+\\", "go.bracket"),
+                it("~N~ext Definition", "Alt+PgDn", "go.next_def"),
+                it("~P~revious Definition", "Alt+PgUp", "go.prev_def"),
             ],
         ),
         Menu::new(
@@ -1951,6 +1958,8 @@ impl Workbench {
             if stale {
                 let lang = turbine_syntax::detect(path.as_deref(), &w.ed.doc.line(0));
                 if lang != w.lang {
+                    w.ed.line_comment = lang.as_deref().and_then(turbine_syntax::line_comment).map(str::to_string);
+                    w.ed.colon_indents = matches!(lang.as_deref(), Some("python" | "yaml" | "nim" | "tessh"));
                     w.lang = lang;
                     w.ed.highlights.clear();
                     w.hl_sent = None;
@@ -1971,6 +1980,10 @@ impl Workbench {
             self.hl_pending = self.hl_pending.saturating_sub(1);
             if let Some(w) = self.windows.iter_mut().find(|w| w.win.id as u64 == r.id) {
                 w.ed.highlights = r.lines.unwrap_or_default();
+                if let Some(st) = r.structure {
+                    w.ed.structure = turbine_ui::editor::Structure { folds: st.folds, nodes: st.nodes, defs: st.defs };
+                    w.ed.structure_version = r.version;
+                }
             }
         }
     }
@@ -2159,6 +2172,38 @@ impl Workbench {
             "lsp.hover" => self.lsp_request(LspReq::Hover),
             "go.definition" => self.lsp_request(LspReq::Definition),
             "run.watch" => self.add_watch_dialog(),
+            "edit.comment" | "selection.expand" | "selection.shrink" | "selection.copy_up" | "selection.copy_down" | "selection.move_up" | "selection.move_down" | "go.bracket"
+            | "go.next_def" | "go.prev_def" | "view.fold" | "view.unfold" | "view.fold_all" | "view.unfold_all" => {
+                let Some(w) = self.windows.last_mut().filter(|w| w.term.is_none()) else { return };
+                let ed = &mut w.ed;
+                let editable = w.special.is_none() || w.special == Some("immediate");
+                let done = match cmd {
+                    "edit.comment" if editable => ed.toggle_comment(),
+                    "selection.expand" => ed.expand_selection(),
+                    "selection.shrink" => ed.shrink_selection(),
+                    "selection.copy_up" if editable => ed.move_lines(false, true),
+                    "selection.copy_down" if editable => ed.move_lines(true, true),
+                    "selection.move_up" if editable => ed.move_lines(false, false),
+                    "selection.move_down" if editable => ed.move_lines(true, false),
+                    "go.bracket" => ed.goto_bracket(),
+                    "go.next_def" => ed.goto_definition_line(true),
+                    "go.prev_def" => ed.goto_definition_line(false),
+                    "view.fold" => ed.fold(true),
+                    "view.unfold" => ed.fold(false),
+                    "view.fold_all" => {
+                        ed.fold_all(true);
+                        true
+                    }
+                    "view.unfold_all" => {
+                        ed.fold_all(false);
+                        true
+                    }
+                    _ => false,
+                };
+                if !done && cmd == "edit.comment" {
+                    self.say("This language has no line comments");
+                }
+            }
             "run.evaluate" => self.evaluate_dialog(),
             "run.bp_condition" => self.breakpoint_dialog(),
             "run.immediate" => self.open_immediate(),
@@ -2979,6 +3024,10 @@ impl Workbench {
             Some("lsp.signature")
         } else if k.is_ctrl('.') {
             Some("edit.quick_fix")
+        } else if k.is(Key::PageDown, Mods::ALT) {
+            Some("go.next_def")
+        } else if k.is(Key::PageUp, Mods::ALT) {
+            Some("go.prev_def")
         } else if k.is(Key::F(12), Mods::NONE) {
             Some("go.definition")
         } else if k.is(Key::F(12), Mods::SHIFT) {
@@ -5061,6 +5110,38 @@ mod tests {
         wb.run_command("run.debug");
         assert!(wb.dialog.is_none());
         wait_until(&mut wb, "again", |wb| wb.debug.is_none() && special(wb, "output") == "two\ntwo\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tree_sitter_folds_selects_and_moves_by_definition() {
+        let dir = std::env::temp_dir().join(format!("turbine-ts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("m.rs");
+        std::fs::write(&f, "fn a() {\n    let x = (1 + 2);\n}\n\nfn b() {\n    x();\n}\n").unwrap();
+        let mut wb = Workbench::new(&[f]);
+        wb.set_lsp_spawner(Box::new(|_, _| None));
+        wb.dispatch(Event::Resize(80, 25));
+        wait_until(&mut wb, "structure", |wb| wb.windows[0].ed.structure_version == wb.windows[0].ed.doc.version && !wb.windows[0].ed.structure.folds.is_empty());
+        assert_eq!(wb.windows[0].ed.line_comment.as_deref(), Some("//"));
+        wb.run_command("view.fold_all");
+        let mut surf = Surface::new(80, 25);
+        wb.render(&mut surf);
+        let t = surf.to_text();
+        assert!(t.contains("fn a() { ⋯") && t.contains("fn b() { ⋯") && !t.contains("let x"), "{t}");
+        wb.run_command("view.unfold_all");
+        keys(&mut wb, &["Alt+PgDn"]);
+        assert_eq!(wb.windows[0].ed.cursor_line_col(), (4, 0));
+        keys(&mut wb, &["Alt+PgUp"]);
+        assert_eq!(wb.windows[0].ed.cursor_line_col(), (0, 0));
+        // Shift+Alt+Right grows from `1` out to the parentheses.
+        wb.goto_file(&wb.windows[0].ed.doc.path.clone().unwrap(), Some(1), 13);
+        keys(&mut wb, &["Shift+Alt+Right", "Shift+Alt+Right"]);
+        assert_eq!(wb.windows[0].ed.selected_text().as_deref(), Some("1 + 2"));
+        keys(&mut wb, &["Shift+Alt+Right"]);
+        assert_eq!(wb.windows[0].ed.selected_text().as_deref(), Some("(1 + 2)"));
+        keys(&mut wb, &["Esc", "Ctrl+/"]);
+        assert_eq!(wb.windows[0].ed.doc.line(1), "    // let x = (1 + 2);");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
