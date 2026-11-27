@@ -460,8 +460,10 @@ impl LspClient {
                     "textDocument": {
                         "synchronization": {"didSave": true, "dynamicRegistration": false},
                         "publishDiagnostics": {"relatedInformation": false},
-                        "completion": {"completionItem": {"snippetSupport": false, "documentationFormat": ["plaintext", "markdown"]}},
-                        "hover": {"contentFormat": ["plaintext", "markdown"]},
+                        "completion": {"completionItem": {"snippetSupport": false, "documentationFormat": ["markdown", "plaintext"]}},
+                        // (Markdown first: servers then send code in fenced,
+                        // language-tagged blocks the tooltips colour.)
+                        "hover": {"contentFormat": ["markdown", "plaintext"]},
                         "definition": {"linkSupport": false},
                         "references": {},
                         "rename": {"prepareSupport": false},
@@ -472,7 +474,7 @@ impl LspClient {
                             "dataSupport": true,
                             "isPreferredSupport": true
                         },
-                        "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext", "markdown"], "parameterInformation": {"labelOffsetSupport": true}}},
+                        "signatureHelp": {"signatureInformation": {"documentationFormat": ["markdown", "plaintext"], "parameterInformation": {"labelOffsetSupport": true}}},
                         "inlayHint": {},
                         "semanticTokens": {
                             "requests": {"full": true},

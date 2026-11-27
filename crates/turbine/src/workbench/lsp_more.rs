@@ -438,7 +438,7 @@ impl Workbench {
         let w = self.windows.last().filter(|w| w.win.id == *win)?;
         let at = w.ed.cursor_screen_pos()?;
         let screen = self.screen();
-        let doc_line = sig.doc.lines().find(|l| !l.trim().is_empty());
+        let doc_line = sig.doc.lines().find(|l| !l.trim().is_empty() && !l.trim_start().starts_with("```"));
         let width = (str_width(&sig.label).max(doc_line.map_or(0, str_width)) as i32 + 4).min(screen.w - 2);
         let h = 3 + i32::from(doc_line.is_some());
         let y = if at.y - h >= 1 { at.y - h } else { at.y + 1 };
@@ -463,7 +463,7 @@ impl Workbench {
             for (part, st) in [(&sig.label[..a.min(sig.label.len())], s.menu), (&sig.label[a.min(sig.label.len())..b.min(sig.label.len())], hot), (&sig.label[b.min(sig.label.len())..], s.menu)] {
                 x = tc.print(x, y, part, st);
             }
-            if let Some(d) = sig.doc.lines().find(|l| !l.trim().is_empty()) {
+            if let Some(d) = sig.doc.lines().find(|l| !l.trim().is_empty() && !l.trim_start().starts_with("```")) {
                 tc.print(r.x + 2, y + 1, d.trim(), s.menu_disabled);
             }
         }
