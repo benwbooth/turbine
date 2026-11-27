@@ -89,6 +89,13 @@ pub mod ffi {
         fn app_menus_json() -> String;
         #[namespace = "turbine"]
         fn app_command(cmd: &str);
+        /// Its own title bar: the window drawn without the desktop's frame.
+        #[namespace = "turbine"]
+        fn app_own_title_bar() -> bool;
+        /// What its title bar asked the window to do: 0 nothing, 1 minimize,
+        /// 2 maximize or restore, 3 close, 4 move with the mouse.
+        #[namespace = "turbine"]
+        fn app_window_op() -> i32;
     }
 
     unsafe extern "C++" {
@@ -223,6 +230,14 @@ fn app_key_kind(kind: i32, key: i32, mods: u32, text: &str) -> bool {
         true
     })
     .unwrap_or(false)
+}
+
+fn app_own_title_bar() -> bool {
+    with(|st| st.wb.own_title_bar()).unwrap_or(false)
+}
+
+fn app_window_op() -> i32 {
+    with(|st| st.wb.take_window_op()).unwrap_or(0)
 }
 
 fn app_mouse(kind: i32, button: i32, col: i32, row: i32, mods: u32) {

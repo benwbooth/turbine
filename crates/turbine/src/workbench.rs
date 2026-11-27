@@ -300,6 +300,9 @@ pub struct Workbench {
     docviews: HashMap<u32, docview::DocView>,
     /// The editor's right-click menu: its list, where, each item's command.
     ed_menu: Option<(ListPopup, Point, Vec<&'static str>)>,
+    /// What the front end's window should do (its own title bar's buttons):
+    /// 1 minimize, 2 maximize or restore, 3 close, 4 start a move.
+    window_op: i32,
     /// The last key, click or move: for a moment after it, ticks come at
     /// screen rate, so what it started (a listing, colours, a preview)
     /// shows the moment it's ready.
@@ -669,6 +672,7 @@ impl Workbench {
             tip: tooltip::TipState::default(),
             docviews: HashMap::new(),
             ed_menu: None,
+            window_op: 0,
             last_input: None,
         };
         for f in files {
@@ -873,6 +877,16 @@ impl Workbench {
     /// An agent (or a question for it) is still at work.
     pub fn agent_running(&self) -> bool {
         self.agent.is_some() || self.pending_task.is_some() || self.chat_streaming.is_some() || self.pending_question.is_some()
+    }
+
+    /// The app's window drawn with Turbine's own title bar (no desktop frame).
+    pub fn own_title_bar(&self) -> bool {
+        self.shell.own_title_bar
+    }
+
+    /// The window action asked for by the title bar's buttons (0: none).
+    pub fn take_window_op(&mut self) -> i32 {
+        std::mem::take(&mut self.window_op)
     }
 
     /// The front end can draw pictures (the app; a kitty-graphics terminal).
@@ -3277,7 +3291,8 @@ impl Workbench {
             Event::Resize(w, h) => {
                 let old = self.desktop();
                 self.size = (w, h);
-                self.menubar.width = w;
+                // (Its own title bar's buttons take the row's right end.)
+                self.menubar.width = if self.shell.own_title_bar { w - 9 } else { w };
                 let d = self.desktop();
                 // Windows keep their place and share of the desktop as it
                 // grows or shrinks (zoomed ones fill it).
@@ -3887,6 +3902,20 @@ impl Workbench {
             self.dialog_result(r);
             return;
         }
+        if self.shell.own_title_bar && !self.menubar.is_open() && m.pos.y == 0 && matches!(m.kind, MouseKind::Down(Button::Left)) {
+            if let Some(op) = self.title_buttons().into_iter().find(|b| b.0.contains(m.pos)).map(|b| b.1) {
+                self.window_op = op;
+                return;
+            }
+            // The free part of the bar: drag to move, double-click to maximize.
+            let on_menu = self.menubar.title_rects().iter().any(|r| r.w > 0 && r.contains(m.pos)) || self.layout_toggles().iter().any(|t| t.0.contains(m.pos));
+            if !on_menu {
+                let double = self.last_click.is_some_and(|(p, t)| p.y == 0 && (p.x - m.pos.x).abs() < 2 && t.elapsed() < Duration::from_millis(400));
+                self.last_click = Some((m.pos, Instant::now()));
+                self.window_op = if double { 2 } else { 4 };
+                return;
+            }
+        }
         if !self.menubar.is_open() && m.pos.y == 0 {
             if let Some(cmd) = self.layout_toggles().into_iter().find(|t| t.0.contains(m.pos)).map(|t| t.1) {
                 if matches!(m.kind, MouseKind::Down(Button::Left)) {
@@ -4086,6 +4115,9 @@ impl Workbench {
                 }
             }
             bar = bar.child(mn);
+        }
+        for (r, op, name, _) in self.title_buttons() {
+            bar = bar.child(Node::new(format!("window_button.{op}"), "button", name, r));
         }
         for (r, cmd, name, _, on) in self.layout_toggles() {
             bar = bar.child(Node::new(format!("layout.{cmd}"), "button", name, r).value(if on { "on" } else { "off" }));
@@ -4695,6 +4727,25 @@ impl App for Workbench {
             }
         }
         self.menubar.draw(&mut c, &theme, screen);
+        // Its own title bar: the title in the menu bar's free middle, and
+        // the window's buttons at its right end.
+        if self.shell.own_title_bar {
+            let base = theme.scheme.menu;
+            for (r, _, _, label) in self.title_buttons() {
+                c.print(r.x, r.y, label, base);
+            }
+            let titles = self.menubar.title_rects();
+            let left = titles.iter().filter(|r| r.w > 0 && r.x < self.size.0 / 2).map(|r| r.right()).max().unwrap_or(0) + 2;
+            let right = self.layout_toggles().first().map(|t| t.0.x).or(titles.iter().filter(|r| r.w > 0 && r.x >= self.size.0 / 2).map(|r| r.x).min()).unwrap_or(self.size.0 - 9) - 2;
+            let t = self.title();
+            let t = if t.is_empty() { "Turbine".to_string() } else { format!("{t} - Turbine") };
+            let room = (right - left).max(0) as usize;
+            if room > 8 {
+                let shown: String = if str_width(&t) > room { format!("…{}", t.chars().rev().take(room - 1).collect::<Vec<_>>().into_iter().rev().collect::<String>()) } else { t };
+                let x = left + (room as i32 - str_width(&shown) as i32) / 2;
+                c.print(x, 0, &shown, Style { fg: theme.scheme.menu_hotkey.fg, ..base });
+            }
+        }
         // (The layout toggles: [▌] lit when its part shows, dim when not.)
         for (r, _, _, glyph, on) in self.layout_toggles() {
             let base = theme.scheme.menu;
@@ -5641,6 +5692,27 @@ mod tests {
         assert!(wb.ed_menu.is_none());
         assert_eq!(wb.windows.last().unwrap().ed.selected_text().as_deref(), Some("# Notes\n"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn its_own_title_bar_asks_the_window() {
+        let mut wb = bench();
+        wb.dispatch(Event::Resize(120, 30));
+        wb.setting_set("title_bar", "on");
+        assert!(wb.own_title_bar());
+        let b = wb.title_buttons();
+        assert_eq!(b.len(), 3);
+        let at = |r: Rect| Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(r.x + 1, 0), mods: Mods::NONE });
+        wb.event(at(b[0].0));
+        assert_eq!(wb.take_window_op(), 1);
+        wb.event(at(b[2].0));
+        assert_eq!(wb.take_window_op(), 3);
+        // The free middle of the bar: a move.
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(100, 0), mods: Mods::NONE }));
+        assert_eq!(wb.take_window_op(), 4);
+        let mut surf = Surface::new(120, 30);
+        wb.render(&mut surf);
+        assert!(surf.to_text().lines().next().unwrap().ends_with("[_][□][×]"));
     }
 
     #[test]

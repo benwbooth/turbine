@@ -245,6 +245,7 @@ void CellView::tick()
     }
     const QString copied = QString::fromStdString(std::string(turbine::app_take_clipboard()));
     if (!copied.isEmpty()) QGuiApplication::clipboard()->setText(copied);
+    applyWindowOp();
     const QString t = QString::fromStdString(std::string(turbine::app_title()));
     if (t != m_title) {
         m_title = t;
@@ -346,6 +347,24 @@ static int buttonOf(Qt::MouseButton b)
     }
 }
 
+// Turbine's own title bar: the frame off or on as the setting says, and
+// what its buttons asked for (a move only works inside a press, so
+// presses check at once).
+void CellView::applyWindowOp()
+{
+    QQuickWindow* w = window();
+    if (!w) return;
+    const bool own = turbine::app_own_title_bar();
+    if (own != w->flags().testFlag(Qt::FramelessWindowHint)) w->setFlag(Qt::FramelessWindowHint, own);
+    switch (turbine::app_window_op()) {
+    case 1: w->showMinimized(); break;
+    case 2: if (w->visibility() == QWindow::Maximized) w->showNormal(); else w->showMaximized(); break;
+    case 3: w->close(); break;
+    case 4: w->startSystemMove(); break;
+    default: break;
+    }
+}
+
 void CellView::mousePressEvent(QMouseEvent* e)
 {
     forceActiveFocus();
@@ -354,6 +373,7 @@ void CellView::mousePressEvent(QMouseEvent* e)
     if (e->button() == Qt::MiddleButton)
         turbine::app_set_clipboard(rust::Str(QGuiApplication::clipboard()->text(QClipboard::Selection).toStdString()));
     turbine::app_mouse(0, buttonOf(e->button()), c.x(), c.y(), uint32_t(e->modifiers()));
+    applyWindowOp();
     m_lastCell = c;
     e->accept();
     afterInput();

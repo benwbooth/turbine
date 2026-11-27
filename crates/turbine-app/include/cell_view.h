@@ -66,6 +66,7 @@ private:
     qreal m_zoom = 0.85;
     int m_basePx = 0;
     void applyZoom();
+    void applyWindowOp();
     void zoomBy(int step);
     qreal m_cw = 8, m_ch = 16, m_ascent = 12;
     // VGA mode (the default with the DOS font installed): the screen is

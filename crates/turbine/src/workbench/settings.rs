@@ -35,6 +35,7 @@ const DEFS: &[Def] = &[
     Def { key: "cursor_blink", category: "Editor", label: "Cursor blinks", description: "Whether the cursor blinks.", kind: Kind::Bool },
     Def { key: "word_wrap", category: "Editor", label: "Word wrap", description: "Long lines wrap at the window's edge instead of running off it (Alt+Z).", kind: Kind::Bool },
     Def { key: "show_whitespace", category: "Editor", label: "Render whitespace", description: "Show spaces (·), tabs (→) and line ends (¶; ←¶ for CR LF files) faintly.", kind: Kind::Bool },
+    Def { key: "title_bar", category: "Layout", label: "Turbine's own title bar", description: "The desktop app without the desktop's window frame: the title and the minimize, maximize and close buttons in the menu bar's row; drag the free part of it to move the window.", kind: Kind::Bool },
     Def { key: "inlay_hints", category: "Editor", label: "Inlay hints", description: "Grey types and parameter names the language server adds between the words (they aren't in the file).", kind: Kind::Bool },
     Def { key: "semantic", category: "Editor", label: "Semantic highlighting", description: "Colour words by what the language server knows they are (a type, a function), over the syntax colours.", kind: Kind::Bool },
     Def { key: "sidebar", category: "Layout", label: "Primary side bar", description: "The Explorer, Outline, Search, Source Control, Run and Debug and Extensions at the left (Ctrl+B).", kind: Kind::Bool },
@@ -67,6 +68,7 @@ impl Workbench {
             "inlay_hints" => b(!self.lspx.inlays_off),
             "word_wrap" => b(self.shell.word_wrap),
             "show_whitespace" => b(self.shell.show_whitespace),
+            "title_bar" => b(self.shell.own_title_bar),
             "cursor_style" => self.shell.cursor_style.clone(),
             "cursor_blink" => b(self.shell.cursor_blink),
             "semantic" => b(!self.lspx.semantic_off),
@@ -135,6 +137,11 @@ impl Workbench {
                     w.ed.wrap = on;
                 }
             }
+            "title_bar" => {
+                self.shell.own_title_bar = on;
+                let (w, h) = self.size;
+                self.dispatch(Event::Resize(w, h));
+            }
             "show_whitespace" => {
                 self.shell.show_whitespace = on;
                 for w in self.windows.iter_mut().filter(|w| w.term.is_none() && w.special.is_none()) {
@@ -182,6 +189,7 @@ impl Workbench {
             "recent_files": self.extras.recent,
             "word_wrap": self.shell.word_wrap,
             "show_whitespace": self.shell.show_whitespace,
+            "title_bar": self.shell.own_title_bar,
             "cursor_style": self.shell.cursor_style,
             "cursor_blink": self.shell.cursor_blink,
             "inlay_hints": !self.lspx.inlays_off,
@@ -210,6 +218,9 @@ impl Workbench {
         }
         if let Some(b) = v["cursor_blink"].as_bool() {
             self.shell.cursor_blink = b;
+        }
+        if let Some(b) = v["title_bar"].as_bool() {
+            self.setting_set("title_bar", if b { "on" } else { "off" });
         }
         if let Some(b) = v["show_whitespace"].as_bool() {
             self.setting_set("show_whitespace", if b { "on" } else { "off" });
