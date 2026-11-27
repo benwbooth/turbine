@@ -110,7 +110,9 @@ impl Workbench {
         // (Still resting there: the server's words, without its code fences.)
         if self.tip.at.is_some_and(|(p, _)| anchor.contains(p)) && self.tip.shown.is_none() && !text.trim().is_empty() {
             // (The server's Markdown rendered, its code in its colours.)
-            let rich = self.markdown_rich(text, 70);
+            // (Inline code in the hovered file's language.)
+            let lang = self.windows.last().and_then(|w| w.lang.clone());
+            let rich = self.markdown_rich_in(text, 70, lang.as_deref());
             let plain: String = rich.iter().map(|l| l.iter().map(|(t, _)| t.as_str()).collect::<String>()).collect::<Vec<_>>().join("\n");
             self.tip.shown = Some((anchor, plain));
             self.tip.rich = Some(rich);
@@ -121,7 +123,37 @@ impl Workbench {
     /// Markdown as a tooltip's coloured lines: rendered as the guide is,
     /// each kind of text in the code colours (on the tip's black).
     pub(super) fn markdown_rich(&self, md: &str, width: usize) -> Vec<Vec<(String, Style)>> {
-        let r = crate::markdown::render(md, width);
+        self.markdown_rich_in(md, width, None)
+    }
+
+    /// The same, inline code highlighted as `lang` (a hover's: its file's).
+    pub(super) fn markdown_rich_in(&self, md: &str, width: usize, lang: Option<&str>) -> Vec<Vec<(String, Style)>> {
+        let mut r = crate::markdown::render(md, width);
+        // Inline code (one colour as Markdown gives it) re-coloured by the
+        // language's grammar, span by span.
+        if let Some(lang) = lang {
+            let string = turbine_ui::theme::SYNTAX_KINDS.iter().position(|k| *k == "string").unwrap_or(1) as u8;
+            let lines: Vec<String> = r.text.lines().map(str::to_string).collect();
+            for (i, line) in lines.iter().enumerate() {
+                // (Code blocks are framed, and already coloured.)
+                if line.starts_with('│') {
+                    continue;
+                }
+                let Some(spans) = r.spans.get_mut(i) else { continue };
+                let code: Vec<(u32, u32)> = spans.iter().filter(|x| x.2 == string).map(|x| (x.0, x.1)).collect();
+                for (a, b) in code {
+                    let Some(text) = line.get(a as usize..b as usize) else { continue };
+                    if let Some(hl) = turbine_syntax::highlight(lang, text, Duration::from_millis(30)) {
+                        spans.retain(|x| !(x.0 == a && x.1 == b && x.2 == string));
+                        // (Plain parts stay the code's colour; tokens get theirs.)
+                        spans.push((a, b, string));
+                        for (sa, sb, k) in hl.first().cloned().unwrap_or_default() {
+                            spans.push((a + sa, a + sb, k));
+                        }
+                    }
+                }
+            }
+        }
         let base = self.theme.scheme.tooltip;
         let syn = &self.theme.scheme.syntax;
         let mut out = Vec::new();

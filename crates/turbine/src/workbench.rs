@@ -6083,6 +6083,11 @@ mod tests {
         let code = rich.iter().find(|l| l.iter().any(|(t, _)| t.contains("fn"))).unwrap();
         let ty = code.iter().find(|(t, _)| t == "u32").unwrap().1;
         assert_ne!(ty.fg, wb.theme.scheme.tooltip.fg, "{code:?}");
+        // Inline code in the file's language: its type and its punctuation apart.
+        let rich = wb.markdown_rich_in("Type: `const char *const[45]`", 70, Some("c"));
+        let line = rich.iter().find(|l| l.iter().any(|(t, _)| t.contains("char"))).unwrap();
+        let styles: std::collections::HashSet<_> = line.iter().filter(|(t, _)| !t.trim().is_empty() && !t.contains("Type")).map(|(_, s)| (s.fg.0, s.fg.1, s.fg.2)).collect();
+        assert!(styles.len() >= 2, "{line:?}");
     }
 
     #[test]
