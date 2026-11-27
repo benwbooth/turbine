@@ -691,6 +691,15 @@ impl EditorView {
                 self.dragging = false;
                 true
             }
+            // (Shift+wheel scrolls sideways, as in VS Code.)
+            MouseKind::ScrollUp | MouseKind::ScrollDown if self.area.contains(ev.pos) && ev.mods.shift => {
+                self.hscroll(if ev.kind == MouseKind::ScrollUp { -6 } else { 6 });
+                true
+            }
+            MouseKind::ScrollLeft | MouseKind::ScrollRight if self.area.contains(ev.pos) => {
+                self.hscroll(if ev.kind == MouseKind::ScrollLeft { -3 } else { 3 });
+                true
+            }
             MouseKind::ScrollUp if self.area.contains(ev.pos) => {
                 self.scroll_y = self.step_visible(self.scroll_y, -3);
                 true
@@ -710,6 +719,19 @@ impl EditorView {
 
     fn gutter_width(&self) -> i32 {
         if self.line_numbers { self.doc.len_lines().to_string().len().max(3) as i32 + 1 } else { 0 }
+    }
+
+    /// Scroll sideways by some columns, no further than the longest line
+    /// in view (not at all when lines wrap).
+    pub fn hscroll(&mut self, by: isize) {
+        if self.wrap_width() > 0 {
+            return;
+        }
+        let w = (self.area.w - self.gutter_width()).max(1) as usize;
+        let lines = self.doc.len_lines();
+        let longest = (self.scroll_y..(self.scroll_y + self.area.h.max(1) as usize).min(lines)).map(|l| turbine_text::unicode::str_width(&self.doc.line(l).replace('\t', "    "))).max().unwrap_or(0);
+        let max = longest.saturating_sub(w / 2);
+        self.scroll_x = if by > 0 { (self.scroll_x + by as usize).min(max.max(self.scroll_x)) } else { self.scroll_x.saturating_sub(by.unsigned_abs()) };
     }
 
     pub fn ensure_cursor_visible(&mut self) {

@@ -359,13 +359,25 @@ void CellView::hoverLeaveEvent(QHoverEvent* e)
 void CellView::wheelEvent(QWheelEvent* e)
 {
     // Trackpads send pixels, wheels send angles: one step per 120 or per cell height.
+    // Sideways (a trackpad's swipe, a tilting wheel) by cell widths.
     const QPoint px = e->pixelDelta();
     m_wheel += px.isNull() ? e->angleDelta().y() / 120.0 : px.y() / m_ch;
+    m_hwheel += px.isNull() ? e->angleDelta().x() / 120.0 : px.x() / m_cw;
     const QPoint c = cellAt(e->position());
     while (std::abs(m_wheel) >= 1) {
         const bool up = m_wheel > 0;
         turbine::app_mouse(up ? 4 : 5, 0, c.x(), c.y(), uint32_t(e->modifiers()));
         m_wheel += up ? -1 : 1;
+    }
+    while (std::abs(m_hwheel) >= 1) {
+        // (Content follows the fingers: a swipe left shows what's right.)
+        const bool left = m_hwheel > 0;
+        turbine::app_mouse(left ? 6 : 7, 0, c.x(), c.y(), uint32_t(e->modifiers()));
+        m_hwheel += left ? -1 : 1;
+    }
+    if (e->phase() == Qt::ScrollEnd) {
+        m_wheel = 0;
+        m_hwheel = 0;
     }
     e->accept();
     afterInput();

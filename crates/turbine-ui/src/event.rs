@@ -147,6 +147,9 @@ pub enum MouseKind {
     Moved,
     ScrollUp,
     ScrollDown,
+    /// A trackpad's (or tilting wheel's) sideways scroll.
+    ScrollLeft,
+    ScrollRight,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

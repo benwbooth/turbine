@@ -58,7 +58,8 @@ pub mod ffi {
         /// A key from Qt (key code, modifiers, text). True when used.
         #[namespace = "turbine"]
         fn app_key(key: i32, mods: u32, text: &str) -> bool;
-        /// kind: 0 press, 1 release, 2 drag, 3 move, 4 wheel up, 5 wheel down;
+        /// kind: 0 press, 1 release, 2 drag, 3 move, 4 wheel up, 5 wheel down,
+        /// 6 wheel left, 7 wheel right;
         /// button: 1 left, 2 right, 3 middle.
         #[namespace = "turbine"]
         fn app_mouse(kind: i32, button: i32, col: i32, row: i32, mods: u32);
@@ -223,6 +224,8 @@ fn app_mouse(kind: i32, button: i32, col: i32, row: i32, mods: u32) {
         2 => MouseKind::Drag(b),
         3 => MouseKind::Moved,
         4 => MouseKind::ScrollUp,
+        6 => MouseKind::ScrollLeft,
+        7 => MouseKind::ScrollRight,
         _ => MouseKind::ScrollDown,
     };
     let m = Mods { shift: mods & QT_SHIFT != 0, ctrl: mods & QT_CTRL != 0, alt: mods & QT_ALT != 0, meta: mods & QT_META != 0 };

@@ -3889,7 +3889,7 @@ impl Workbench {
                     _ => {}
                 }
             }
-            MouseKind::ScrollUp | MouseKind::ScrollDown => {
+            MouseKind::ScrollUp | MouseKind::ScrollDown | MouseKind::ScrollLeft | MouseKind::ScrollRight => {
                 let w = &mut self.windows[i];
                 let mut m2 = m;
                 m2.pos = w.win.inner().center();
@@ -5057,6 +5057,27 @@ mod tests {
         keys(&mut wb, &["End"]);
         run(&mut wb, json!({"cmd": "type", "text": "("}));
         assert!(wb.find.error.is_some());
+    }
+
+    #[test]
+    fn scrolling_sideways() {
+        let (dir, mut wb) = project("hscroll");
+        std::fs::write(dir.join("wide.txt"), format!("{}\n", "x".repeat(400))).unwrap();
+        wb.goto_file(&dir.join("wide.txt"), Some(0), 0);
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let inner = wb.windows.last().unwrap().win.inner();
+        let at = Point::new(inner.x + 10, inner.y + 1);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::ScrollRight, pos: at, mods: Mods::NONE }));
+        assert_eq!(wb.windows.last().unwrap().ed.scroll_x, 3);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::ScrollDown, pos: at, mods: Mods::SHIFT }));
+        assert_eq!(wb.windows.last().unwrap().ed.scroll_x, 9);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::ScrollLeft, pos: at, mods: Mods::NONE }));
+        assert_eq!(wb.windows.last().unwrap().ed.scroll_x, 6);
+        // (Drawing keeps it: the cursor didn't move.)
+        wb.render(&mut surf);
+        assert_eq!(wb.windows.last().unwrap().ed.scroll_x, 6);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -85,6 +85,8 @@ impl TerminalView {
             MouseKind::Drag(_) | MouseKind::Moved => MouseAct::Motion,
             MouseKind::ScrollUp => MouseAct::Wheel { up: true },
             MouseKind::ScrollDown => MouseAct::Wheel { up: false },
+            // (Terminals have no sideways wheel to pass on.)
+            MouseKind::ScrollLeft | MouseKind::ScrollRight => return MouseOutcome::Ignored,
         };
         t.mouse(act, ev.pos.x - self.area.x, ev.pos.y - self.area.y, gmods(ev.mods))
     }

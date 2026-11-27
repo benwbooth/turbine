@@ -87,4 +87,5 @@ private:
     int m_buttons = 0;
     QPoint m_lastCell { -1, -1 };
     qreal m_wheel = 0;
+    qreal m_hwheel = 0;
 };

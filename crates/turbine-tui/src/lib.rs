@@ -357,7 +357,8 @@ pub fn convert(e: ct::Event) -> Option<Event> {
                 ct::MouseEventKind::Moved => MouseKind::Moved,
                 ct::MouseEventKind::ScrollUp => MouseKind::ScrollUp,
                 ct::MouseEventKind::ScrollDown => MouseKind::ScrollDown,
-                _ => return None,
+                ct::MouseEventKind::ScrollLeft => MouseKind::ScrollLeft,
+                ct::MouseEventKind::ScrollRight => MouseKind::ScrollRight,
             };
             Event::Mouse(MouseEvent { kind, pos: Point::new(me.column as i32, me.row as i32), mods: mods(me.modifiers) })
         }
