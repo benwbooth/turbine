@@ -27,6 +27,8 @@ pub struct StatusBar {
     pub message: Option<String>,
     /// QBasic/Edit form: hints as `<F1=Help>`, the info after a `│`.
     pub dos: bool,
+    /// VB-DOS form: `F1=Help │ F2=Save │ …`.
+    pub rules: bool,
 }
 
 impl StatusBar {
@@ -35,9 +37,9 @@ impl StatusBar {
         self.items
             .iter()
             .map(|it| {
-                let w = str_width(&it.key) as i32 + 1 + str_width(&it.label) as i32 + if self.dos { 2 } else { 0 };
+                let w = str_width(&it.key) as i32 + 1 + str_width(&it.label) as i32 + if self.dos && !self.rules { 2 } else { 0 };
                 let r = Rect::new(x, y, w, 1);
-                x += w + if self.dos { 1 } else { 2 };
+                x += w + if self.rules { 3 } else if self.dos { 1 } else { 2 };
                 r
             })
             .collect()
@@ -63,7 +65,10 @@ impl StatusBar {
                 if ir.right() > left.right() {
                     break;
                 }
-                if self.dos {
+                if self.rules {
+                    let x = lc.print(ir.x, ir.y, &format!("{}={}", it.key, it.label), s.status);
+                    lc.print(x + 1, ir.y, "│", s.status);
+                } else if self.dos {
                     lc.print(ir.x, ir.y, &format!("<{}={}>", it.key, it.label), s.status);
                 } else {
                     let x = lc.print(ir.x, ir.y, &it.key, s.status_key);

@@ -3354,6 +3354,7 @@ impl App for Workbench {
         self.menubar.hotkeys_when_active = theme.style.hotkeys_when_active;
         self.menubar.hide_system = theme.style.hide_system_menu;
         self.status.dos = theme.style.dos_status;
+        self.status.rules = theme.style.status_rules;
         let screen = self.screen();
         let desk = self.desktop();
         let mut c = surf.canvas();
@@ -4018,6 +4019,21 @@ mod tests {
         // The title is in reverse video (blue on grey).
         let x = lines[1].find(" UNTITLED ").map(|b| lines[1][..b].chars().count()).unwrap() as i32 + 1;
         assert_eq!(surf.get(x, 1).unwrap().style.bg, turbine_ui::theme::vga::LIGHT_GRAY);
+    }
+
+    #[test]
+    fn vbdos_style_has_title_bars() {
+        let mut wb = bench();
+        wb.dispatch(Event::Resize(80, 25));
+        wb.apply_style(turbine_ui::theme::ControlStyle::vbdos());
+        assert_eq!(wb.theme.scheme.name, "VB-DOS");
+        let mut surf = Surface::new(80, 25);
+        wb.render(&mut surf);
+        let text = surf.to_text();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[1].contains("[1] UNTITLED") && lines[1].contains('▼') && lines[1].contains('▲'), "{:?}", lines[1]);
+        assert_eq!(surf.get(3, 1).unwrap().style.bg, turbine_ui::theme::vga::MAGENTA);
+        assert!(lines[24].contains("F1=Help │"), "{:?}", lines[24]);
     }
 
     #[test]

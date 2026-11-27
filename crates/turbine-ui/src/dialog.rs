@@ -286,6 +286,11 @@ impl Dialog {
         let r = self.rect;
         c.fill(r, " ", s.dialog);
         draw_frame(c, r, theme.style.dialog_frame, s.dialog_frame);
+        if theme.style.title_bar {
+            c.fill(Rect::new(r.x, r.y, r.w, 1), " ", s.dialog_title);
+            let w = turbine_text::unicode::str_width(&self.title) as i32;
+            c.print(r.x + (r.w - w) / 2, r.y, &self.title, s.dialog_title);
+        }
         // (QBasic: a line across the box above the buttons.)
         if theme.style.dialog_rule {
             if let Some(by) = self.controls.iter().filter(|p| matches!(p.control, Control::Button { .. })).map(|p| p.rect.y).max() {
@@ -298,7 +303,9 @@ impl Dialog {
                 }
             }
         }
-        draw_title(c, r, &self.title, s.dialog_frame);
+        if !theme.style.title_bar {
+            draw_title(c, r, &self.title, s.dialog_frame);
+        }
         if theme.style.shadows {
             c.shadow(r, s.shadow);
         }

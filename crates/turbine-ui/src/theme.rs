@@ -105,6 +105,10 @@ pub struct Scheme {
     /// A line with a breakpoint, and the line the debugger stopped at.
     pub breakpoint: Style,
     pub exec_bar: Style,
+    /// Filled title bars (VB-DOS): the active window's, others', dialogs'.
+    pub title_active: Style,
+    pub title_inactive: Style,
+    pub dialog_title: Style,
 }
 
 /// Highlight kinds, in index order (the same list as turbine-syntax's).
@@ -187,6 +191,9 @@ impl Scheme {
             diag_warning: vga::LIGHT_MAGENTA,
             breakpoint: s!(WHITE on RED),
             exec_bar: s!(BLACK on CYAN),
+            title_active: s!(WHITE on BLUE),
+            title_inactive: s!(LIGHT_GRAY on BLUE),
+            dialog_title: s!(WHITE on LIGHT_GRAY),
         }
     }
 
@@ -229,7 +236,39 @@ impl Scheme {
             diag_warning: vga::LIGHT_MAGENTA,
             breakpoint: s!(WHITE on RED),
             exec_bar: s!(BLACK on CYAN),
+            title_active: s!(WHITE on BLUE),
+            title_inactive: s!(LIGHT_GRAY on BLUE),
+            dialog_title: s!(WHITE on LIGHT_GRAY),
         }
+    }
+
+    /// Visual Basic for MS-DOS: QBasic's sibling in text-mode Windows 2
+    /// clothes: a dark grey dithered desktop, magenta title bars, blue code
+    /// windows, grey menus and dialogs, a cyan status line.
+    pub fn vbdos() -> Scheme {
+        let mut s = Scheme::qbasic();
+        s.name = "VB-DOS";
+        s.desktop = s!(LIGHT_GRAY on BLACK);
+        s.desktop_char = "▒";
+        s.menu_hotkey = s!(WHITE on LIGHT_GRAY);
+        s.menu_selected = s!(WHITE on BLACK);
+        s.menu_selected_hotkey = s!(WHITE on BLACK);
+        s.frame = s!(BLACK on BLACK);
+        s.frame_active = s!(BLACK on BLACK);
+        s.frame_icons = s!(BLACK on LIGHT_GRAY);
+        s.editor = s!(WHITE on BLUE);
+        s.editor_selection = s!(BLUE on LIGHT_GRAY);
+        s.scrollbar = s!(BLACK on LIGHT_GRAY);
+        s.dialog_frame = s!(BLACK on LIGHT_GRAY);
+        s.button_focused = s!(WHITE on LIGHT_GRAY);
+        s.input = s!(BLACK on LIGHT_GRAY);
+        s.status = s!(BLACK on CYAN);
+        s.status_key = s!(BLACK on CYAN);
+        s.shadow = s!(BLACK on BLACK);
+        s.title_active = s!(WHITE on MAGENTA);
+        s.title_inactive = s!(BLACK on LIGHT_GRAY);
+        s.dialog_title = s!(WHITE on MAGENTA);
+        s
     }
 
     /// Borland C++ 3.1 style: cyan editor.
@@ -303,11 +342,14 @@ impl Scheme {
             diag_warning: a,
             breakpoint: r,
             exec_bar: Style { attrs: Attrs { bold: true, ..Attrs::default() }, ..r },
+            title_active: r,
+            title_inactive: n,
+            dialog_title: r,
         }
     }
 
     pub fn all() -> Vec<Scheme> {
-        vec![Scheme::turbo(), Scheme::qbasic(), Scheme::borland_cyan(), Scheme::amber()]
+        vec![Scheme::turbo(), Scheme::qbasic(), Scheme::vbdos(), Scheme::borland_cyan(), Scheme::amber()]
     }
 }
 
@@ -324,6 +366,8 @@ pub struct FrameChars {
 
 pub const SINGLE: FrameChars = FrameChars { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" };
 pub const DOUBLE: FrameChars = FrameChars { tl: "╔", tr: "╗", bl: "╚", br: "╝", h: "═", v: "║" };
+/// No lines: the border is plain cells in the frame's colours (VB-DOS).
+pub const BLANK: FrameChars = FrameChars { tl: " ", tr: " ", bl: " ", br: " ", h: " ", v: " " };
 pub const ASCII: FrameChars = FrameChars { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" };
 
 /// How controls are drawn.
@@ -360,6 +404,11 @@ pub struct ControlStyle {
     pub line_numbers: bool,
     /// The whole look comes with this colour scheme (by name).
     pub scheme: Option<&'static str>,
+    /// Windows and dialogs get a filled title bar row (VB-DOS) instead of a
+    /// title in the top border; ▼▲ buttons at its right.
+    pub title_bar: bool,
+    /// Status line hints as `F1=Help │ …` (VB-DOS).
+    pub status_rules: bool,
 }
 
 impl ControlStyle {
@@ -385,6 +434,8 @@ impl ControlStyle {
             dialog_rule: false,
             line_numbers: true,
             scheme: None,
+            title_bar: false,
+            status_rules: false,
         }
     }
     /// QBasic 1.1 and MS-DOS Edit, as they looked: single frames, the title
@@ -413,6 +464,26 @@ impl ControlStyle {
             dialog_rule: true,
             line_numbers: false,
             scheme: Some("QBasic"),
+            title_bar: false,
+            status_rules: false,
+        }
+    }
+    /// Visual Basic for MS-DOS: filled title bars with ▼▲, no frame lines
+    /// around code, dithered scroll bars, `F1=Help │` on a cyan line.
+    pub fn vbdos() -> ControlStyle {
+        ControlStyle {
+            name: "VB-DOS",
+            active_frame: BLANK,
+            inactive_frame: BLANK,
+            scroll: ["↑", "↓", "←", "→", "░", "█"],
+            zoom_icon: "▼▲",
+            title_reverse: false,
+            title_bar: true,
+            status_rules: true,
+            scheme: Some("VB-DOS"),
+            dialog_frame: BLANK,
+            dialog_rule: false,
+            ..ControlStyle::qbasic()
         }
     }
     pub fn ascii() -> ControlStyle {
@@ -437,10 +508,12 @@ impl ControlStyle {
             dialog_rule: false,
             line_numbers: true,
             scheme: None,
+            title_bar: false,
+            status_rules: false,
         }
     }
     pub fn all() -> Vec<ControlStyle> {
-        vec![ControlStyle::turbo_vision(), ControlStyle::qbasic(), ControlStyle::ascii()]
+        vec![ControlStyle::turbo_vision(), ControlStyle::qbasic(), ControlStyle::vbdos(), ControlStyle::ascii()]
     }
 }
 

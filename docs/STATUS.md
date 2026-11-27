@@ -10,7 +10,9 @@
 | Dialogs: label, input, button, list | done |
 | Editor: graphemes, selection, clipboard, undo, auto-indent, bidi | done |
 | Encodings: UTF-8/16, DOS CP437/850, chardetng, line endings | done |
-| Colour schemes + control styles | 4 + 3 built in |
+| Colour schemes + control styles | 5 schemes (Turbo, QBasic, VB-DOS, Borland Cyan, Amber) + 4 styles (Turbo Vision, QBasic / MS-DOS Edit, VB-DOS, ASCII); a style can bring its scheme and layout; kept in ~/.config/turbine/look.json |
+| QBasic / MS-DOS Edit look, exact (reverse title, ┤↑├, ↑↓ bars, Help right, <F1=Help>, │ 00001:001, no line numbers or colours) | done |
+| VB-DOS look (magenta title bars with ▼▲, blue code windows, dithered desktop, F1=Help │ status) | done; 3-D boxed buttons, framed text boxes and group boxes come with the dialog rework |
 | Automation tree + JSON-lines socket + paced agent driver | done |
 | Agents read terminal screens (snapshot/text) and `wait` for text to appear | done |
 | Headless mode with scripts and text screenshots | done |

@@ -56,7 +56,8 @@ impl Window {
     }
 
     pub fn zoom_rect(&self) -> Rect {
-        Rect::new(self.rect.right() - 5, self.rect.y, 3, 1)
+        // ([↑] at right-5..-3; VB-DOS's ▲ at right-2.)
+        Rect::new(self.rect.right() - 5, self.rect.y, 4, 1)
     }
 
     pub fn hit(&self, p: Point) -> Hit {
@@ -176,6 +177,24 @@ impl Window {
         let st = &theme.style;
         let (fc, style) = if active { (st.active_frame, s.frame_active) } else { (st.inactive_frame, s.frame) };
         draw_frame(c, self.rect, fc, style);
+        if st.title_bar {
+            // VB-DOS: the top row is a filled title bar, ▼▲ at its right.
+            let bar = if active { s.title_active } else { s.title_inactive };
+            let top = Rect::new(self.rect.x, self.rect.y, self.rect.w, 1);
+            c.fill(top, " ", bar);
+            let title = self.title.rsplit(['/', '\\']).next().unwrap_or(&self.title);
+            let text = match self.number {
+                Some(n) => format!("[{n}] {title}"),
+                None => title.to_string(),
+            };
+            let mut tc = c.sub(Rect::new(self.rect.x, self.rect.y, (self.rect.w - 5).max(0), 1));
+            tc.print(self.rect.x + 1, self.rect.y, &text, bar);
+            let x = self.rect.right() - 4;
+            c.print(x, self.rect.y, "▼", s.frame_icons);
+            c.print(x + 2, self.rect.y, "▲", s.frame_icons);
+            c.print(x + 1, self.rect.y, " ", bar);
+            return;
+        }
         // (QBasic: the title in reverse video, on every window.)
         let title_style = if st.title_reverse { s.frame_icons } else { style };
         // (QBasic shows the file's name, not its path.)
