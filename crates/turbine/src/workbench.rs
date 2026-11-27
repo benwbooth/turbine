@@ -32,6 +32,9 @@ use turbine_ui::popup::{ListPopup, PopupResult};
 use turbine_vi::{ExAction, Out as VimOut, Session};
 use std::collections::{HashMap, HashSet};
 
+/// Turbine's manual (Help > Contents).
+const MANUAL: &str = include_str!("../../../docs/manual.md");
+
 /// A language server is keyed by language and project folder.
 type LspKey = (String, PathBuf);
 
@@ -504,6 +507,8 @@ fn menus() -> Vec<Menu> {
                 it("~I~ndex", "Shift+F1", "help.index"),
                 it("~T~opic Search", "Ctrl+F1", "lsp.hover"),
                 sep(),
+                it("~L~anguage Guide", "", "help.language"),
+                it("Language ~G~uides...", "", "help.guides"),
                 it("Download ~A~ll Guides", "", "help.download_all"),
                 sep(),
                 it("~K~eyboard...", "", "help.keys"),
@@ -1075,7 +1080,11 @@ impl Workbench {
                 self.windows.len() - 1
             }
         };
-        let w = &mut self.windows[i];
+        // (In front: the window asked for.)
+        let w = self.windows.remove(i);
+        self.windows.push(w);
+        self.renumber();
+        let w = self.windows.last_mut().unwrap();
         w.ed.doc = Document::from_str(md);
         w.ed.cursor = 0;
         w.ed.scroll_y = 0;
@@ -2153,14 +2162,26 @@ impl Workbench {
                 }
                 self.say(if self.tab_complete { "AI tab completion on" } else { "AI tab completion off" });
             }
-            "help.contents" => {
-                let lang = self.windows.last().and_then(|w| w.lang.clone()).filter(|_| self.windows.last().is_some_and(|w| w.special.is_none()));
+            "help.contents" => self.show_help("Turbine", MANUAL),
+            "help.index" => {
+                // The manual's headings, to go to one.
+                let items: Vec<String> = MANUAL
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("## ").map(|h| h.to_string()).or_else(|| l.strip_prefix("### ").map(|h| format!("  {h}"))))
+                    .collect();
+                let d = Dialog::new("help_index", "Index")
+                    .body(ui::list("topic", items, 0).activates().lines(18).chars(36))
+                    .buttons(vec![ui::button("ok", "~G~o", true), ui::button("guides", "~L~anguage Guides", false), ui::button("cancel", "Cancel", false)]);
+                self.dialog = Some(d);
+            }
+            "help.language" => {
+                let lang = self.windows.iter().rev().find(|w| w.special.is_none() && w.term.is_none()).and_then(|w| w.lang.clone());
                 match lang.filter(|l| turbine_services::guides::find(l).is_some()) {
                     Some(l) => self.open_guide(&l),
-                    None => self.run_command("help.keys"),
+                    None => self.guides_index(),
                 }
             }
-            "help.index" => self.guides_index(),
+            "help.guides" => self.guides_index(),
             "help.download_all" => {
                 let tx = self.guide_tx.clone();
                 self.say("Downloading every language guide in the background...");
@@ -2698,6 +2719,26 @@ impl Workbench {
         if let Some(root) = kind.strip_prefix("task:") {
             let root = root.to_string();
             self.task_chosen(&d, &root);
+            return;
+        }
+        if kind == "help_index" {
+            if b == "guides" {
+                self.guides_index();
+                return;
+            }
+            let topic = d.value("topic").unwrap_or_default();
+            let topic = topic.trim();
+            self.show_help("Turbine", MANUAL);
+            if let Some(w) = self.windows.last_mut() {
+                if let Some(line) = (0..w.ed.doc.len_lines()).find(|&i| {
+                    let l = w.ed.doc.line(i);
+                    l.trim_start_matches('#').trim() == topic && l.starts_with('#')
+                }) {
+                    w.ed.cursor = w.ed.doc.rope.line_to_char(line);
+                    w.ed.anchor = None;
+                    w.ed.scroll_y = line;
+                }
+            }
             return;
         }
         if kind == "watch" {
@@ -5095,7 +5136,8 @@ mod tests {
         wb.shell.focus = Focus::Editors;
         keys(&mut wb, &["Ctrl+F9"]);
         wait_until(&mut wb, "finish", |wb| wb.debug.is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
+        // (A check of the file may still be writing __pycache__.)
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -5195,6 +5237,34 @@ mod tests {
     }
 
     #[test]
+    fn help_manual_and_its_index() {
+        let mut wb = Workbench::new(&[]);
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+        keys(&mut wb, &["F1"]);
+        let w = wb.windows.last().unwrap();
+        assert_eq!(w.win.title, "Help: Turbine");
+        assert!(w.ed.doc.line(0).starts_with("# Turbine"));
+        keys(&mut wb, &["Shift+F1"]);
+        let d = wb.dialog.as_mut().expect("the index");
+        let items = match d.controls.iter().find_map(|c| match &c.control {
+            turbine_ui::dialog::Control::List { items, .. } => Some(items.clone()),
+            _ => None,
+        }) {
+            Some(v) => v,
+            None => panic!("no list"),
+        };
+        let at = items.iter().position(|t| t == "Debugging").unwrap();
+        assert!(items.iter().any(|t| t.trim() == "tessh"));
+        for _ in 0..at {
+            keys(&mut wb, &["Down"]);
+        }
+        keys(&mut wb, &["Enter"]);
+        let w = wb.windows.last().unwrap();
+        assert_eq!(w.ed.doc.line(w.ed.cursor_line_col().0), "## Debugging");
+    }
+
+    #[test]
     fn debugger_breakpoint_step_continue_output() {
         let dir = std::env::temp_dir().join(format!("turbine-dbg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -5245,7 +5315,7 @@ mod tests {
         assert_eq!(wb.windows.last().unwrap().lang.as_deref(), Some("markdown"));
         run(&mut wb, json!({"cmd": "type", "text": "xyz"}));
         assert!(wb.windows.last().unwrap().ed.doc.line(0) == "# Title", "typing doesn't change help");
-        keys(&mut wb, &["Shift+F1"]);
+        wb.run_command("help.guides");
         let d = wb.dialog.as_ref().expect("guide index");
         assert!(d.kind.starts_with("guides:"));
         assert!(d.kind.contains("rust") && d.kind.contains("python"));
