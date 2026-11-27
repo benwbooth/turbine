@@ -5364,6 +5364,15 @@ mod tests {
         assert_eq!(secs.len(), 2);
         assert!(secs[0].2.is_some() && secs[1].2.is_none(), "Outline open, Timeline folded");
         assert!(main.h >= 4 && wb.shell.outline.list.area == secs[0].2.unwrap());
+        // A click on an Outline row: the cursor (and view) at it.
+        wb.goto_file(&dir.join("src/main.rs"), Some(2), 0);
+        let ob = secs[0].2.unwrap();
+        let row = wb.shell.outline.list.rows.iter().position(|r| r.text.contains("main")).unwrap();
+        let at = Point::new(ob.x + 3, ob.y + (row - wb.shell.outline.list.scroll) as i32);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: at, mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: at, mods: Mods::NONE }));
+        let ed = &wb.windows.iter().rev().find(|w| w.ed.doc.path.as_deref() == Some(dir.join("src/main.rs").as_path())).unwrap().ed;
+        assert_eq!(ed.cursor_line_col().0, wb.shell.outline.lines[row], "the cursor at the item");
         // Timeline: a click on its title opens it; it lists the commit.
         let th = secs[1].1;
         wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(th.x + 3, th.y), mods: Mods::NONE }));

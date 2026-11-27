@@ -1461,9 +1461,13 @@ impl Workbench {
                 let heading = self.windows[ei].ed.doc.line(line).trim().trim_start_matches('#').trim().to_string();
                 self.preview_to_heading(id, &heading);
             }
+            let name = self.shell.outline.list.rows.get(i).map(|r| r.text.clone()).unwrap_or_default();
             let w = &mut self.windows[ei];
             let line = line.min(w.ed.doc.len_lines().saturating_sub(1));
-            w.ed.cursor = w.ed.doc.rope.line_to_char(line);
+            // (On the symbol's name, where the line has it.)
+            let text = w.ed.doc.line(line);
+            let byte = text.find(name.as_str()).filter(|_| !name.is_empty()).unwrap_or(0);
+            w.ed.cursor = w.ed.doc.line_byte_to_char(line, byte);
             w.ed.anchor = None;
             // (The view goes there too, a few lines of context above it,
             // though the Outline keeps the keys.)

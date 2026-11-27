@@ -20,6 +20,8 @@ pub(super) struct TipState {
     /// The language server asked what's under the mouse: its request, and
     /// the place the answer belongs to.
     pub hover: Option<((String, PathBuf), i64, Rect)>,
+    /// The tip's lines already in colours (code: an Outline item's lines).
+    pub rich: Option<Vec<Vec<(String, Style)>>>,
 }
 
 impl Workbench {
@@ -62,6 +64,7 @@ impl Workbench {
             return None;
         }
         self.tip.shown = self.tip_at(p);
+        self.tip.rich = self.tip.shown.as_ref().and_then(|_| self.outline_rich_at(p));
         // (Code under the mouse, nothing else to say: ask its server, as
         // VS Code's hover does.)
         if self.tip.shown.is_none() {
@@ -165,8 +168,12 @@ impl Workbench {
         let is_dir = text.lines().any(|l| l.starts_with("Folder"));
         // Each line as coloured pieces, then cut to the box's width.
         let mut lines: Vec<Vec<(String, Style)>> = Vec::new();
-        for line in text.lines() {
-            let pieces = colour_line(line, is_dir, base);
+        let rich = self.tip.rich.clone();
+        let source: Vec<Vec<(String, Style)>> = match rich {
+            Some(r) => r,
+            None => text.lines().map(|l| colour_line(l, is_dir, base)).collect(),
+        };
+        for pieces in source {
             let mut cur: Vec<(String, Style)> = Vec::new();
             let mut w = 0;
             for (t, st) in pieces {
@@ -205,6 +212,51 @@ impl Workbench {
         if theme.style.shadows {
             c.shadow(r, theme.scheme.shadow);
         }
+    }
+}
+
+impl Workbench {
+    /// An Outline row's tooltip in colours: its name, then its first lines
+    /// as the editor colours them.
+    fn outline_rich_at(&self, p: Point) -> Option<Vec<Vec<(String, Style)>>> {
+        let list = &self.shell.outline.list;
+        if !list.area.contains(p) || !self.section_shown(crate::dock::Tab::Outline) && self.shell.dock.side_of(crate::dock::Tab::Outline).is_none() {
+            return None;
+        }
+        let i = list.scroll + (p.y - list.area.y) as usize;
+        let name = list.rows.get(i)?.text.clone();
+        let &line = self.shell.outline.lines.get(i)?;
+        let ei = self.editor_index()?;
+        let ed = &self.windows[ei].ed;
+        let base = self.theme.scheme.tooltip;
+        let s = &self.theme.scheme;
+        let mut out = vec![vec![(name, Style { fg: vga::WHITE, attrs: turbine_ui::theme::Attrs { bold: true, ..base.attrs }, ..base }), (format!("  line {}", line + 1), Style { fg: vga::DARK_GRAY, ..base })]];
+        for l in line..(line + 8).min(ed.doc.len_lines()) {
+            let text = ed.doc.line(l);
+            let spans = ed.highlights.get(l);
+            let mut pieces: Vec<(String, Style)> = vec![("  ".into(), base)];
+            let mut cur = String::new();
+            let mut cur_st = base;
+            for (b, ch) in text.char_indices() {
+                let kind = spans.and_then(|sp| sp.iter().rev().find(|(a, e, _)| (*a as usize) <= b && b < *e as usize)).map(|x| x.2 as usize);
+                let fg = kind.and_then(|k| s.syntax.get(k).copied().flatten()).map(|c| turbine_ui::list::readable(c, base.bg)).unwrap_or(base.fg);
+                let st = Style { fg, ..base };
+                if st != cur_st && !cur.is_empty() {
+                    pieces.push((std::mem::take(&mut cur), cur_st));
+                }
+                cur_st = st;
+                if ch == '\t' {
+                    cur.push_str("    ");
+                } else {
+                    cur.push(ch);
+                }
+            }
+            if !cur.is_empty() {
+                pieces.push((cur, cur_st));
+            }
+            out.push(pieces);
+        }
+        Some(out)
     }
 }
 
