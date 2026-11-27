@@ -108,6 +108,12 @@ impl Workbench {
             Dialog::new(&kind, title).body(ui::input("name", label, value).chars(40)).buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)])
         };
         match action {
+            "size" => {
+                let dir = if self.shell.explorer.is_up(row) { None } else { path.clone() };
+                if let Some(d) = dir.filter(|d| d.is_dir()) {
+                    self.shell.explorer.count_size(&d);
+                }
+            }
             "set_root" => {
                 if let Some(p) = path.filter(|p| p.is_dir()) {
                     self.open_folder(&p);
@@ -265,6 +271,9 @@ impl Workbench {
         ];
         if is_dir && !is_root {
             items.insert(0, ("Set as Root", "", "set_root"));
+        }
+        if is_dir {
+            items.push(("Calculate Size", "", "size"));
         }
         if self.shell.explorer.root.parent().is_some() {
             items.push(("Up a Folder", "Backspace", "up"));

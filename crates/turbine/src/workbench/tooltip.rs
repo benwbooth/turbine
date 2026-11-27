@@ -113,6 +113,20 @@ impl Workbench {
                 line.push_str(word);
             }
             lines.push(line);
+            // (A word longer than the box, a long path: cut into pieces.)
+            while lines.last().is_some_and(|l| str_width(l) > max_w) {
+                let l = lines.pop().unwrap();
+                let mut head = String::new();
+                let mut rest = l.chars();
+                for ch in rest.by_ref() {
+                    head.push(ch);
+                    if str_width(&head) >= max_w {
+                        break;
+                    }
+                }
+                lines.push(head);
+                lines.push(rest.collect());
+            }
             if lines.len() >= 8 {
                 break;
             }

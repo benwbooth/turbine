@@ -5282,12 +5282,23 @@ mod tests {
         let i = wb.shell.explorer.list.rows.iter().position(|r| r.text.starts_with("a_very")).unwrap();
         let a = wb.shell.explorer.list.area;
         let y = a.y + (i - wb.shell.explorer.list.scroll) as i32;
-        assert_eq!(rest(&mut wb, Point::new(a.x + 3, y)).as_deref(), Some("a_very_long_file_name_that_will_not_fit_in_the_side_bar.txt"));
+        let tip = rest(&mut wb, Point::new(a.x + 3, y)).unwrap_or_default();
+        assert!(tip.contains("a_very_long_file_name_that_will_not_fit_in_the_side_bar.txt"), "{tip}");
         wb.render(&mut surf);
-        assert!(surf.to_text().contains("a_very_long_file_name_that_will_not_fit_in_the_side_bar.txt"), "drawn");
+        assert!(surf.to_text().contains("rw-r--r--"), "drawn");
         // A key hides it.
         keys(&mut wb, &["Down"]);
         assert!(wb.tip.shown.is_none());
+        // A file's tooltip: its path, size, date, permissions.
+        let i = wb.shell.explorer.list.rows.iter().position(|r| r.text == "notes.md").unwrap();
+        let at = Point::new(a.x + 3, a.y + (i - wb.shell.explorer.list.scroll) as i32);
+        let tip = rest(&mut wb, at).unwrap_or_default();
+        assert!(tip.contains(&dir.join("notes.md").display().to_string()) && tip.contains("8 bytes") && tip.contains("modified ") && tip.contains("rw"), "{tip}");
+        // A folder's whole size, counted when asked.
+        let i = wb.shell.explorer.list.rows.iter().position(|r| r.text == "src").unwrap();
+        wb.ex_command("size", i);
+        wait_until(&mut wb, "the size", |wb| wb.shell.explorer.sizes.get(&dir.join("src")).is_some_and(|s| s.is_some()));
+        assert!(wb.shell.explorer.describe(i).unwrap().contains("in 1 file"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

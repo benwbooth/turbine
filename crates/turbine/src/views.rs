@@ -91,8 +91,16 @@ pub struct Explorer {
     pub expanded: HashSet<PathBuf>,
     children: HashMap<PathBuf, Vec<(String, bool)>>,
     pending: HashSet<PathBuf>,
-    tx: Sender<(PathBuf, Vec<(String, bool)>)>,
-    rx: Receiver<(PathBuf, Vec<(String, bool)>)>,
+    tx: Sender<(PathBuf, Vec<(String, bool)>, Vec<(PathBuf, Meta)>)>,
+    rx: Receiver<(PathBuf, Vec<(String, bool)>, Vec<(PathBuf, Meta)>)>,
+    /// Each listed entry's details (read with its folder's listing), for
+    /// tooltips.
+    meta: HashMap<PathBuf, Meta>,
+    /// Folders' whole sizes, asked for (Calculate Size): (bytes, files), or
+    /// None while counting.
+    pub sizes: HashMap<PathBuf, Option<(u64, u64)>>,
+    size_tx: Sender<(PathBuf, (u64, u64))>,
+    size_rx: Receiver<(PathBuf, (u64, u64))>,
     pub list: ListView,
     /// The path of each row (row 0: the root).
     paths: Vec<(PathBuf, bool)>,
@@ -107,9 +115,63 @@ pub struct Explorer {
     git_rx: Option<Receiver<HashMap<PathBuf, char>>>,
 }
 
+/// A listed file's details.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Meta {
+    pub size: u64,
+    pub modified: Option<std::time::SystemTime>,
+    pub mode: u32,
+    /// Where a symbolic link points.
+    pub link: Option<PathBuf>,
+}
+
+fn meta_of(p: &Path) -> Option<Meta> {
+    use std::os::unix::fs::PermissionsExt;
+    let lm = std::fs::symlink_metadata(p).ok()?;
+    let link = lm.file_type().is_symlink().then(|| std::fs::read_link(p).ok()).flatten();
+    let m = if link.is_some() { std::fs::metadata(p).unwrap_or(lm) } else { lm };
+    Some(Meta { size: m.len(), modified: m.modified().ok(), mode: m.permissions().mode(), link })
+}
+
+/// 1.2 KB, 3.4 MB (powers of 1024).
+pub fn human_size(n: u64) -> String {
+    let units = ["bytes", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < units.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 { format!("{n} bytes") } else if v < 10.0 { format!("{v:.1} {}", units[u]) } else { format!("{v:.0} {}", units[u]) }
+}
+
+/// A time as the local date and time (2026-11-27 10:41).
+pub fn local_time(t: std::time::SystemTime) -> String {
+    let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as libc::time_t).unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: localtime_r writes only into tm.
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return String::new();
+    }
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
+}
+
+/// rwxr-xr-x.
+pub fn perms(mode: u32) -> String {
+    let mut s = String::new();
+    for shift in [6, 3, 0] {
+        let b = (mode >> shift) & 7;
+        s.push(if b & 4 != 0 { 'r' } else { '-' });
+        s.push(if b & 2 != 0 { 'w' } else { '-' });
+        s.push(if b & 1 != 0 { 'x' } else { '-' });
+    }
+    s
+}
+
 impl Explorer {
     pub fn new(root: PathBuf) -> Explorer {
         let (tx, rx) = channel();
+        let (size_tx, size_rx) = channel();
         let mut e = Explorer {
             root: root.clone(),
             expanded: HashSet::from([root.clone()]),
@@ -117,6 +179,10 @@ impl Explorer {
             pending: HashSet::new(),
             tx,
             rx,
+            meta: HashMap::new(),
+            sizes: HashMap::new(),
+            size_tx,
+            size_rx,
             list: {
                 let mut l = ListView::new();
                 l.bar_when_focused = true;
@@ -141,6 +207,93 @@ impl Explorer {
             *self = Explorer::new(root);
             self.show_hidden = hidden;
         }
+    }
+
+    /// Count a folder's whole size in the background (links not followed;
+    /// other file systems not entered).
+    pub fn count_size(&mut self, dir: &Path) {
+        self.sizes.insert(dir.to_path_buf(), None);
+        self.rebuild();
+        let tx = self.size_tx.clone();
+        let dir = dir.to_path_buf();
+        std::thread::spawn(move || {
+            use std::os::unix::fs::MetadataExt;
+            let dev = std::fs::symlink_metadata(&dir).map(|m| m.dev()).unwrap_or(0);
+            let (mut bytes, mut files) = (0u64, 0u64);
+            let mut stack = vec![dir.clone()];
+            while let Some(d) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                for e in rd.flatten() {
+                    let Ok(m) = e.metadata() else { continue };
+                    if m.is_dir() {
+                        if m.dev() == dev {
+                            stack.push(e.path());
+                        }
+                    } else {
+                        // (Blocks used, as du counts: sparse files aren't their length.)
+                        bytes += m.blocks() * 512;
+                        files += 1;
+                    }
+                }
+            }
+            let _ = tx.send((dir, (bytes, files)));
+        });
+    }
+
+    /// A row's tooltip: where it is, its size, when it changed, its
+    /// permissions and git's status.
+    pub fn describe(&self, i: usize) -> Option<String> {
+        if self.is_up(i) {
+            return Some(format!("Up to {}", self.root.parent()?.display()));
+        }
+        let (p, is_dir) = self.paths.get(i)?;
+        let mut lines = vec![p.display().to_string()];
+        let mut facts: Vec<String> = Vec::new();
+        if let Some(m) = self.meta.get(p) {
+            if *is_dir {
+                let n = self.children.get(p).map(|k| k.len());
+                facts.push(match n {
+                    Some(n) => format!("Folder, {n} item{}", if n == 1 { "" } else { "s" }),
+                    None => "Folder".into(),
+                });
+            } else {
+                facts.push(human_size(m.size));
+            }
+            if let Some(t) = m.modified {
+                facts.push(format!("modified {}", local_time(t)));
+            }
+            facts.push(perms(m.mode));
+            if let Some(l) = &m.link {
+                lines.push(format!("Link to {}", l.display()));
+            }
+        } else if *is_dir {
+            facts.push("Folder".into());
+        }
+        if !facts.is_empty() {
+            lines.push(facts.join("  ·  "));
+        }
+        if *is_dir {
+            match self.sizes.get(p) {
+                Some(Some((b, f))) => lines.push(format!("Size: {} in {f} file{}", human_size(*b), if *f == 1 { "" } else { "s" })),
+                Some(None) => lines.push("Size: counting…".into()),
+                None => lines.push("Right-click > Calculate Size for its whole size".into()),
+            }
+        }
+        if let Some(code) = self.git.get(p) {
+            lines.push(format!(
+                "Git: {}",
+                match code {
+                    'M' => "changed",
+                    'A' => "added",
+                    'U' => "untracked (new)",
+                    'D' => "deleted",
+                    'R' => "renamed",
+                    'C' => "in conflict",
+                    _ => "has changes inside",
+                }
+            ));
+        }
+        Some(lines.join("\n"))
     }
 
     /// Folders open last time (the session), read again.
@@ -168,7 +321,9 @@ impl Explorer {
                 })
                 .unwrap_or_default();
             v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
-            let _ = tx.send((dir, v));
+            // (Each one's details too, for its tooltip.)
+            let metas: Vec<(PathBuf, Meta)> = v.iter().filter_map(|(n, _)| meta_of(&dir.join(n)).map(|m| (dir.join(n), m))).collect();
+            let _ = tx.send((dir, v, metas));
         });
     }
 
@@ -208,8 +363,13 @@ impl Explorer {
     /// shown (files come and go). True when the tree changed.
     pub fn poll(&mut self, shown: bool) -> bool {
         let mut changed = false;
-        while let Ok((dir, v)) = self.rx.try_recv() {
+        while let Ok((dir, size)) = self.size_rx.try_recv() {
+            self.sizes.insert(dir, Some(size));
+            changed = true;
+        }
+        while let Ok((dir, v, metas)) = self.rx.try_recv() {
             self.pending.remove(&dir);
+            self.meta.extend(metas);
             if self.children.get(&dir) != Some(&v) {
                 self.children.insert(dir, v);
                 changed = true;
@@ -283,6 +443,12 @@ impl Explorer {
                 if !*is_dir {
                     row = row.fg(c);
                 }
+            }
+            // (A folder's counted size, once asked for.)
+            match self.sizes.get(&p) {
+                Some(Some((bytes, _))) => row = row.detail(human_size(*bytes)),
+                Some(None) => row = row.detail("…".to_string()),
+                None => {}
             }
             rows.push(row);
             paths.push((p.clone(), *is_dir));

@@ -1907,7 +1907,16 @@ impl Workbench {
                         Tab::Extensions => &self.shell.extensions.list,
                         _ => &self.shell.debug_view,
                     };
-                    pn = pn.child(list.node(&format!("view.{}", t.key()), t.name(), self.shell.focus == Focus::View(t)));
+                    let mut ln = list.node(&format!("view.{}", t.key()), t.name(), self.shell.focus == Focus::View(t));
+                    // (The Explorer's rows: where each is, its size, dates, permissions and git.)
+                    if t == Tab::Explorer {
+                        for it in &mut ln.children {
+                            if let Some(i) = it.id.rsplit('.').next().and_then(|k| k.parse::<usize>().ok()) {
+                                it.tip = self.shell.explorer.describe(i);
+                            }
+                        }
+                    }
+                    pn = pn.child(ln);
                 }
                 None => {}
             }
