@@ -12,6 +12,7 @@ use turbine_ui::Canvas;
 
 mod build;
 mod debug_more;
+mod docview;
 mod explorer_ops;
 mod extras;
 mod extensions;
@@ -295,6 +296,7 @@ pub struct Workbench {
     exts: extensions::ExtState,
     session: session::SessionState,
     tip: tooltip::TipState,
+    docviews: HashMap<u32, docview::DocView>,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -657,6 +659,7 @@ impl Workbench {
             exts: extensions::ExtState::default(),
             session: session::SessionState::default(),
             tip: tooltip::TipState::default(),
+            docviews: HashMap::new(),
         };
         for f in files {
             // (A folder is the project: the Explorer shows it.)
@@ -3342,6 +3345,10 @@ impl Workbench {
             MenuResult::Consumed => return,
             MenuResult::Ignored => {}
         }
+        // A Markdown or data file's Preview or Tree has the keys (and Alt+Z).
+        if self.shell.focus == Focus::Editors && self.docview_key(&k) {
+            return;
+        }
         // Vim gets every key but the F-keys and Alt chords (menus).
         let vim_on = self.keymap == Keymap::Vim && self.windows.last().is_some_and(|w| !w.is_terminal());
         if vim_on && !matches!(k.key, Key::F(_)) && !k.mods.alt {
@@ -3800,7 +3807,7 @@ impl Workbench {
             }
             return;
         }
-        if self.shell_mouse(&m) || self.find_mouse(&m) {
+        if self.shell_mouse(&m) || self.find_mouse(&m) || (self.dialog.is_none() && self.docview_mouse(&m)) {
             return;
         }
         if let Some(i) = self.dragging {
@@ -4003,6 +4010,7 @@ impl Workbench {
         root = self.ex_nodes(root);
         root = self.inline_nodes(root);
         root = self.lsp_more_nodes(root);
+        root = self.docview_nodes(root);
         if let Some(d) = &self.dialog {
             root = root.child(d.automation_node());
         }
@@ -4290,6 +4298,7 @@ impl App for Workbench {
         self.preview_tab_tick();
         self.images_tick();
         self.session_tick(now);
+        self.docview_tick();
         // (Closed file managers' state goes; the rest take their answers.)
         let ids: HashSet<u32> = self.windows.iter().map(|w| w.win.id).collect();
         self.xtrees.retain(|id, _| ids.contains(id));
@@ -4428,8 +4437,13 @@ impl App for Workbench {
                 }
                 continue;
             }
-            w.ed.draw(&mut wc, inner, &theme, active && !has_modal, active);
-            if active {
+            // (Markdown and data files: a toolbar, and Preview or Tree.)
+            let viewed = docview::draw(w, self.docviews.get_mut(&w.win.id), &mut wc, &theme, active && !has_modal);
+            if !viewed {
+                let body = Self::doc_body(w);
+                w.ed.draw(&mut wc, body, &theme, active && !has_modal, active);
+            }
+            if active && !viewed {
                 w.ed.draw_scrollbars(&mut wc, w.win.rect, &theme);
                 if w.ed.doc.dirty {
                     wc.print(w.win.rect.x + 1, w.win.rect.bottom() - 1, "*", theme.scheme.frame_icons);
@@ -5168,6 +5182,42 @@ mod tests {
         assert_eq!(wb.shell.dock.left.visible, !left);
         run(&mut wb, json!({"cmd": "click", "target": "layout.view.panel"}));
         assert!(wb.shell.dock.bottom.visible);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn markdown_and_data_files_have_a_toolbar() {
+        let (dir, mut wb) = project("docview");
+        std::fs::write(dir.join("data.json"), "{\n  \"name\": \"turbine\",\n  \"deps\": {\n    \"needle\": 3\n  }\n}\n").unwrap();
+        wb.goto_file(&dir.join("data.json"), Some(0), 0);
+        wait_until(&mut wb, "the language", |wb| wb.windows.last().unwrap().lang.as_deref() == Some("json"));
+        // Tree: folding and a search; Enter on a value goes to its line.
+        let r = run(&mut wb, json!({"cmd": "click", "target": "docview.tree"}));
+        assert_eq!(r["ok"], true, "{r}");
+        wait_until(&mut wb, "the tree", |wb| wb.tree().find_target("docview.treeview").is_some());
+        keys(&mut wb, &["/"]);
+        run(&mut wb, json!({"cmd": "type", "text": "needle"}));
+        let v = wb.tree().find_target("docview.treeview").and_then(|n| n.value.clone()).unwrap_or_default();
+        assert!(v.contains("1 found"), "{v}");
+        keys(&mut wb, &["Enter", "Enter"]);
+        assert_eq!(wb.doc_mode(wb.windows.last().unwrap().win.id), docview::Mode::Source);
+        assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, 3);
+        // Word wrap from the toolbar (and Alt+Z).
+        let before = wb.windows.last().unwrap().ed.wrap;
+        run(&mut wb, json!({"cmd": "click", "target": "docview.wrap"}));
+        assert_eq!(wb.windows.last().unwrap().ed.wrap, !before);
+        keys(&mut wb, &["Alt+Z"]);
+        assert_eq!(wb.windows.last().unwrap().ed.wrap, before);
+        // Markdown: Preview in the window itself.
+        wb.goto_file(&dir.join("notes.md"), Some(0), 0);
+        wait_until(&mut wb, "markdown", |wb| wb.windows.last().unwrap().lang.as_deref() == Some("markdown"));
+        run(&mut wb, json!({"cmd": "click", "target": "docview.preview"}));
+        let id = wb.windows.last().unwrap().win.id;
+        wait_until(&mut wb, "the rendered page", |wb| wb.docviews.get(&id).is_some_and(|d| d.alt.doc.rope.to_string().contains("Notes") && !d.alt.doc.rope.to_string().contains('#')));
+        // Typing doesn't change the file; Esc is back to Source.
+        keys(&mut wb, &["x", "Esc"]);
+        assert_eq!(wb.windows.last().unwrap().ed.doc.rope.to_string(), "# Notes\n");
+        assert_eq!(wb.doc_mode(id), docview::Mode::Source);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

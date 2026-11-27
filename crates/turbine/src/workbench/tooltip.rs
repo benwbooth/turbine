@@ -78,6 +78,12 @@ impl Workbench {
                 }
             }
         }
+        // A tree row cut short: whole.
+        if self.dialog.is_none() {
+            if let Some(t) = self.docview_tip(p) {
+                return Some(t);
+            }
+        }
         let tree = self.tree();
         let n = deepest(&tree, p)?;
         let text = match &n.tip {

@@ -13,6 +13,7 @@ pub mod markdown;
 pub mod mcp;
 pub mod palette;
 pub mod server;
+pub mod structview;
 pub mod tools;
 pub mod views;
 pub mod vim;

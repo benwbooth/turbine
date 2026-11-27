@@ -44,6 +44,16 @@ pub(super) struct Preview {
     pub jump: Option<String>,
     /// Lines left by following links on this page (Back, Alt+F1).
     pub back: Vec<usize>,
+    /// Shown in its own file's window (the toolbar's Preview): that window.
+    pub inplace: Option<u32>,
+}
+
+impl Preview {
+    /// A file's preview drawn in its own window (docview's Preview).
+    pub(super) fn in_place(src: u32, base: Option<PathBuf>) -> Preview {
+        let root = base.clone().map(|b| lsp::project_root(&b.join("x"))).unwrap_or_default();
+        Preview { source: Source::Window(src), base, asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind: PageKind::Markdown, root, back: Vec::new(), inplace: Some(src) }
+    }
 }
 
 type Job = (u32, u64, String, usize, PageKind, PathBuf);
@@ -97,7 +107,7 @@ impl Workbench {
         let w = self.windows.last_mut().unwrap();
         w.ed.doc = Document::from_str("Rendering…\n");
         let id = w.win.id;
-        self.preview.previews.insert(id, Preview { source: Source::Text(md.to_string()), base, asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind: PageKind::Help, root: PathBuf::new(), back: Vec::new() });
+        self.preview.previews.insert(id, Preview { source: Source::Text(md.to_string()), base, asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind: PageKind::Help, root: PathBuf::new(), back: Vec::new(), inplace: None });
     }
 
     /// A page of `kind` whose text comes from running git (in the
@@ -116,7 +126,7 @@ impl Workbench {
         let w = self.windows.last_mut().unwrap();
         w.special = Some("preview");
         let id = w.win.id;
-        self.preview.previews.insert(id, Preview { source: Source::Pending, base: Some(root.to_path_buf()), asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind, root: root.to_path_buf(), back: Vec::new() });
+        self.preview.previews.insert(id, Preview { source: Source::Pending, base: Some(root.to_path_buf()), asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind, root: root.to_path_buf(), back: Vec::new(), inplace: None });
         let tx = self.preview.text_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send((id, make()));
@@ -211,7 +221,7 @@ impl Workbench {
         w.special = Some("preview");
         let id = w.win.id;
         let root = base.clone().map(|b| lsp::project_root(&b.join("x"))).unwrap_or_default();
-        self.preview.previews.insert(id, Preview { source: Source::Window(src), base, asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind, root, back: Vec::new() });
+        self.preview.previews.insert(id, Preview { source: Source::Window(src), base, asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind, root, back: Vec::new(), inplace: None });
         // Side by side with its file.
         self.shell.split = Some((src, id, 1));
     }
@@ -221,7 +231,8 @@ impl Workbench {
     pub(super) fn preview_tick(&mut self, now: Instant) {
         let ids: Vec<u32> = self.preview.previews.keys().copied().collect();
         for id in ids {
-            let Some(w) = self.windows.iter().find(|w| w.win.id == id) else {
+            let shown_in = self.preview.previews.get(&id).and_then(|p| p.inplace).unwrap_or(id);
+            let Some(w) = self.windows.iter().find(|w| w.win.id == shown_in) else {
                 self.preview.previews.remove(&id);
                 continue;
             };
@@ -294,28 +305,38 @@ impl Workbench {
             if p.generation != generation {
                 continue;
             }
-            let Some(w) = self.windows.iter_mut().find(|w| w.win.id == id) else { continue };
+            // (In place: the file's window's page; else the preview window.)
+            let ed = match p.inplace {
+                Some(src) => match self.docviews.get_mut(&src) {
+                    Some(dv) => &mut dv.alt,
+                    None => continue,
+                },
+                None => match self.windows.iter_mut().find(|w| w.win.id == id) {
+                    Some(w) => &mut w.ed,
+                    None => continue,
+                },
+            };
             // (A re-render keeps the place: the same share of the way down.)
             let first = p.rendered.is_none();
-            let old_lines = w.ed.doc.len_lines().max(1);
-            let (scroll, cursor_line) = (w.ed.scroll_y, w.ed.cursor_line_col().0);
-            w.ed.doc = Document::from_str(&r.text);
-            w.ed.highlights = r.spans.clone();
-            w.ed.line_bg = r.line_bg.clone();
-            w.ed.words = r.words.clone();
-            let n = w.ed.doc.len_lines().max(1);
+            let old_lines = ed.doc.len_lines().max(1);
+            let (scroll, cursor_line) = (ed.scroll_y, ed.cursor_line_col().0);
+            ed.doc = Document::from_str(&r.text);
+            ed.highlights = r.spans.clone();
+            ed.line_bg = r.line_bg.clone();
+            ed.words = r.words.clone();
+            let n = ed.doc.len_lines().max(1);
             if first {
-                w.ed.cursor = 0;
-                w.ed.scroll_y = 0;
+                ed.cursor = 0;
+                ed.scroll_y = 0;
             } else {
-                w.ed.scroll_y = scroll * n / old_lines;
+                ed.scroll_y = scroll * n / old_lines;
                 let l = (cursor_line * n / old_lines).min(n - 1);
-                w.ed.cursor = w.ed.doc.rope.line_to_char(l);
+                ed.cursor = ed.doc.rope.line_to_char(l);
             }
             if let Some(h) = p.jump.take() {
                 if let Some((l, _, _)) = r.headings.iter().find(|(_, _, t)| *t == h) {
-                    w.ed.cursor = w.ed.doc.rope.line_to_char(*l);
-                    w.ed.scroll_y = *l;
+                    ed.cursor = ed.doc.rope.line_to_char(*l);
+                    ed.scroll_y = *l;
                 }
             }
             p.rendered = Some(r);
