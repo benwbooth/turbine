@@ -7,6 +7,7 @@
 //! results on its ticks, so a big file never stalls typing.
 
 pub mod grammars;
+pub mod plain;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -347,6 +348,10 @@ struct Lang {
 }
 
 fn make(name: &str) -> Option<Lang> {
+    // (Plain text has no grammar to look for: plain.rs colours it.)
+    if name == "text" {
+        return None;
+    }
     let (language, query): (Language, String) = match name {
         "bash" => (tree_sitter_bash::LANGUAGE.into(), tree_sitter_bash::HIGHLIGHT_QUERY.into()),
         "python" => (tree_sitter_python::LANGUAGE.into(), tree_sitter_python::HIGHLIGHTS_QUERY.into()),
@@ -841,7 +846,12 @@ impl Highlighter {
                     for (_, j) in latest {
                         let (lines, structure) = match analyze(&j.lang, &j.text, Duration::from_secs(2)) {
                             Some((l, s)) => (Some(l), Some(s)),
-                            None => (None, None),
+                            // No grammar (or plain text): what all text
+                            // shares, and indentation's folds.
+                            None => {
+                                let folds = if j.text.len() < 4 << 20 { indent_blocks(&j.text).0 } else { Vec::new() };
+                                (Some(plain::spans(&j.text)), Some(Structure { folds, ..Structure::default() }))
+                            }
                         };
                         if done.send(Highlights { id: j.id, version: j.version, lines, structure }).is_err() {
                             return;

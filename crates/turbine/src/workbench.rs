@@ -2072,14 +2072,12 @@ impl Workbench {
                 }
                 w.lang_for = Some(path);
             }
-            if let Some(lang) = &w.lang {
-                if w.hl_sent != Some(w.ed.doc.version) {
-                    self.highlighter.request(w.win.id as u64, w.ed.doc.version, lang, w.ed.doc.rope.to_string());
-                    w.hl_sent = Some(w.ed.doc.version);
-                    self.hl_pending += 1;
-                }
-            } else if w.lang_for.is_some() {
+            // (Text no grammar covers is coloured too: "text" has none.)
+            if w.hl_sent != Some(w.ed.doc.version) && !fixed && (w.lang.is_some() || w.lang_for.is_some() || w.special.is_some()) {
+                let lang = w.lang.as_deref().unwrap_or("text");
+                self.highlighter.request(w.win.id as u64, w.ed.doc.version, lang, w.ed.doc.rope.to_string());
                 w.hl_sent = Some(w.ed.doc.version);
+                self.hl_pending += 1;
             }
         }
         for r in self.highlighter.results() {
