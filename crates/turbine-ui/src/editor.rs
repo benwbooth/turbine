@@ -101,6 +101,9 @@ pub struct EditorView {
     pub column_mode: bool,
     /// Long lines wrap at the window's edge (View > Word Wrap).
     pub wrap: bool,
+    /// A help page: the scheme's help colours (QBasic's black, Borland's
+    /// cyan), headings, links and their marks by highlight kind.
+    pub help_look: bool,
     /// Extra selected char ranges (vim's visual block).
     pub block: Vec<(usize, usize)>,
     /// Inlay hints from the language server, per line: (byte, text), shown
@@ -166,6 +169,7 @@ impl EditorView {
             cursors: Vec::new(),
             column_mode: false,
             wrap: false,
+            help_look: false,
             found: Vec::new(),
             found_current: None,
             structure: Structure::default(),
@@ -589,8 +593,9 @@ impl EditorView {
                 })
                 .collect();
             let in_view = (first..first + MINIMAP_LINES).any(|l| l >= vis_a && l < vis_b && l < total.max(1));
-            // (The view's rows: a cyan band, its dots dark.)
-            let bg = if in_view { s.find_match.bg } else { s.editor.bg };
+            // (The view's rows in their colours, the rest dimmed: no band
+            // over the text.)
+            let bg = s.editor.bg;
             for k in 0..mr.w as usize {
                 let mut bits = 0u32;
                 let mut colour = None;
@@ -612,7 +617,7 @@ impl EditorView {
                     }
                 }
                 let glyph = char::from_u32(0x2800 + bits).unwrap_or(' ').to_string();
-                let fg = if in_view { s.find_match.fg } else { colour.unwrap_or(s.editor.fg) };
+                let fg = if in_view { colour.unwrap_or(s.editor.fg) } else { s.editor_ghost.fg };
                 c.print(mr.x + k as i32, mr.y + row, &glyph, crate::theme::Style::new(fg, bg));
             }
         }
@@ -732,6 +737,7 @@ impl EditorView {
     /// the frame: right edge and bottom edge, given by `vbar`/`hbar`.
     pub fn draw(&mut self, c: &mut Canvas, area: Rect, theme: &Theme, focused: bool, follow_cursor: bool) {
         let s = &theme.scheme;
+        let base = if self.help_look { s.help } else { s.editor };
         // The minimap takes the right columns when the editor is wide enough.
         let full = area;
         self.minimap_rect = (self.minimap && area.w >= 50).then(|| Rect::new(area.right() - MINIMAP_W, area.y, MINIMAP_W, area.h));
@@ -743,12 +749,12 @@ impl EditorView {
         }
         self.followed = now;
         if let Some(mr) = self.minimap_rect {
-            c.fill(Rect::new(mr.x - 1, full.y, 1, full.h), " ", s.editor);
+            c.fill(Rect::new(mr.x - 1, full.y, 1, full.h), " ", base);
             self.draw_minimap(c, theme);
         }
         let gw = self.gutter_width();
         let text_x = area.x + gw;
-        c.fill(area, " ", s.editor);
+        c.fill(area, " ", base);
         let sel = self.selection();
         let (cur_line, cur_col) = self.cursor_line_col();
         let mut c = c.sub(area);
@@ -838,8 +844,17 @@ impl EditorView {
                         let semantic = if self.semantic_version == self.doc.version { find(self.semantic.get(li)) } else { None };
                         let kind = semantic.or_else(|| find(self.highlights.get(li)));
                         match kind {
+                            Some(k) if self.help_look && matches!(crate::theme::SYNTAX_KINDS.get(k).copied(), Some("keyword" | "type" | "function" | "label" | "punctuation" | "comment" | "attribute" | "constant")) => {
+                                match crate::theme::SYNTAX_KINDS[k] {
+                                    "keyword" | "type" | "constant" => s.help_heading,
+                                    "function" => s.help_link,
+                                    "label" => s.help_mark,
+                                    "attribute" => Style { attrs: crate::theme::Attrs { bold: true, ..s.help.attrs }, ..s.help_heading },
+                                    _ => s.help,
+                                }
+                            }
                             Some(k) => {
-                                let mut st = s.editor;
+                                let mut st = base;
                                 if let Some(Some(c)) = s.syntax.get(k) {
                                     st.fg = *c;
                                 }
@@ -848,12 +863,12 @@ impl EditorView {
                                 }
                                 st
                             }
-                            None => s.editor,
+                            None => base,
                         }
                     };
                     // (A diff's line: its colour behind the syntax colours.)
                     let st = match bar {
-                        Some(b) if diff_line && !selected && found.is_none() && st.bg == s.editor.bg => Style { bg: b.bg, fg: if st.fg == s.editor.fg { b.fg } else { st.fg }, ..st },
+                        Some(b) if diff_line && !selected && found.is_none() && st.bg == base.bg => Style { bg: b.bg, fg: if st.fg == base.fg { b.fg } else { st.fg }, ..st },
                         _ => st,
                     };
                     let st = match self.diagnostics.iter().filter(|d| d.line == li).find(|d| {
@@ -915,7 +930,7 @@ impl EditorView {
             }
             let x = text_x + cx as i32;
             if x >= text_x && x < area.right() {
-                let st = Style { fg: s.editor.bg, bg: s.editor.fg, ..s.editor };
+                let st = Style { fg: base.bg, bg: base.fg, ..base };
                 let t = self.doc.line(l);
                 let g = t[b.min(t.len())..].chars().next().filter(|c| *c != '\n').map(|c| c.to_string()).unwrap_or_else(|| " ".into());
                 c.print(x, area.y + row, &g, st);

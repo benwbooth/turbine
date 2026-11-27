@@ -7,7 +7,25 @@ tasks and an AI that can drive the editor where you can watch it.
 
 Press F10 (or Alt and a menu's letter) for the menus. Every command is
 also in the Command Palette (Ctrl+Shift+P). This manual is Help >
-Contents (F1); Help > Index (Shift+F1) lists its topics.
+Contents (F1); Help > Index (Shift+F1) lists its topics, and the
+[Contents](#contents) below goes to each. The [keys](#keys) are at the end.
+
+## Contents
+
+- [Getting around](#getting-around)
+- [Files](#files)
+- [Editing](#editing)
+- [Languages](#languages)
+- [Problems](#problems)
+- [Building](#building)
+- [Debugging](#debugging)
+- [Tools](#tools)
+- [Terminals](#terminals)
+- [Source control](#source-control)
+- [AI](#ai)
+- [Settings and looks](#settings-and-looks)
+- [Extensions](#extensions)
+- [Keys](#keys)
 
 ## Getting around
 
@@ -102,12 +120,13 @@ For each language, Turbine uses what is installed:
 - **A checker.** Files of languages with no server are checked with the
   language's own tool (`bash -n`, `python3 -m py_compile`, `tessh
   --check`, `node --check`, ...) when they are opened and saved. Their
-  problems are marked in the text and listed in Problems.
+  problems are marked in the text and listed in [Problems](#problems).
 - **A runner.** Run > Run Without Debugging (Ctrl+F5) runs the file, or
-  its project, in a terminal.
+  its project, in a [terminal](#terminals); [Building](#building) has
+  compiling and tasks.
 - **A debugger.** Run > Start Debugging uses the language's debug adapter
   (lldb-dap or gdb for native languages, debugpy for Python, dlv for Go,
-  tessh's own for tessh, and others).
+  tessh's own for [tessh](#tessh), and others); see [Debugging](#debugging).
 - **A guide.** Help > Language Guide opens the guide for the file's
   language; Help > Language Guides lists them all.
 
@@ -137,7 +156,7 @@ it is.
   project's build. Run > Compile (Alt+F9) checks the file in front.
   Run > Build All rebuilds everything. Run > Stop Build stops it.
 - The output goes to the Output window; the compiler's errors and
-  warnings go to Problems.
+  warnings go to [Problems](#problems).
 - Terminal > Run Task lists every task. Tasks come from
   `.turbine/tasks.json` or `.vscode/tasks.json`, else from the project's
   files: Cargo, make, CMake, Meson, Zig, Go, npm (pnpm, yarn, bun),

@@ -117,7 +117,7 @@ impl Explorer {
             paths: Vec::new(),
             refreshed: Instant::now(),
             want: None,
-            show_hidden: true,
+            show_hidden: false,
         };
         e.request(&root);
         e.rebuild();

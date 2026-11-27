@@ -1066,7 +1066,7 @@ impl Workbench {
             return;
         };
         let (key, title) = (g.key().to_string(), g.title.to_string());
-        if let Some(i) = self.windows.iter().position(|w| w.special == Some("help") && w.win.title == format!("Help: {title}")) {
+        if let Some(i) = self.windows.iter().position(|w| w.special == Some("help") && w.win.title == format!("HELP: {title}")) {
             let w = self.windows.remove(i);
             self.windows.push(w);
             self.renumber();
@@ -1092,7 +1092,7 @@ impl Workbench {
 
     /// A read-only window of plain text.
     fn show_plain(&mut self, title: &str, md: &str) {
-        let name = format!("Help: {title}");
+        let name = format!("HELP: {title}");
         let i = match self.windows.iter().position(|w| w.special == Some("help") && w.win.title == name) {
             Some(i) => i,
             None => {
@@ -1129,6 +1129,7 @@ impl Workbench {
         self.renumber();
         let w = self.windows.last_mut().unwrap();
         w.ed.doc = Document::from_str(md);
+        w.ed.help_look = true;
         w.ed.highlights.clear();
         w.ed.line_bg.clear();
         w.ed.words.clear();
@@ -5475,9 +5476,8 @@ mod tests {
         wb.driver.cps = 0.0;
         wb.dispatch(Event::Resize(100, 30));
         keys(&mut wb, &["F1"]);
-        assert_eq!(wb.windows.last().unwrap().win.title, "Help: Turbine");
+        assert_eq!(wb.windows.last().unwrap().win.title, "HELP: Turbine");
         wait_until(&mut wb, "rendered", |wb| wb.windows.last().unwrap().ed.doc.line(0) == "Turbine");
-        assert!(wb.windows.last().unwrap().ed.doc.line(1).starts_with("═══"));
         keys(&mut wb, &["Shift+F1"]);
         let d = wb.dialog.as_mut().expect("the index");
         let items = match d.controls.iter().find_map(|c| match &c.control {
@@ -5580,14 +5580,14 @@ mod tests {
         let pv = wb.windows.last().unwrap().win.id;
         assert_eq!(wb.windows.last().unwrap().special, Some("preview"));
         let text = |wb: &Workbench| wb.windows.iter().find(|w| w.win.id == pv).unwrap().ed.doc.rope.to_string();
-        wait_until(&mut wb, "rendered", |wb| text(wb).starts_with("Read me\n═══") && text(wb).contains("• one"));
+        wait_until(&mut wb, "rendered", |wb| text(wb).starts_with("Read me\n") && text(wb).contains("■ one"));
         // Typing in the file changes the preview a moment later.
         let src = wb.windows.iter().position(|w| w.special.is_none()).unwrap();
         let w = wb.windows.remove(src);
         wb.windows.push(w);
         keys(&mut wb, &["Ctrl+End"]);
         run(&mut wb, json!({"cmd": "type", "text": "- two\n"}));
-        wait_until(&mut wb, "followed", |wb| text(wb).contains("• two"));
+        wait_until(&mut wb, "followed", |wb| text(wb).contains("■ two"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5758,14 +5758,15 @@ mod tests {
     fn help_windows_are_read_only_markdown_and_the_index_lists_guides() {
         let mut wb = bench();
         wb.show_help("Test Guide", "# Title\n\nSome `code` here, [a link](#title).\n");
-        assert_eq!(wb.windows.last().unwrap().win.title, "Help: Test Guide");
+        assert_eq!(wb.windows.last().unwrap().win.title, "HELP: Test Guide");
         wait_until(&mut wb, "rendered", |wb| wb.windows.last().unwrap().ed.doc.line(0) == "Title" && !wb.windows.last().unwrap().ed.highlights.is_empty());
-        assert_eq!(wb.windows.last().unwrap().ed.doc.line(3), "Some code here, a link.");
+        assert_eq!(wb.windows.last().unwrap().ed.doc.line(2), "Some code here, ◄a link►.");
+        assert!(wb.windows.last().unwrap().ed.help_look);
         run(&mut wb, json!({"cmd": "type", "text": "xyz"}));
         assert!(wb.windows.last().unwrap().ed.doc.line(0) == "Title", "typing doesn't change help");
         // Enter on the link goes to its heading.
         let w = wb.windows.last_mut().unwrap();
-        w.ed.cursor = w.ed.doc.rope.line_to_char(3) + "Some code here, a l".len();
+        w.ed.cursor = w.ed.doc.rope.line_to_char(2) + "Some code here, ◄a l".len();
         keys(&mut wb, &["Enter"]);
         assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, 0);
         wb.run_command("help.guides");

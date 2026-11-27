@@ -9,6 +9,7 @@
 #include <QtGui/QGuiApplication>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QPainter>
+#include <QtGui/QPainterPath>
 #include <QtQuick/QQuickWindow>
 
 #include <algorithm>
@@ -366,8 +367,40 @@ void CellView::brailleDots(QPainter* p, const QRectF& r, char32_t c, const QColo
     }
 }
 
+
+// Powerline's rounded caps (U+E0B4 right, U+E0B6 left; E0B5 and E0B7 their
+// outlines), drawn as half ellipses filling the cell, so a pill's ends
+// meet its middle exactly whatever the font has.
+static bool capShape(QPainter* p, char32_t c, const QRectF& r, const QColor& fg)
+{
+    if (c != 0xE0B4 && c != 0xE0B5 && c != 0xE0B6 && c != 0xE0B7) return false;
+    const bool left = c == 0xE0B6 || c == 0xE0B7;
+    const bool outline = c == 0xE0B5 || c == 0xE0B7;
+    // The ellipse's middle on the cell's flat side.
+    const QRectF e = left ? QRectF(r.left(), r.top(), 2 * r.width(), r.height()) : QRectF(r.left() - r.width(), r.top(), 2 * r.width(), r.height());
+    QPainterPath path;
+    const qreal flat = left ? r.right() : r.left();
+    path.moveTo(flat, r.top());
+    path.arcTo(e, 90, left ? 180 : -180);
+    path.closeSubpath();
+    p->save();
+    p->setRenderHint(QPainter::Antialiasing, true);
+    p->setClipRect(r);
+    if (outline) {
+        p->setPen(QPen(fg, std::max<qreal>(1, r.height() / 16)));
+        p->setBrush(Qt::NoBrush);
+    } else {
+        p->setPen(Qt::NoPen);
+        p->setBrush(fg);
+    }
+    p->drawPath(path);
+    p->restore();
+    return true;
+}
+
 bool CellView::drawShape(QPainter* p, char32_t c, const QRectF& r, const QColor& fg, const QColor& bg)
 {
+    if (capShape(p, c, r, fg)) return true;
     if (c >= 0x2800 && c <= 0x28FF) {
         brailleDots(p, r, c, fg);
         return true;
@@ -478,6 +511,8 @@ void CellView::paintVga(QPainter* p)
                     // Braille (the minimap): lit dots only, as blocks on the
                     // VGA grid (fonts draw the unlit ones as circles).
                     brailleDots(p, QRectF(x * gw, y * gh, gw, gh), ch, fg);
+                } else if (capShape(p, ch, QRectF(x * gw, y * gh, gw, gh), fg)) {
+                    // (A pill's end: a shape, not the font's glyph.)
                 } else {
                     p->setPen(fg);
                     p->drawText(QPoint(x * gw, y * gh + ascent), run);

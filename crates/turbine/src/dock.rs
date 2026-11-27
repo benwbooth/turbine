@@ -252,7 +252,7 @@ impl Dock {
     /// an activity bar), or a letter without icons.
     pub fn tab_rects(&self, side: Side, r: Rect, title: &dyn Fn(Tab) -> String) -> Vec<(Tab, Rect, String)> {
         let part = self.part(side);
-        let caps = |t: Tab| if self.icons && part.current() == Some(t) { 4 } else { 2 };
+        let caps = |_: Tab| 2;
         let room = r.w - 4;
         let width = |labels: &[(Tab, String)]| labels.iter().map(|(t, l)| str_width(l) as i32 + caps(*t)).sum::<i32>() + labels.len().saturating_sub(1) as i32;
         let mut labels: Vec<(Tab, String)> = part.tabs.iter().map(|t| (*t, title(*t))).collect();
@@ -351,14 +351,9 @@ impl Dock {
             } else {
                 s.menu_selected
             };
-            if self.icons {
-                let cap = Style::new(pill.bg, fs.bg);
-                c.print(tr.x, tr.y, CAP_LEFT, cap);
-                c.print(tr.x + 1, tr.y, &format!(" {label} "), pill);
-                c.print(tr.right() - 1, tr.y, CAP_RIGHT, cap);
-            } else {
-                c.print(tr.x, tr.y, &format!(" {label} "), pill);
-            }
+            // (As the originals title a window: a box in reverse, no
+            // rounded ends.)
+            c.print(tr.x, tr.y, &format!(" {label} "), pill);
         }
     }
 }

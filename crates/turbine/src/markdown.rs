@@ -55,11 +55,13 @@ struct Out {
     /// indents), and the first line's own (a bullet).
     prefix: Vec<(String, Option<u8>)>,
     first_prefix: Option<(String, Option<u8>)>,
+    /// The next word sticks to what's before it (after a link's ◄).
+    line_nospace: bool,
 }
 
 impl Out {
     fn new(width: usize) -> Out {
-        Out { r: Rendered::default(), width: width.max(20), line: String::new(), spans: Vec::new(), links: Vec::new(), prefix: Vec::new(), first_prefix: None }
+        Out { r: Rendered::default(), width: width.max(20), line: String::new(), spans: Vec::new(), links: Vec::new(), prefix: Vec::new(), first_prefix: None, line_nospace: false }
     }
 
     fn lines(&self) -> usize {
@@ -122,16 +124,18 @@ impl Out {
 
     /// Words, wrapped at the width.
     fn words(&mut self, text: &str, k: Option<u8>, link: Option<&str>) {
+        let glue = std::mem::take(&mut self.line_nospace);
         for (i, word) in text.split(' ').enumerate() {
             if i > 0 {
                 self.space();
             }
+            let glued = glue && i == 0;
             if word.is_empty() {
                 continue;
             }
             self.begin();
             let w = str_width(word);
-            if str_width(&self.line) + w > self.width && str_width(&self.line) > self.prefix_width() {
+            if !glued && str_width(&self.line) + w > self.width && str_width(&self.line) > self.prefix_width() {
                 self.end_line();
                 self.begin();
             }
@@ -144,6 +148,14 @@ impl Out {
                 self.links.push((a, self.line.len(), t.to_string()));
             }
         }
+    }
+
+    /// Text stuck to what's before it (a link's ◄ and ►): no space, no wrap.
+    fn attach(&mut self, text: &str, k: u8) {
+        self.begin();
+        let a = self.line.len();
+        self.line.push_str(text);
+        self.spans.push((a as u32, self.line.len() as u32, k));
     }
 
     fn space(&mut self) {
@@ -173,6 +185,7 @@ pub fn render(md: &str, width: usize) -> Rendered {
     let mut code: Option<(String, String)> = None; // (language, text)
     let mut table: Option<(Vec<Alignment>, Vec<Vec<String>>, Vec<String>, String)> = None;
     let mut image: Option<String> = None;
+    let mut link_open = false;
     for ev in Parser::new_ext(md, opts) {
         // Tables are gathered, then drawn whole.
         if let Some((_, rows, row, cell)) = &mut table {
@@ -228,11 +241,7 @@ pub fn render(md: &str, width: usize) -> Rendered {
                     if !o.line.is_empty() {
                         o.end_line();
                     }
-                    // H1 and H2 underlined, DOS help style.
-                    if n <= 2 {
-                        let rule = if n == 1 { "═" } else { "─" }.repeat(w.max(3));
-                        o.raw_line(&rule.clone(), vec![(0, rule.len() as u32, kind(if n == 1 { "keyword" } else { "punctuation" }))]);
-                    }
+                    let _ = w;
                     o.r.headings.push((line, n, text.trim().to_string()));
                     o.r.anchors.push((slug(&text), line));
                     o.blank();
@@ -290,7 +299,8 @@ pub fn render(md: &str, width: usize) -> Rendered {
                         *n += 1;
                         b
                     }
-                    _ => format!("{} ", ["•", "◦", "▪"][(depth - 1) % 3]),
+                    // (QBasic's help bullets.)
+                    _ => format!("{} ", ["■", "·", "■"][(depth - 1) % 3]),
                 };
                 let w = str_width(&bullet);
                 o.prefix.push((" ".repeat(w), None));
@@ -339,10 +349,14 @@ pub fn render(md: &str, width: usize) -> Rendered {
             Event::Start(Tag::Link { dest_url, .. }) => {
                 link.push(dest_url.to_string());
                 style.push(kind("function"));
+                // (QBasic's help: ◄link►.)
+                o.space();
+                link_open = true;
             }
             Event::End(TagEnd::Link) => {
                 link.pop();
                 style.pop();
+                o.attach("►", kind("label"));
             }
             Event::Start(Tag::Image { dest_url, .. }) => {
                 image = Some(dest_url.to_string());
@@ -360,6 +374,15 @@ pub fn render(md: &str, width: usize) -> Rendered {
                     h.push_str(&t);
                 }
                 let l = link.last().cloned();
+                if std::mem::take(&mut link_open) {
+                    // (The ◄ goes with the link's first word, on its line.)
+                    let first = t.split(' ').next().unwrap_or("");
+                    if !o.line.is_empty() && str_width(&o.line) + 1 + str_width(first) > o.width {
+                        o.end_line();
+                    }
+                    o.attach("◄", kind("label"));
+                    o.line_nospace = true;
+                }
                 // (Text keeps its own line breaks inside, rare: words.)
                 for (i, part) in t.split('\n').enumerate() {
                     if i > 0 {
@@ -373,6 +396,10 @@ pub fn render(md: &str, width: usize) -> Rendered {
                     h.push_str(&t);
                 }
                 let l = link.last().cloned();
+                if std::mem::take(&mut link_open) {
+                    o.attach("◄", kind("label"));
+                    o.line_nospace = true;
+                }
                 o.words(&t, Some(kind("string")), l.as_deref());
             }
             Event::SoftBreak => o.space(),
@@ -508,9 +535,9 @@ mod tests {
         let r = render(md, 40);
         let lines: Vec<&str> = r.text.lines().collect();
         assert_eq!(lines[0], "Title");
-        assert_eq!(lines[1], "═════");
-        assert!(lines.contains(&"Some em and code with a link."), "{}", r.text);
-        assert!(lines.contains(&"• one") && lines.contains(&"  1. a") && lines.contains(&"☑ done"), "{}", r.text);
+        assert_eq!(lines[1], "");
+        assert!(lines.contains(&"Some em and code with a ◄link►."), "{}", r.text);
+        assert!(lines.contains(&"■ one") && lines.contains(&"  1. a") && lines.contains(&"☑ done"), "{}", r.text);
         assert!(lines.contains(&"▌ quoted text"), "{}", r.text);
         assert!(lines.iter().any(|l| l.starts_with("┌ rust ")) && lines.contains(&"│ fn main() {} │"), "{}", r.text);
         assert!(lines.contains(&"│ A │ Bee │") && lines.contains(&"│ 1 │  22 │"), "{}", r.text);
