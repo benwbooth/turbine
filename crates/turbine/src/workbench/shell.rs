@@ -46,6 +46,11 @@ pub(super) struct Shell {
     pub explicit_project: bool,
     /// The chat sends to the agent (which works the UI) instead of asking.
     pub chat_agent: bool,
+    /// Split editors: the windows in the left and right halves, and which
+    /// half was used last (a file chosen next goes there).
+    pub split: Option<(u32, u32, usize)>,
+    /// Ctrl+\ with one editor: the file picked next opens beside it.
+    pub split_pending: Option<u32>,
 }
 
 impl Shell {
@@ -67,6 +72,8 @@ impl Shell {
             palette: None,
             explicit_project,
             chat_agent: false,
+            split: None,
+            split_pending: None,
         }
     }
 }
@@ -156,7 +163,46 @@ impl Workbench {
                 list.area = area;
             }
         }
+        // Split editors: the pair side by side; a file brought to the front
+        // takes the half used last.
+        let front = self.editor_index().map(|i| self.windows[i].win.id);
+        if let Some(pending) = self.shell.split_pending {
+            if front.is_some_and(|f| f != pending) && self.shell.palette.is_none() {
+                self.shell.split = Some((pending, front.unwrap(), 1));
+                self.shell.split_pending = None;
+            } else if self.shell.palette.is_none() {
+                self.shell.split_pending = None;
+            }
+        }
+        if let Some((a, b, active)) = self.shell.split {
+            let alive = |id: u32| ids.contains(&id) && self.windows.iter().any(|w| w.win.id == id && w.dock.is_none());
+            if !alive(a) || !alive(b) {
+                self.shell.split = None;
+            } else if let Some(f) = front {
+                self.shell.split = Some(if f == a {
+                    (a, b, 0)
+                } else if f == b {
+                    (a, b, 1)
+                } else if active == 0 {
+                    (f, b, 0)
+                } else {
+                    (a, f, 1)
+                });
+            }
+        }
+        let halves = self.shell.split.map(|(a, b, _)| {
+            let e = l.editors;
+            let lw = e.w / 2;
+            ((a, Rect::new(e.x, e.y, lw, e.h)), (b, Rect::new(e.x + lw, e.y, e.w - lw, e.h)))
+        });
         for w in &mut self.windows {
+            if let (None, Some(((a, ra), (b, rb)))) = (w.dock, halves) {
+                if w.win.id == a || w.win.id == b {
+                    w.win.zoomed = false;
+                    w.win.rect = if w.win.id == a { ra } else { rb };
+                    continue;
+                }
+            }
             match w.dock {
                 Some(side) => {
                     let shown = self.shell.dock.part(side).visible && self.shell.dock.part(side).current() == Some(Tab::Pane(w.win.id));
@@ -533,6 +579,30 @@ impl Workbench {
         self.shell.focus = Focus::Chat;
     }
 
+    /// Ctrl+\: split the editors (or join them back).
+    fn toggle_split(&mut self) {
+        if self.shell.split.take().is_some() {
+            let d = self.layout().editors;
+            for w in self.windows.iter_mut().filter(|w| w.dock.is_none()) {
+                w.win.zoomed = false;
+                w.win.toggle_zoom(d);
+            }
+            return;
+        }
+        let eds: Vec<u32> = self.windows.iter().rev().filter(|w| w.dock.is_none()).map(|w| w.win.id).collect();
+        match eds.as_slice() {
+            [front, other, ..] => self.shell.split = Some((*other, *front, 1)),
+            [only] => {
+                // One editor: pick the file to show beside it.
+                self.shell.split_pending = Some(*only);
+                self.open_palette("");
+                self.say("Split: choose the file to open beside it");
+            }
+            [] => {}
+        }
+        self.focus_editor();
+    }
+
     /// Toggle a part; showing one focuses its view.
     fn toggle_part(&mut self, side: Side) {
         let p = self.shell.dock.part_mut(side);
@@ -633,6 +703,7 @@ impl Workbench {
             "view.editor_tabs" => self.shell.dock.editor_tabs = !self.shell.dock.editor_tabs,
             "ai.chat" => self.show_chat(),
             "view.focus_editor" => self.focus_editor(),
+            "view.split" => self.toggle_split(),
             "view.reset_layout" => {
                 let tabs = (self.shell.dock.bottom.tabs.clone(), self.shell.dock.right.tabs.clone());
                 self.shell.dock = Dock::default();
@@ -711,6 +782,8 @@ impl Workbench {
             Some("view.sidebar")
         } else if k.is_ctrl('j') && !vim_editor {
             Some("view.panel")
+        } else if k.mods.ctrl && !k.mods.alt && matches!(k.key, Key::Char('\\')) {
+            Some("view.split")
         } else if k.is_ctrl('l') && !self.windows.last().is_some_and(|w| w.is_terminal() && self.shell.focus == Focus::Editors) {
             Some("ai.chat")
         } else {

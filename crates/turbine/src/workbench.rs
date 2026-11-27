@@ -369,6 +369,7 @@ fn menus() -> Vec<Menu> {
                 it("Primary Side ~B~ar", "Ctrl+B", "view.sidebar"),
                 it("Pa~n~el", "Ctrl+J", "view.panel"),
                 it("Secondar~y~ Side Bar", "Ctrl+Alt+B", "view.secondary"),
+                it("Split Edi~t~or", "Ctrl+\\", "view.split"),
                 it("Editor Ta~b~s", "", "view.editor_tabs"),
                 it("Reset La~y~out", "", "view.reset_layout"),
                 sep(),
@@ -4423,6 +4424,32 @@ mod tests {
         assert!(!dir.join("renamed.txt").exists());
         let info = std::fs::read_to_string(trash.join("info/renamed.txt.trashinfo")).unwrap();
         assert!(info.contains("Path=") && info.contains("renamed.txt"), "{info}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn split_editor_puts_two_files_side_by_side() {
+        let (dir, mut wb) = project("split");
+        wb.goto_file(&dir.join("src/main.rs"), None, 0);
+        // One editor: Ctrl+\ asks for the file to put beside it.
+        wb.key(KeyEvent::new(Key::Char('\\'), Mods::CTRL));
+        assert!(wb.shell.palette.is_some());
+        wait_until(&mut wb, "the file list", |wb| wb.shell.palette.as_ref().is_some_and(|p| p.list.rows.iter().any(|r| r.text == "notes.md")));
+        run(&mut wb, json!({"cmd": "type", "text": "notes"}));
+        keys(&mut wb, &["Enter"]);
+        wb.tick(Instant::now());
+        let e = wb.layout().editors;
+        let rect = |wb: &Workbench, name: &str| wb.windows.iter().find(|w| w.ed.doc.title() == name).unwrap().win.rect;
+        let (l, r) = (rect(&wb, "main.rs"), rect(&wb, "notes.md"));
+        assert_eq!((l.x, r.x, l.w + r.w, l.h), (e.x, e.x + e.w / 2, e.w, e.h), "{l:?} {r:?} {e:?}");
+        // The halves follow the side bar.
+        keys(&mut wb, &["Ctrl+B"]);
+        wb.tick(Instant::now());
+        assert_eq!(rect(&wb, "main.rs").x, wb.layout().editors.x);
+        // Again: one editor filling the area.
+        wb.key(KeyEvent::new(Key::Char('\\'), Mods::CTRL));
+        wb.tick(Instant::now());
+        assert_eq!(rect(&wb, "notes.md"), wb.layout().editors);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
