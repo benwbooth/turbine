@@ -567,6 +567,27 @@ impl Workbench {
                 at.push(Some((path.clone(), d.line, d.start)));
             }
         }
+        // (Files a build reported on that aren't open.)
+        for (path, probs) in self.closed_file_problems() {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            rows.push(Row::new(name).heading().detail(format!("{}", probs.len())));
+            at.push(None);
+            for p in probs {
+                let (icon, fg) = match p.severity {
+                    1 => {
+                        errors += 1;
+                        ("■", vga::LIGHT_RED)
+                    }
+                    2 => {
+                        warnings += 1;
+                        ("▲", vga::YELLOW)
+                    }
+                    _ => ("i", vga::LIGHT_CYAN),
+                };
+                rows.push(Row::new(p.message.lines().next().unwrap_or("").to_string()).indent(1).icon(icon).fg(fg).detail(format!("{}:{}", p.line + 1, p.col + 1)));
+                at.push(Some((path.clone(), p.line, p.col)));
+            }
+        }
         if rows.is_empty() {
             rows.push(Row::new("No problems have been detected."));
             at.push(None);
@@ -998,6 +1019,8 @@ impl Workbench {
             Some("view.output")
         } else if k.mods.ctrl && k.mods.alt && ch('b') {
             Some("view.secondary")
+        } else if cs && ch('b') {
+            Some("terminal.build")
         } else if k.is_ctrl('b') && !vim_editor {
             Some("view.sidebar")
         } else if k.is_ctrl('j') && !vim_editor {
@@ -1194,7 +1217,7 @@ impl Workbench {
         }
     }
 
-    fn problem_goto(&mut self, i: usize) {
+    pub(super) fn problem_goto(&mut self, i: usize) {
         if let Some(Some((p, line, col))) = self.shell.problem_at.get(i).cloned() {
             if p.as_os_str().is_empty() {
                 return;

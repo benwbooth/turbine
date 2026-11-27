@@ -10,6 +10,7 @@ use turbine_ui::list::ListView;
 use turbine_ui::theme::vga;
 use turbine_ui::Canvas;
 
+mod build;
 mod debug_more;
 mod explorer_ops;
 mod extensions;
@@ -225,6 +226,7 @@ pub struct Workbench {
     lsp_missing: HashSet<String>,
     lspx: lsp_more::LspExtra,
     dbx: debug_more::DebugExtra,
+    build: build::BuildState,
     lsp_spawn: LspSpawner,
     lsp_requests: HashMap<(LspKey, i64), (LspReq, u32)>,
     completion: Option<Completion>,
@@ -422,6 +424,7 @@ fn menus() -> Vec<Menu> {
             vec![
                 it("~R~un", "Ctrl+F9", "run.run"),
                 it("Start ~D~ebugging", "", "run.debug"),
+                it("Run ~W~ithout Debugging", "Ctrl+F5", "run.without_debug"),
                 it("Program R~e~set", "Ctrl+F2", "run.reset"),
                 it("~G~o to Cursor", "F4", "run.to_cursor"),
                 it("~T~race Into", "F7", "run.step_into"),
@@ -438,9 +441,10 @@ fn menus() -> Vec<Menu> {
                 it("Debug Co~n~figurations...", "", "run.configurations"),
                 it("~C~all Stack", "Ctrl+F3", "run.stack"),
                 sep(),
-                soon("C~o~mpile", "Alt+F9", "build.compile"),
-                soon("~M~ake", "F9", "build.make"),
-                soon("Bui~l~d All", "", "build.all"),
+                it("C~o~mpile", "Alt+F9", "build.compile"),
+                it("~M~ake", "F9", "build.make"),
+                it("Bui~l~d All", "", "build.all"),
+                it("Stop B~u~ild", "", "build.stop"),
             ],
         ),
         Menu::new(
@@ -449,8 +453,8 @@ fn menus() -> Vec<Menu> {
                 it("~N~ew Terminal", "Ctrl+Shift+`", "terminal.new"),
                 soon("~S~plit Terminal", "", "terminal.split"),
                 sep(),
-                soon("~R~un Task...", "", "terminal.task"),
-                soon("Run ~B~uild Task...", "Ctrl+Shift+B", "terminal.build"),
+                it("~R~un Task...", "", "terminal.task"),
+                it("Run ~B~uild Task...", "Ctrl+Shift+B", "terminal.build"),
             ],
         ),
         Menu::new(
@@ -556,6 +560,7 @@ impl Workbench {
             lsp_missing: HashSet::new(),
             lspx: Default::default(),
             dbx: Default::default(),
+            build: Default::default(),
             lsp_spawn: default_lsp_spawner(),
             lsp_requests: HashMap::new(),
             completion: None,
@@ -2171,6 +2176,7 @@ impl Workbench {
             "run.arguments" => self.arguments_dialog(),
             "lsp.hover" => self.lsp_request(LspReq::Hover),
             "go.definition" => self.lsp_request(LspReq::Definition),
+            "build.make" | "build.all" | "build.compile" | "build.stop" | "terminal.task" | "terminal.build" | "run.without_debug" => self.build_command(cmd),
             "run.watch" => self.add_watch_dialog(),
             "edit.comment" | "selection.expand" | "selection.shrink" | "selection.copy_up" | "selection.copy_down" | "selection.move_up" | "selection.move_down" | "go.bracket"
             | "go.next_def" | "go.prev_def" | "view.fold" | "view.unfold" | "view.fold_all" | "view.unfold_all" => {
@@ -2689,6 +2695,11 @@ impl Workbench {
             }
             return;
         }
+        if let Some(root) = kind.strip_prefix("task:") {
+            let root = root.to_string();
+            self.task_chosen(&d, &root);
+            return;
+        }
         if kind == "watch" {
             let e = d.value("expr").unwrap_or_default();
             self.add_watch(&e);
@@ -3038,6 +3049,14 @@ impl Workbench {
             Some("lsp.hover")
         } else if k.is(Key::F(9), Mods::CTRL) {
             Some("run.run")
+        } else if k.is(Key::F(9), Mods::NONE) {
+            Some("build.make")
+        } else if k.is(Key::F(9), Mods::ALT) {
+            Some("build.compile")
+        } else if k.is(Key::F(5), Mods::CTRL) {
+            Some("run.without_debug")
+        } else if k.mods.ctrl && k.mods.shift && !k.mods.alt && matches!(k.key, Key::Char('b' | 'B')) {
+            Some("terminal.build")
         } else if k.is(Key::F(7), Mods::CTRL) {
             Some("run.watch")
         } else if k.is(Key::F(4), Mods::CTRL) {
@@ -3852,6 +3871,7 @@ impl App for Workbench {
         self.update_highlights();
         self.update_lsp();
         self.lsp_more_tick(now);
+        self.build_tick();
         self.update_debug();
         self.update_guides();
         self.update_ai(now);
@@ -3901,7 +3921,8 @@ impl App for Workbench {
             || self.pending_question.is_some()
             || self.agent.is_some()
             || self.pending_task.is_some()
-            || self.last_edit.is_some();
+            || self.last_edit.is_some()
+            || self.build_busy();
         let term_tick = (any_term || self.hl_pending > 0 || lsp_waiting).then(|| now + Duration::from_millis(16));
         // Servers send diagnostics unasked: look a few times a second.
         let lsp_tick = (!self.lsp.is_empty()).then(|| now + Duration::from_millis(100));
@@ -5142,6 +5163,34 @@ mod tests {
         assert_eq!(wb.windows[0].ed.selected_text().as_deref(), Some("(1 + 2)"));
         keys(&mut wb, &["Esc", "Ctrl+/"]);
         assert_eq!(wb.windows[0].ed.doc.line(1), "    // let x = (1 + 2);");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn make_compile_and_checks_fill_problems() {
+        let dir = std::env::temp_dir().join(format!("turbine-make-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join("a.c"), "int main() {\n  return x;\n}\n").unwrap();
+        std::fs::write(dir.join("Makefile"), "all:\n\t@echo 'a.c:2:10: error: x undeclared'; echo 'a.c:1:5: warning: odd main'; false\n").unwrap();
+        std::fs::write(dir.join("bad.sh"), "if true; then\n  echo hi\n").unwrap();
+        let mut wb = Workbench::new(&[dir.join("bad.sh")]);
+        wb.set_lsp_spawner(Box::new(|_, _| None));
+        wb.dispatch(Event::Resize(100, 30));
+        // A shell file with no language server is checked when opened.
+        wait_until(&mut wb, "bash -n", |wb| !wb.windows[0].ed.diagnostics.is_empty());
+        assert_eq!(wb.windows[0].ed.diagnostics[0].severity, 1);
+        // F9: the project's build; its messages go to Problems.
+        keys(&mut wb, &["F9"]);
+        wait_until(&mut wb, "the build", |wb| !wb.build_busy() && wb.message.as_ref().is_some_and(|m| m.0.contains("failed")));
+        assert!(wb.message.as_ref().unwrap().0.contains("1 errors, 1 warnings"), "{:?}", wb.message);
+        let out = wb.windows.iter().find(|w| w.special == Some("output")).unwrap().ed.doc.rope.to_string();
+        assert!(out.starts_with("> make") && out.contains("a.c:2:10: error"), "{out}");
+        wb.tick(Instant::now());
+        let i = wb.shell.problems.rows.iter().position(|r| r.text == "x undeclared").expect("in Problems");
+        wb.problem_goto(i);
+        let w = wb.windows.last().unwrap();
+        assert!(w.ed.doc.path.as_ref().unwrap().ends_with("a.c"));
+        assert_eq!(w.ed.cursor_line_col(), (1, 9));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
