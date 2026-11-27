@@ -1,6 +1,7 @@
 //! Turbine: a retro DOS-style, AI-first code editor and IDE.
 
 mod agent;
+mod mcp;
 mod server;
 mod tools;
 mod vim;
@@ -14,10 +15,12 @@ use workbench::{Request, Workbench};
 
 const USAGE: &str = "\
 turbine [options] [files...]
+turbine mcp [--socket PATH]   MCP server (stdio) driving a running Turbine
 
 Options:
-  --automation [PATH]   Listen for agent commands (JSON lines) on a Unix socket.
-                        Default: $XDG_RUNTIME_DIR/turbine-<pid>.sock
+  --automation [PATH]   Agent commands (JSON lines) on this Unix socket (on by
+                        default at $XDG_RUNTIME_DIR/turbine-<pid>.sock)
+  --no-automation       No automation socket
   --keymap NAME         Editor keys: cua (default, DOS style) or vim
   --speed CPS           Agent typing speed in characters per second (0 = instant)
   --demo                Start the agent demo right away
@@ -31,6 +34,7 @@ Options:
 struct Args {
     files: Vec<PathBuf>,
     automation: Option<Option<PathBuf>>,
+    no_automation: bool,
     speed: Option<f64>,
     keymap: Option<vim::Keymap>,
     demo: bool,
@@ -44,6 +48,7 @@ fn parse_args() -> Result<Args, String> {
     let mut a = Args {
         files: Vec::new(),
         automation: None,
+        no_automation: false,
         speed: None,
         keymap: None,
         demo: false,
@@ -64,6 +69,7 @@ fn parse_args() -> Result<Args, String> {
                 let path = it.next_if(|v| !v.starts_with('-')).map(PathBuf::from);
                 a.automation = Some(path);
             }
+            "--no-automation" => a.no_automation = true,
             "--speed" => a.speed = Some(val("--speed")?.parse().map_err(|_| "bad --speed")?),
             "--keymap" => {
                 let v = val("--keymap")?;
@@ -88,6 +94,11 @@ fn parse_args() -> Result<Args, String> {
 fn main() {
     // As a child trying a downloaded grammar: try it and exit.
     turbine_syntax::grammars::check_from_args();
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("mcp") {
+        let socket = argv.iter().position(|a| a == "--socket").and_then(|i| argv.get(i + 1)).map(PathBuf::from);
+        std::process::exit(mcp::run(socket));
+    }
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -107,9 +118,18 @@ fn main() {
 
     let (tx, rx) = mpsc::channel::<Request>();
     wb.set_requests(rx);
-    if let Some(path) = &args.automation {
-        match server::listen(path.clone(), tx.clone()) {
-            Ok(p) => eprintln!("turbine: automation socket {}", p.display()),
+    // The automation socket: agents (and `turbine mcp`) drive Turbine through it.
+    let mut socket_path = None;
+    let explicit = args.automation.is_some();
+    if !args.no_automation && (explicit || !args.headless) {
+        match server::listen(args.automation.clone().flatten(), tx.clone()) {
+            Ok(p) => {
+                if explicit {
+                    eprintln!("turbine: automation socket {}", p.display());
+                }
+                wb.set_socket_path(p.clone());
+                socket_path = Some(p);
+            }
             Err(e) => eprintln!("turbine: automation socket failed: {e}"),
         }
     }
@@ -131,7 +151,8 @@ fn main() {
         loop {
             let next = wb.tick(Instant::now());
             let script_idle = args.script.is_none() || script_done.load(std::sync::atomic::Ordering::SeqCst);
-            if wb.should_quit() || (script_idle && !wb.driver_mut().busy()) || start.elapsed() > Duration::from_secs(600) {
+            let idle = script_idle && !wb.driver_mut().busy() && !wb.agent_running();
+            if wb.should_quit() || idle || start.elapsed() > Duration::from_secs(600) {
                 break;
             }
             let wait = next.map(|t| t.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_millis(5));
@@ -153,7 +174,11 @@ fn main() {
         return;
     }
 
-    if let Err(e) = turbine_tui::run(&mut wb) {
+    let r = turbine_tui::run(&mut wb);
+    if let Some(p) = socket_path {
+        let _ = std::fs::remove_file(p);
+    }
+    if let Err(e) = r {
         eprintln!("turbine: {e}");
         std::process::exit(1);
     }

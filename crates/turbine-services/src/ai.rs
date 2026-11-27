@@ -320,10 +320,18 @@ impl Ai {
             if let Some(k) = &m.key {
                 req = req.header("Authorization", &format!("Bearer {k}"));
             }
+            let started = std::time::Instant::now();
             let r = req
                 .send_json(&body)
                 .map_err(|e| e.to_string())
                 .and_then(|mut r| r.body_mut().read_json::<Value>().map_err(|e| e.to_string()));
+            // TURBINE_AI_LOG=file: every tool-using turn, for debugging agents.
+            if let Ok(path) = std::env::var("TURBINE_AI_LOG") {
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                    let reply = match &r { Ok(v) => v.clone(), Err(e) => json!({"error": e}) };
+                    let _ = writeln!(f, "{}", json!({"secs": started.elapsed().as_secs_f32(), "request": body, "reply": reply}));
+                }
+            }
             let _ = tx.send(match r {
                 Ok(v) => {
                     let mut msg = v["choices"][0]["message"].clone();

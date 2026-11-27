@@ -217,6 +217,8 @@ pub struct Workbench {
     agent: Option<AgentRun>,
     /// A task given before the model list arrived.
     pending_task: Option<String>,
+    /// The automation socket, told to programs in terminals (TURBINE_SOCKET).
+    socket_path: Option<PathBuf>,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -490,6 +492,7 @@ impl Workbench {
             pending_question: None,
             agent: None,
             pending_task: None,
+            socket_path: None,
         };
         for f in files {
             wb.open_path(f);
@@ -516,6 +519,15 @@ impl Workbench {
                 }
             }
         }
+    }
+
+    /// An agent (or a question for it) is still at work.
+    pub fn agent_running(&self) -> bool {
+        self.agent.is_some() || self.pending_task.is_some() || self.chat_streaming.is_some() || self.pending_question.is_some()
+    }
+
+    pub fn set_socket_path(&mut self, p: PathBuf) {
+        self.socket_path = Some(p);
     }
 
     pub fn set_requests(&mut self, rx: Receiver<Request>) {
@@ -1672,7 +1684,8 @@ impl Workbench {
         let mut win = Window::new(self.next_id, "Terminal", rect);
         win.min_h = 4;
         self.next_id += 1;
-        let view = TerminalView::new(Spawn { argv, ..Default::default() });
+        let env = self.socket_path.iter().map(|p| ("TURBINE_SOCKET".to_string(), p.display().to_string())).collect();
+        let view = TerminalView::new(Spawn { argv, env, ..Default::default() });
         if let Some(e) = view.error() {
             self.say(format!("Terminal: {e}"));
         }
@@ -2952,6 +2965,33 @@ impl Workbench {
         root.child(sb)
     }
 
+    /// One line on what has focus: for agents after each action.
+    fn focus_summary(&self) -> String {
+        if let Some(d) = &self.dialog {
+            let f = d.controls.get(d.focus).map(|c| format!("{} {}", c.control.role(), c.control.id().unwrap_or(""))).unwrap_or_default();
+            return format!("dialog \"{}\" is open (focus: {f})", d.title);
+        }
+        if let Some(i) = self.menubar.open {
+            return format!("menu {} is open", self.menubar.menus[i].plain_title());
+        }
+        match self.windows.last() {
+            None => "no windows open".into(),
+            Some(w) if w.term.is_some() => format!("terminal window \"{}\" has focus", w.win.title),
+            Some(w) => {
+                let (l, c) = w.ed.cursor_line_col();
+                let kind = w.special.unwrap_or("editor");
+                format!(
+                    "{kind} \"{}\" has focus, cursor at line {} col {} of {} lines{}",
+                    w.win.title,
+                    l + 1,
+                    c + 1,
+                    w.ed.doc.len_lines(),
+                    if w.ed.doc.dirty { ", unsaved changes" } else { "" }
+                )
+            }
+        }
+    }
+
     /// Queue the steps that click a widget like a person would.
     fn queue_click(&mut self, target: &str) {
         self.driver.queue.push_back(Step::MoveToTarget(target.into()));
@@ -2999,7 +3039,7 @@ impl Workbench {
         let ok = json!({"ok": true});
         match name.as_str() {
             "snapshot" => {
-                let mut v = json!({"ok": true, "tree": self.tree()});
+                let mut v = json!({"ok": true, "tree": self.tree(), "focus": self.focus_summary()});
                 if cmd.get("screen").and_then(Value::as_bool).unwrap_or(false) {
                     let mut surf = Surface::new(self.size.0, self.size.1);
                     self.render(&mut surf);
@@ -3116,7 +3156,11 @@ impl Workbench {
                         self.fail_queue(format!("can't find {t}"));
                     }
                 },
-                Output::Reply(tx, v) => {
+                Output::Reply(tx, mut v) => {
+                    // Every finished action says where focus is now.
+                    if v["ok"] == true {
+                        v["focus"] = json!(self.focus_summary());
+                    }
                     let _ = tx.send(v);
                 }
             }

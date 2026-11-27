@@ -42,9 +42,13 @@
 | AI Chat (Ctrl+L): streams the answer into a Markdown window, with the selection or nearby code as context; reasoning (<think>) dropped | done (live-tested with the hub and qwen3.5:4b) |
 | Tab completion: fill-in-the-middle model (e.g. qwen2.5-coder base) after a 350 ms pause, dim ghost text, Tab accepts; AI > Tab Completion toggles | done (tested with a fake server; not yet live) |
 | AI > Models: pick the chat model | done |
-| Assistant as an agent with tools (driving Turbine's UI visibly), inline edit (Ctrl+K), Claude/Codex/Gemini via the hub's CLIs, MCP server for hearth's assistant | planned |
+| Agent (AI > Agent, Ctrl+I): the model works the UI with tools (look, menu, click, type, key, read, wait, open) through the visible driver; steps logged in AI Chat; terminal commands need Allow/Always/Deny; Esc stops | done (live: qwen3.5:4b via the hub opened, typed, saved) |
+| Automation socket on by default; TURBINE_SOCKET in terminals; tool results say what has focus | done |
+| `turbine mcp`: MCP stdio server so Claude Code, Codex or hearth's assistant drive a running Turbine with the same tools | done |
+| TURBINE_AI_LOG: log of every agent turn | done |
+| Inline edit (Ctrl+K), Claude/Codex/Gemini through the hub's CLIs, hearth assistant configured to use `turbine mcp` | planned |
 | hearth AI hub as model provider | done |
-| MCP server so hearth's assistant can drive Turbine | planned |
+| MCP server (`turbine mcp`) | done; hearth's assistant still needs it in its config |
 | Docs service: Tessera's ~230 language guides fetched from official sites, converted to Markdown, kept offline (turbine/guides) | done |
 | Help windows (read-only, Markdown highlighting): F1 guide for the file's language, Shift+F1 index, Download All Guides | done |
 | QBasic-style rendered help with links (<Contents> <Index> <Back>), search across guides | planned |

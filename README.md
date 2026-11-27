@@ -30,7 +30,20 @@ Agents drive Turbine through its own widget tree and the same input path
 you use. The pointer glides to its target, menus drop open, dialogs fill
 in, and code is typed at a speed you can read, so you can watch what the AI
 is doing. Pressing any key pauses it, **Space** pauses or resumes, and **Esc** stops it.
-Try **AI > Agent Demo**.
+Try **AI > Agent Demo**, or **AI > Agent** (Ctrl+I) and give your model a
+task: it works the editor with the same tools (look at the screen, open
+menus, click, type, press keys, read, wait for text), every step on screen
+and in the AI Chat log. Commands it wants to run in a terminal wait for
+your Allow.
+
+Outside agents drive it the same way over MCP:
+
+```bash
+claude mcp add turbine -- turbine mcp
+```
+
+The socket is on by default (`$XDG_RUNTIME_DIR/turbine-<pid>.sock`, and
+`TURBINE_SOCKET` in Turbine's terminals); `--automation PATH` picks the path:
 
 ```bash
 turbine --automation /tmp/turbine.sock &
@@ -109,8 +122,7 @@ comes back once the action has finished on screen.
 - The automation socket, plus `--headless --script` for tests and screenshots
 
 The plan covers much more:
-WASI extensions, Emacs and VS Code keymaps, an assistant that works as an
-agent, a global menu, desktop and web front
+WASI extensions, Emacs and VS Code keymaps, inline AI edits, a global menu, desktop and web front
 ends (a cxx-qt Qt app and a Leptos web app, no JavaScript), and retro
 platforms. See [docs/DESIGN.md](docs/DESIGN.md) and
 [docs/STATUS.md](docs/STATUS.md).

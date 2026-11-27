@@ -133,13 +133,17 @@ pub fn result_text(name: &str, reply: &Value) -> String {
         "look" => {
             let mut o = String::from("Widgets:\n");
             outline(&reply["tree"], 0, &mut o);
-            format!("{o}\nScreen:\n{}", reply["screen"].as_str().unwrap_or(""))
+            let focus = reply["focus"].as_str().map(|f| format!("\nNow: {f}\n")).unwrap_or_default();
+            format!("{o}{focus}\nScreen:\n{}", reply["screen"].as_str().unwrap_or(""))
         }
         "read" => {
             let t = reply["text"].as_str().unwrap_or("");
             if t.len() > 12_000 { format!("{}\n... (cut: {} bytes in all)", &t[..t.floor_char_boundary(12_000)], t.len()) } else { t.to_string() }
         }
-        _ => "done".into(),
+        _ => match reply["focus"].as_str() {
+            Some(f) => format!("done. Now: {f}"),
+            None => "done".into(),
+        },
     }
 }
 
