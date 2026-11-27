@@ -184,8 +184,8 @@ impl Workbench {
                         d.path = Some(p.clone());
                         d
                     });
+                    // (Modified only if it differs from the file.)
                     d.replace_all_minimal(&text, 0);
-                    d.dirty = true;
                     d
                 }
                 (Some(p), None) if p.is_file() => match Document::open(p) {
@@ -196,7 +196,6 @@ impl Workbench {
                 (None, Some(text)) => {
                     let mut d = Document::new();
                     d.replace_all_minimal(&text, 0);
-                    d.dirty = true;
                     d
                 }
                 (None, None) => continue,

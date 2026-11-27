@@ -29,6 +29,19 @@ pub struct Document {
     redo: Vec<Vec<Edit>>,
     /// Group consecutive typing into one undo step.
     open_group: bool,
+    /// The text as last opened or saved: (its length in bytes, a hash),
+    /// so an edit back to it (or an empty Untitled) isn't "modified".
+    saved: (usize, u64),
+}
+
+/// A text's hash, the same however the rope splits it.
+fn text_hash(r: &Rope) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in r.chunks() {
+        h.write(c.as_bytes());
+    }
+    h.finish()
 }
 
 impl Default for Document {
@@ -51,13 +64,26 @@ impl Document {
             undo: Vec::new(),
             redo: Vec::new(),
             open_group: false,
+            saved: (0, text_hash(&Rope::new())),
         }
     }
 
     pub fn from_str(text: &str) -> Self {
         let mut d = Self::new();
         d.rope = Rope::from_str(text);
+        d.mark_saved();
         d
+    }
+
+    /// The text as it is now counts as saved (opened, written).
+    pub fn mark_saved(&mut self) {
+        self.saved = (self.rope.len_bytes(), text_hash(&self.rope));
+        self.dirty = false;
+    }
+
+    /// After a change: modified unless the text is the saved one again.
+    fn update_dirty(&mut self) {
+        self.dirty = !(self.rope.len_bytes() == self.saved.0 && text_hash(&self.rope) == self.saved.1);
     }
 
     pub fn open(path: &Path) -> std::io::Result<Self> {
@@ -70,6 +96,7 @@ impl Document {
         d.bom = dec.bom;
         d.line_ending = dec.line_ending;
         d.lossy = dec.lossy;
+        d.mark_saved();
         Ok(d)
     }
 
@@ -95,7 +122,7 @@ impl Document {
         self.bom = dec.bom;
         self.line_ending = dec.line_ending;
         self.lossy = dec.lossy;
-        self.dirty = false;
+        self.mark_saved();
         Ok(())
     }
 
@@ -105,7 +132,7 @@ impl Document {
         };
         let bytes = encoding::encode(&self.rope.to_string(), self.encoding, self.bom, self.line_ending);
         std::fs::write(&path, bytes)?;
-        self.dirty = false;
+        self.mark_saved();
         Ok(())
     }
 
@@ -214,7 +241,7 @@ impl Document {
         let n = e.removed.chars().count();
         self.rope.remove(e.at..e.at + n);
         self.rope.insert(e.at, &e.inserted);
-        self.dirty = true;
+        self.update_dirty();
         self.version += 1;
         self.redo.clear();
         let typing = e.removed.is_empty() && e.inserted.chars().count() == 1 && !e.inserted.contains('\n');
@@ -245,7 +272,7 @@ impl Document {
             cursor = e.cursor_before;
         }
         self.redo.push(group);
-        self.dirty = true;
+        self.update_dirty();
         self.version += 1;
         Some(cursor)
     }
@@ -261,9 +288,30 @@ impl Document {
             cursor = e.at + e.inserted.chars().count();
         }
         self.undo.push(group);
-        self.dirty = true;
+        self.update_dirty();
         self.version += 1;
         Some(cursor)
+    }
+}
+
+#[cfg(test)]
+mod dirty_tests {
+    use super::*;
+
+    #[test]
+    fn back_to_the_saved_text_is_not_modified() {
+        let mut d = Document::from_str("abc");
+        d.insert(3, "d", 3);
+        assert!(d.dirty);
+        d.remove(3, 4, 4);
+        assert!(!d.dirty, "the same text again");
+        d.insert(0, "x", 0);
+        d.undo();
+        assert!(!d.dirty, "undone");
+        let mut u = Document::new();
+        u.insert(0, "hi", 0);
+        u.remove(0, 2, 2);
+        assert!(!u.dirty, "an empty Untitled");
     }
 }
 
