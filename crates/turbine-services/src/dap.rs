@@ -19,6 +19,15 @@ pub fn adapter_for(lang: &str) -> Option<Vec<String>> {
         "python" => &[&["python3", "-m", "debugpy.adapter"], &["python", "-m", "debugpy.adapter"]],
         "go" => &[&["dlv", "dap"]],
         "bash" => &[&["bash-debug-adapter"]],
+        "c-sharp" | "fsharp" => &[&["netcoredbg", "--interpreter=vscode"]],
+        "dart" => &[&["dart", "debug_adapter"]],
+        "haskell" => &[&["haskell-debug-adapter"]],
+        "ocaml" => &[&["ocamlearlybird", "debug"]],
+        "kotlin" => &[&["kotlin-debug-adapter"]],
+        "elixir" => &[&["elixir-debug-adapter"], &["elixir-ls-debugger"]],
+        "php" => &[&["php-debug-adapter"]],
+        "perl" => &[&["perl-debug-adapter"]],
+        "d" | "odin" | "nim" | "crystal" | "fortran" | "pascal" | "ada" | "v" | "hare" => &[&["lldb-dap"], &["gdb", "-i", "dap"]],
         _ => &[],
     };
     let ok = |c: &&[&str]| {
