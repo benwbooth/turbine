@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::dock::{Dock, Layout, Tab};
+use crate::palette::{self, Palette, Pick};
 use turbine_ui::list::{ListOut, Row};
 
 /// Where typing goes, besides dialogs and menus.
@@ -35,6 +36,8 @@ pub(super) struct Shell {
     pub revealed: Option<(u32, Option<PathBuf>)>,
     /// Places of the editor tabs from the last layout: (window id, tab, ×).
     pub editor_tab_rects: Vec<(u32, Rect, Rect)>,
+    /// The command palette / quick open, while it's up.
+    pub palette: Option<Palette>,
 }
 
 impl Shell {
@@ -53,6 +56,7 @@ impl Shell {
             chat_input: LineInput::default(),
             revealed: None,
             editor_tab_rects: Vec::new(),
+            palette: None,
         }
     }
 }
@@ -202,9 +206,12 @@ impl Workbench {
                 self.shell.revealed = Some(key);
             }
         }
-        // The Outline: the editor in front, when the Outline is showing.
-        self.shell.outline.poll();
-        if shown(self, Tab::Outline) {
+        // The Outline (and Go to Symbol): the editor in front, when one shows.
+        if self.shell.outline.poll() {
+            self.palette_symbols();
+        }
+        let symbols_wanted = self.shell.palette.as_ref().is_some_and(|p| p.input.text.starts_with('@'));
+        if shown(self, Tab::Outline) || symbols_wanted {
             match self.editor_index() {
                 Some(i) if self.windows[i].special.is_none() => {
                     let w = &self.windows[i];
@@ -221,6 +228,106 @@ impl Workbench {
         }
         self.update_problems();
         self.update_debug_view();
+        if let Some(p) = &mut self.shell.palette {
+            p.poll();
+        }
+    }
+
+    // ---- the command palette and quick open -------------------------------------------
+
+    /// Every menu command, as "Menu: Item".
+    fn palette_commands(&self) -> Vec<palette::Item> {
+        let mut out = Vec::new();
+        for m in &self.menubar.menus {
+            let menu = m.plain_title();
+            let menu = if menu == "≡" { "Turbine".to_string() } else { menu };
+            for it in &m.items {
+                if it.is_separator() || !it.enabled {
+                    continue;
+                }
+                // (On/off items read as toggles, as in VS Code.)
+                let toggle = if it.checked.is_some() { "Toggle " } else { "" };
+                out.push(palette::Item {
+                    label: format!("{menu}: {toggle}{}", it.plain_label().trim_end_matches("...")),
+                    detail: it.shortcut.clone(),
+                    pick: Pick::Command(it.command.clone()),
+                });
+            }
+        }
+        out
+    }
+
+    /// The Outline's symbols into an open palette.
+    fn palette_symbols(&mut self) {
+        let syms: Vec<palette::Item> = self
+            .shell
+            .outline
+            .list
+            .rows
+            .iter()
+            .zip(&self.shell.outline.lines)
+            .map(|(r, l)| palette::Item { label: format!("{} {}", r.icon, r.text), detail: format!("{}", l + 1), pick: Pick::Line(*l) })
+            .collect();
+        if let Some(p) = &mut self.shell.palette {
+            p.set_symbols(syms);
+        }
+    }
+
+    fn open_palette(&mut self, start: &str) {
+        let root = self.shell.explorer.root.clone();
+        let p = Palette::new(start, self.palette_commands(), Vec::new(), &root);
+        self.shell.palette = Some(p);
+        self.palette_symbols();
+    }
+
+    fn palette_pick(&mut self, i: usize) {
+        let Some(p) = self.shell.palette.take() else { return };
+        match p.pick(i) {
+            Some(Pick::Command(c)) => self.run_command(&c),
+            Some(Pick::Open(f)) => self.goto_file(&f, None, 0),
+            Some(Pick::Line(l)) => {
+                if let Some(ei) = self.editor_index() {
+                    let id = self.windows[ei].win.id;
+                    self.activate_pane(id);
+                    let w = self.windows.last_mut().unwrap();
+                    let l = l.min(w.ed.doc.len_lines().saturating_sub(1));
+                    w.ed.cursor = w.ed.doc.rope.line_to_char(l);
+                    w.ed.anchor = None;
+                }
+            }
+            None => self.shell.palette = Some(p),
+        }
+    }
+
+    /// Where the palette goes: a box at the top of the editors.
+    fn palette_rect(&self) -> Rect {
+        let l = self.layout();
+        let area = Rect::new(0, 1, self.size.0, (self.size.1 - 2).max(1));
+        let w = 72.min(area.w - 4).max(20);
+        let rows = self.shell.palette.as_ref().map_or(1, |p| p.list.rows.len() as i32);
+        let h = (rows + 3).clamp(5, 18).min(area.h);
+        let cx = l.editors.x + l.editors.w / 2;
+        let x = (cx - w / 2).clamp(area.x, (area.right() - w).max(area.x));
+        Rect::new(x, area.y, w, h)
+    }
+
+    fn palette_key(&mut self, k: &KeyEvent) {
+        let Some(p) = &mut self.shell.palette else { return };
+        match k.key {
+            Key::Esc => self.shell.palette = None,
+            Key::Enter => {
+                let i = p.list.selected;
+                self.palette_pick(i);
+            }
+            Key::Up | Key::Down | Key::PageUp | Key::PageDown => {
+                p.list.key(k);
+            }
+            _ => {
+                if p.input.key(k) {
+                    p.refilter();
+                }
+            }
+        }
     }
 
     fn update_problems(&mut self) {
@@ -374,6 +481,38 @@ impl Workbench {
         }
     }
 
+    // ---- remembering the layout --------------------------------------------------------
+
+    pub(super) fn layout_json(&self) -> Value {
+        let d = &self.shell.dock;
+        let part = |p: &crate::dock::Part| json!({"visible": p.visible, "size": p.size, "active": p.current().filter(|t| !matches!(t, Tab::Pane(_))).map(|t| t.key())});
+        json!({"left": part(&d.left), "bottom": part(&d.bottom), "right": part(&d.right), "editor_tabs": d.editor_tabs})
+    }
+
+    pub(super) fn apply_layout_json(&mut self, v: &Value) {
+        if !v.is_object() {
+            return;
+        }
+        for (side, key) in [(Side::Left, "left"), (Side::Bottom, "bottom"), (Side::Right, "right")] {
+            let pv = &v[key];
+            let p = self.shell.dock.part_mut(side);
+            if let Some(b) = pv["visible"].as_bool() {
+                p.visible = b;
+            }
+            if let Some(n) = pv["size"].as_i64() {
+                p.size = (n as i32).clamp(4, 400);
+            }
+            if let Some(a) = pv["active"].as_str() {
+                if let Some(i) = p.tabs.iter().position(|t| t.key() == a) {
+                    p.active = i;
+                }
+            }
+        }
+        if let Some(b) = v["editor_tabs"].as_bool() {
+            self.shell.dock.editor_tabs = b;
+        }
+    }
+
     // ---- commands -------------------------------------------------------------------------
 
     /// The shell's commands; false when it's not one of them.
@@ -419,9 +558,21 @@ impl Workbench {
             "view.editor_tabs" => self.shell.dock.editor_tabs = !self.shell.dock.editor_tabs,
             "ai.chat" => self.show_chat(),
             "view.focus_editor" => self.focus_editor(),
+            "view.reset_layout" => {
+                let tabs = (self.shell.dock.bottom.tabs.clone(), self.shell.dock.right.tabs.clone());
+                self.shell.dock = Dock::default();
+                self.shell.dock.bottom.tabs = tabs.0;
+                self.shell.dock.right.tabs = tabs.1;
+            }
+            "view.palette" => self.open_palette(">"),
+            "go.file" => self.open_palette(""),
+            "go.symbol" => self.open_palette("@"),
             _ => return false,
         }
         self.layout_dock();
+        if cmd.starts_with("view.") && !matches!(cmd, "view.palette" | "view.focus_editor") {
+            self.save_look();
+        }
         true
     }
 
@@ -434,7 +585,17 @@ impl Workbench {
         let cs = k.mods.ctrl && k.mods.shift && !k.mods.alt;
         // (Vim keeps Ctrl+B and Ctrl+J in its editors: they're its keys.)
         let vim_editor = self.shell.focus == Focus::Editors && self.keymap == Keymap::Vim && self.windows.last().is_some_and(|w| w.dock.is_none() && !w.is_terminal());
-        let cmd = if cs && ch('e') {
+        if self.shell.palette.is_some() {
+            self.palette_key(k);
+            return true;
+        }
+        let cmd = if cs && ch('p') {
+            Some("view.palette")
+        } else if k.is_ctrl('p') && !vim_editor {
+            Some("go.file")
+        } else if cs && ch('o') {
+            Some("go.symbol")
+        } else if cs && ch('e') {
             Some("view.files")
         } else if cs && ch('f') {
             Some("view.search")
@@ -446,8 +607,6 @@ impl Workbench {
             Some("view.problems")
         } else if cs && ch('u') {
             Some("view.output")
-        } else if cs && ch('o') {
-            Some("view.outline")
         } else if k.mods.ctrl && k.mods.alt && ch('b') {
             Some("view.secondary")
         } else if k.is_ctrl('b') && !vim_editor {
@@ -621,11 +780,30 @@ impl Workbench {
     /// Clicks on the parts' edges and tabs, the views and the editor tabs.
     /// True when used. (Clicks inside a docked window go on to the window.)
     pub(super) fn shell_mouse(&mut self, m: &MouseEvent) -> bool {
+        // The palette: a click picks; one outside closes it.
+        if self.shell.palette.is_some() {
+            let pr = self.palette_rect();
+            if let MouseKind::Down(_) = m.kind {
+                if !pr.contains(m.pos) {
+                    self.shell.palette = None;
+                    return true;
+                }
+            }
+            let p = self.shell.palette.as_mut().unwrap();
+            match p.list.mouse(m) {
+                ListOut::Activated(i) | ListOut::Selected(i) if matches!(m.kind, MouseKind::Down(_)) => self.palette_pick(i),
+                _ => {}
+            }
+            return true;
+        }
         let l = self.layout();
         if self.shell.dock.dragging() {
             match m.kind {
                 MouseKind::Drag(_) => self.shell.dock.drag_to(m.pos),
-                _ => self.shell.dock.end_drag(),
+                _ => {
+                    self.shell.dock.end_drag();
+                    self.save_look();
+                }
             }
             self.layout_dock();
             return true;
@@ -773,6 +951,27 @@ impl Workbench {
 
     // ---- drawing --------------------------------------------------------------------------
 
+    /// The palette, over everything but menus and dialogs.
+    pub(super) fn draw_palette(&mut self, c: &mut Canvas, theme: &Theme) {
+        if self.shell.palette.is_none() {
+            return;
+        }
+        let r = self.palette_rect();
+        let s = &theme.scheme;
+        let p = self.shell.palette.as_mut().unwrap();
+        c.fill(r, " ", s.menu);
+        turbine_ui::frame::draw_frame(c, r, theme.style.menu_frame, s.menu);
+        turbine_ui::frame::draw_title(c, r, p.title(), s.menu);
+        if theme.style.shadows {
+            c.shadow(r, s.shadow);
+        }
+        p.input.draw(c, Rect::new(r.x + 1, r.y + 1, r.w - 2, 1), theme, true, "");
+        // (The list shows its pick lit; the field keeps the cursor.)
+        p.list.draw(c, Rect::new(r.x + 1, r.y + 2, r.w - 2, r.h - 3), theme, true);
+        let before = str_width(&p.input.text[..p.input.cursor]) as i32;
+        c.set_cursor(Point::new(r.x + 2 + before, r.y + 1), turbine_ui::CursorShape::Bar);
+    }
+
     /// The editor tabs, the parts and their views (after the windows).
     pub(super) fn draw_shell(&mut self, c: &mut Canvas, theme: &Theme) {
         let l = self.layout();
@@ -864,6 +1063,13 @@ impl Workbench {
     /// The parts, tabs and views as automation nodes.
     pub(super) fn shell_nodes(&self, mut root: Node) -> Node {
         let l = self.layout();
+        if let Some(p) = &self.shell.palette {
+            let r = self.palette_rect();
+            let mut pn = Node::new("palette", "dialog", p.title(), r).focused(true);
+            pn = pn.child(Node::new("palette.input", "input", p.title(), Rect::new(r.x + 1, r.y + 1, r.w - 2, 1)).focused(true).value(p.input.text.clone()));
+            pn = pn.child(p.list.node("palette.list", "Results", false));
+            root = root.child(pn);
+        }
         if l.editor_tabs.is_some() {
             let mut tabs = Node::new("editor_tabs", "tablist", "Open Editors", l.editor_tabs.unwrap());
             for (id, r, x) in &self.shell.editor_tab_rects {

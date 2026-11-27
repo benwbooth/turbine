@@ -596,7 +596,9 @@ impl Scm {
             }
             changed = true;
         }
-        if shown && !self.busy && self.refreshed.is_none_or(|t| t.elapsed() > Duration::from_secs(4)) {
+        // (Shown: every few seconds; else now and then, for the status bar's branch.)
+        let every = Duration::from_secs(if shown { 4 } else { 20 });
+        if !self.busy && self.refreshed.is_none_or(|t| t.elapsed() > every) {
             self.refresh(root);
         }
         changed

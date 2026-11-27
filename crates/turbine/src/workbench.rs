@@ -330,7 +330,7 @@ fn menus() -> Vec<Menu> {
                 it("Find in F~i~les...", "Ctrl+Shift+F", "search.files"),
                 sep(),
                 it("~G~o to Line Number...", "Ctrl+G", "search.goto"),
-                soon("Find ~P~rocedure...", "Ctrl+Shift+O", "go.symbol"),
+                it("Find ~P~rocedure...", "Ctrl+Shift+O", "go.symbol"),
                 sep(),
                 it("Pre~v~ious Error", "Alt+F7", "go.prev_problem"),
                 it("~N~ext Error", "Alt+F8", "go.next_problem"),
@@ -339,10 +339,10 @@ fn menus() -> Vec<Menu> {
         Menu::new(
             "~V~iew",
             vec![
-                soon("~C~ommand Palette...", "Ctrl+Shift+P", "view.palette"),
+                it("~C~ommand Palette...", "Ctrl+Shift+P", "view.palette"),
                 sep(),
                 it("~E~xplorer", "Ctrl+Shift+E", "view.files"),
-                it("O~u~tline", "Ctrl+Shift+O", "view.outline"),
+                it("O~u~tline", "", "view.outline"),
                 it("Searc~h~", "Ctrl+Shift+F", "view.search"),
                 it("~S~ource Control", "Ctrl+Shift+G", "view.scm"),
                 it("~R~un and Debug", "Ctrl+Shift+D", "view.debug"),
@@ -357,6 +357,7 @@ fn menus() -> Vec<Menu> {
                 it("Pa~n~el", "Ctrl+J", "view.panel"),
                 it("Secondar~y~ Side Bar", "Ctrl+Alt+B", "view.secondary"),
                 it("Editor Ta~b~s", "", "view.editor_tabs"),
+                it("Reset La~y~out", "", "view.reset_layout"),
                 sep(),
                 it("~L~ine Numbers", "", "view.line_numbers"),
                 it("Right to Le~f~t", "", "view.rtl"),
@@ -369,8 +370,8 @@ fn menus() -> Vec<Menu> {
                 soon("~B~ack", "Alt+Left", "go.back"),
                 soon("~F~orward", "Alt+Right", "go.forward"),
                 sep(),
-                soon("Go to ~F~ile...", "Ctrl+P", "go.file"),
-                soon("Go to ~S~ymbol...", "Ctrl+Shift+O", "go.symbol"),
+                it("Go to ~F~ile...", "Ctrl+P", "go.file"),
+                it("Go to ~S~ymbol...", "Ctrl+Shift+O", "go.symbol"),
                 it("Go to ~D~efinition", "F12", "go.definition"),
                 soon("Go to ~R~eferences", "Shift+F12", "go.references"),
                 it("Go to ~L~ine...", "Ctrl+G", "search.goto"),
@@ -635,18 +636,22 @@ impl Workbench {
                 if let Some(sc) = v["scheme"].as_str().and_then(|n| Scheme::all().into_iter().find(|s| s.name == n)) {
                     self.theme.scheme = sc;
                 }
+                self.apply_layout_json(&v["layout"]);
             }
         }
         self.look_path = Some(p);
     }
 
+    /// Keep the look and layout for next time (written off the UI thread).
     fn save_look(&self) {
-        if let Some(p) = &self.look_path {
-            let v = json!({"style": self.theme.style.name, "scheme": self.theme.scheme.name});
-            if let Some(d) = p.parent() {
-                let _ = std::fs::create_dir_all(d);
-            }
-            let _ = std::fs::write(p, serde_json::to_string_pretty(&v).unwrap_or_default());
+        if let Some(p) = self.look_path.clone() {
+            let v = json!({"style": self.theme.style.name, "scheme": self.theme.scheme.name, "layout": self.layout_json()});
+            std::thread::spawn(move || {
+                if let Some(d) = p.parent() {
+                    let _ = std::fs::create_dir_all(d);
+                }
+                let _ = std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap_or_default());
+            });
         }
     }
 
@@ -3581,8 +3586,12 @@ impl App for Workbench {
                 if self.theme.style.dos_status {
                     return format!("{:05}:{:03}", l + 1, col + 1);
                 }
+                // As Cursor's: the branch and problem counts, then the file's.
+                let branch = &self.shell.scm.branch;
+                let (e, wn) = self.shell.problem_count;
                 format!(
-                    "{lang}  {}:{}  {} {}  {}",
+                    "{}■ {e} ▲ {wn}  {lang}  {}:{}  {} {}  {}",
+                    if branch.is_empty() { String::new() } else { format!("⎇ {branch}  ") },
                     l + 1,
                     col + 1,
                     w.ed.doc.encoding.name(),
@@ -3634,6 +3643,7 @@ impl App for Workbench {
                 comp.popup.draw(&mut c, at, desk, &theme);
             }
         }
+        self.draw_palette(&mut c, &theme);
         self.layout_dialogs();
         for d in [&mut self.dialog, &mut self.overwrite_q].into_iter().flatten() {
             d.draw(&mut c, &theme);
@@ -3984,7 +3994,7 @@ mod tests {
         assert_eq!(fg_of("fn main"), vga::WHITE);
         assert_eq!(fg_of("\"hi\""), vga::LIGHT_CYAN);
         assert_eq!(fg_of("// done"), vga::LIGHT_GRAY);
-        assert!(wb.status.info.starts_with("Rust"), "{}", wb.status.info);
+        assert!(wb.status.info.contains("  Rust  1:1"), "{}", wb.status.info);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -4090,6 +4100,35 @@ mod tests {
         keys(&mut wb, &["Down", "Down", "Enter"]);
         assert_eq!(title(&wb), "main.rs");
         assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn palette_runs_commands_opens_files_and_goes_to_lines() {
+        let (dir, mut wb) = project("palette");
+        // Ctrl+Shift+P, "panel", Enter: the panel shows.
+        keys(&mut wb, &["Ctrl+Shift+P"]);
+        assert!(wb.shell.palette.is_some());
+        run(&mut wb, json!({"cmd": "type", "text": "toggle pa"}));
+        let first = wb.shell.palette.as_ref().unwrap().list.rows[0].text.clone();
+        assert_eq!(first, "View: Toggle Panel", "{first}");
+        keys(&mut wb, &["Enter"]);
+        assert!(wb.shell.palette.is_none() && wb.shell.dock.bottom.visible);
+        // Ctrl+P, a file's name: it opens; ":2" goes to its second line.
+        keys(&mut wb, &["Ctrl+P"]);
+        wait_until(&mut wb, "the file list", |wb| wb.shell.palette.as_ref().is_some_and(|p| p.list.rows.iter().any(|r| r.text == "main.rs")));
+        run(&mut wb, json!({"cmd": "type", "text": "mainrs"}));
+        keys(&mut wb, &["Enter"]);
+        assert_eq!(title(&wb), "main.rs");
+        keys(&mut wb, &["Ctrl+P"]);
+        run(&mut wb, json!({"cmd": "type", "text": ":2"}));
+        keys(&mut wb, &["Enter"]);
+        assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, 1);
+        // Ctrl+Shift+O: the file's symbols.
+        keys(&mut wb, &["Ctrl+Shift+O"]);
+        wait_until(&mut wb, "symbols", |wb| wb.shell.palette.as_ref().is_some_and(|p| p.list.rows.iter().any(|r| r.text.ends_with("main"))));
+        keys(&mut wb, &["Esc"]);
+        assert!(wb.shell.palette.is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
