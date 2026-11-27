@@ -90,6 +90,33 @@ pub fn pick_chat(models: &[Model]) -> Option<&Model> {
     models.iter().filter(|m| m.chat).max_by_key(|m| (m.loaded, std::cmp::Reverse(m.name.len())))
 }
 
+/// Whether a suggestion is in the text's own scripts: one with CJK,
+/// Cyrillic or other letters the file doesn't use (a base model's ramble)
+/// is dropped, as is one that's mostly symbols no code has.
+pub fn fits_text(suggestion: &str, doc: &str) -> bool {
+    fn script(c: char) -> u8 {
+        match c as u32 {
+            0..=0x24F => 0,
+            0x370..=0x3FF => 1,
+            0x400..=0x52F => 2,
+            0x590..=0x6FF => 3,
+            0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF => 4,
+            _ => 5,
+        }
+    }
+    let used: std::collections::HashSet<u8> = doc.chars().filter(|c| c.is_alphabetic()).map(script).collect();
+    let mut foreign = 0;
+    let mut letters = 0;
+    for c in suggestion.chars().filter(|c| c.is_alphabetic()) {
+        letters += 1;
+        let sc = script(c);
+        if sc != 0 && !used.contains(&sc) {
+            foreign += 1;
+        }
+    }
+    foreign == 0 || (letters > 0 && foreign * 10 < letters && used.len() > 1)
+}
+
 pub fn pick_fim(models: &[Model]) -> Option<&Model> {
     models.iter().filter(|m| m.fim).max_by_key(|m| m.loaded)
 }
@@ -401,6 +428,14 @@ impl Drop for Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rambles_in_other_scripts_are_dropped() {
+        assert!(fits_text("0;\n    for i in 1..100 {", "fn main() {}"));
+        assert!(!fits_text("这是一个函数", "fn main() {}"));
+        assert!(!fits_text("let x = 1; // 计算", "fn main() {}"));
+        assert!(fits_text("// 计算总和", "// 中文注释\nfn main() {}"));
+    }
 
     #[test]
     fn thinking_is_dropped_across_chunks() {

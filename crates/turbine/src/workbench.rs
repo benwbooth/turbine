@@ -1518,8 +1518,10 @@ impl Workbench {
                     }
                     if let Some(w) = self.windows.last_mut() {
                         if w.win.id == win && w.ed.doc.version == version && w.ed.cursor == cursor {
-                            let ghost: String = text.trim_end().lines().take(3).collect::<Vec<_>>().join("\n");
-                            if !ghost.trim().is_empty() {
+                            // (Up to a blank line, three lines at most.)
+                            let ghost: String = text.trim_end().split("\n\n").next().unwrap_or("").lines().take(3).collect::<Vec<_>>().join("\n");
+                            let doc = w.ed.doc.rope.slice(..w.ed.doc.rope.len_chars().min(20_000)).to_string();
+                            if !ghost.trim().is_empty() && ai::fits_text(&ghost, &doc) {
                                 w.ed.ghost = Some(ghost);
                             }
                         }
@@ -1544,6 +1546,11 @@ impl Workbench {
         let cur = w.ed.cursor;
         let before = rope.slice(cur.saturating_sub(3000)..cur).to_string();
         let after = rope.slice(cur..(cur + 1500).min(rope.len_chars())).to_string();
+        // (With little to go on a base model rambles, often in Chinese: ask
+        // only once there's some code before the cursor.)
+        if before.split_whitespace().map(str::len).sum::<usize>() < 24 {
+            return;
+        }
         let id = a.complete(&model, before, after);
         self.fim_pending = Some((id, win, version, cur));
     }
@@ -6007,13 +6014,14 @@ mod tests {
         let ed = wb.windows.iter().position(|w| w.special.is_none()).unwrap();
         let w = wb.windows.remove(ed);
         wb.windows.push(w);
-        for c in "fn main() { ".chars() {
+        // (Enough code before the cursor for the model to go on.)
+        for c in "fn greet(name: &str) { let n = 1; ".chars() {
             wb.key(KeyEvent::plain(Key::Char(c)));
         }
         wait_until(&mut wb, "ghost text", |wb| wb.windows.last().unwrap().ed.ghost.is_some());
         assert_eq!(wb.windows.last().unwrap().ed.ghost.as_deref(), Some("println!(\"hi\");"));
         wb.key(KeyEvent::plain(Key::Tab));
-        assert_eq!(wb.windows.last().unwrap().ed.doc.line(0), "fn main() { println!(\"hi\");");
+        assert_eq!(wb.windows.last().unwrap().ed.doc.line(0), "fn greet(name: &str) { let n = 1; println!(\"hi\");");
     }
 
     #[test]
