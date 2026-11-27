@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# (Extensions build for WebAssembly on their own: extensions/build.sh.)
+exclude = ["extensions"]
 
 [workspace.package]
 version = "0.1.0"

@@ -164,7 +164,8 @@
           default = pkgs.mkShell {
             # Zig 0.15 and git: libghostty-vt-sys builds Ghostty's terminal engine.
             # Qt (qmake) for turbine-app.
-            packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer zig_0_15 git pkg-config qtEnv libGL ];
+            # lld: extensions link for wasm32-unknown-unknown (extensions/build.sh).
+            packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer zig_0_15 git pkg-config qtEnv libGL lld ];
             QMAKE = "${qtEnv}/bin/qmake";
             # Link with this shell's compiler: a system clang links against the
             # system glibc and the binary can't load this nixpkgs' Qt.

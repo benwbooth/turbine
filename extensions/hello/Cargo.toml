@@ -1,0 +1,20 @@
+[package]
+name = "turbine-hello"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "An example Turbine extension: a greeting and Uppercase Line"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.57"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+# Its own workspace: built for wasm32-unknown-unknown, not with Turbine.
+[workspace]

@@ -94,7 +94,12 @@ interface ai {
 
 world extension {
   import host;
+  /// Called once when the extension loads: add menu items, key bindings.
   export activate: func();
+  /// Run one of the commands this extension added (`command` as it gave
+  /// it to add-menu-item or bind-key). Ok's text, if any, shows on the
+  /// status line; Err's too, as a failure.
+  export run: func(command: string, args: string) -> result<string, string>;
 }
 
 world view-extension {

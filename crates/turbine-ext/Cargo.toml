@@ -1,0 +1,11 @@
+[package]
+name = "turbine-ext"
+description = "Turbine's extension host: WebAssembly components (wit/turbine.wit) run with wasmtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wasmtime = { version = "48", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
+wit-component = "0.263"
+anyhow = "1"
