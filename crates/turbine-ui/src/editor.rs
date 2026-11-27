@@ -78,6 +78,9 @@ pub struct EditorView {
     pub highlights: Vec<Vec<(u32, u32, u8)>>,
     /// Problems from the language server.
     pub diagnostics: Vec<DiagMark>,
+    /// Lines (0-based) with breakpoints, and where the debugger stopped.
+    pub breakpoints: Vec<usize>,
+    pub exec_line: Option<usize>,
     /// Extra selected char ranges (vim's visual block).
     pub block: Vec<(usize, usize)>,
     /// Text area from the last draw, for mouse hit testing.
@@ -101,6 +104,8 @@ impl EditorView {
             cursor_shape: None,
             highlights: Vec::new(),
             diagnostics: Vec::new(),
+            breakpoints: Vec::new(),
+            exec_line: None,
             block: Vec::new(),
             area: Rect::default(),
             dragging: false,
@@ -508,6 +513,17 @@ impl EditorView {
             let text = self.doc.line(li);
             let line_start = self.doc.rope.line_to_char(li);
             let (placed, total) = layout(&text, self.base_rtl);
+            // Borland's bars: the execution line, else a breakpoint line.
+            let bar = if self.exec_line == Some(li) {
+                Some(s.exec_bar)
+            } else if self.breakpoints.contains(&li) {
+                Some(s.breakpoint)
+            } else {
+                None
+            };
+            if let Some(b) = bar {
+                c.fill(Rect::new(text_x, y, area.w - gw, 1), " ", b);
+            }
             let mut tc = c.sub(Rect::new(text_x, y, area.w - gw, 1));
             for p in &placed {
                 let x = text_x + p.col as i32 - self.scroll_x as i32;
@@ -519,6 +535,8 @@ impl EditorView {
                     || self.block.iter().any(|&(a, b)| ch >= a && ch < b);
                 let st = if selected {
                     s.editor_selection
+                } else if let Some(b) = bar {
+                    b
                 } else {
                     let kind = self
                         .highlights

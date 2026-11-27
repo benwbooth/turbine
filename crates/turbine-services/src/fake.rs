@@ -89,3 +89,121 @@ pub fn fake_server() -> std::io::Result<RpcProcess> {
     })?;
     RpcProcess::from_streams("fake-lsp", Box::new(client_r), Box::new(client_w), None)
 }
+
+/// A pretend debug adapter: it "runs" the program file a line at a time.
+/// A line containing `print(...)` writes what's inside to stdout; it stops
+/// at breakpoints (and the first line with stopOnEntry); `next`/`stepIn`
+/// go one line; variables are `line` and `text` (the current line).
+pub fn fake_debug_adapter() -> std::io::Result<RpcProcess> {
+    let (client_r, server_w) = std::io::pipe()?;
+    let (server_r, client_w) = std::io::pipe()?;
+    std::thread::Builder::new().name("fake-dap".into()).spawn(move || {
+        let mut r = BufReader::new(server_r);
+        let mut w = server_w;
+        let mut seq = 1000;
+        let mut send = |w: &mut std::io::PipeWriter, mut v: Value| {
+            v["seq"] = json!(seq);
+            seq += 1;
+            let _ = write_message(w, &v);
+        };
+        let mut program = String::new();
+        let mut lines: Vec<String> = Vec::new();
+        let mut bps: Vec<u32> = Vec::new();
+        let mut at: u32 = 0; // current line, 1-based; 0 = not started
+        let mut stop_on_entry = false;
+        // Run from `from` (inclusive) until a breakpoint or the end; true = stopped.
+        fn run(w: &mut std::io::PipeWriter, send: &mut dyn FnMut(&mut std::io::PipeWriter, Value), lines: &[String], bps: &[u32], at: &mut u32, from: u32, step: bool) -> bool {
+            let mut l = from;
+            loop {
+                if l as usize > lines.len() {
+                    send(w, json!({"type": "event", "event": "exited", "body": {"exitCode": 0}}));
+                    send(w, json!({"type": "event", "event": "terminated"}));
+                    return false;
+                }
+                if (step && l == from) || (!step && bps.contains(&l) && l != *at) || (step && l > from) {
+                    if !(step && l == from) {
+                        *at = l;
+                        let reason = if step { "step" } else { "breakpoint" };
+                        send(w, json!({"type": "event", "event": "stopped", "body": {"reason": reason, "threadId": 1}}));
+                        return true;
+                    }
+                }
+                // Execute line l.
+                let text = &lines[l as usize - 1];
+                if let Some(i) = text.find("print(") {
+                    let inner = text[i + 6..].split(')').next().unwrap_or("").trim_matches('"');
+                    send(w, json!({"type": "event", "event": "output", "body": {"category": "stdout", "output": format!("{inner}\n")}}));
+                }
+                l += 1;
+                if !step && bps.contains(&l) {
+                    *at = l;
+                    send(w, json!({"type": "event", "event": "stopped", "body": {"reason": "breakpoint", "threadId": 1}}));
+                    return true;
+                }
+            }
+        }
+        while let Ok(Some(m)) = read_message(&mut r) {
+            let cmd = m["command"].as_str().unwrap_or("").to_string();
+            let a = &m["arguments"];
+            let ok = |body: Value| json!({"type": "response", "request_seq": m["seq"], "success": true, "command": cmd, "body": body});
+            match cmd.as_str() {
+                "initialize" => send(&mut w, ok(json!({"supportsConfigurationDoneRequest": true}))),
+                "launch" => {
+                    program = a["program"].as_str().unwrap_or("").to_string();
+                    stop_on_entry = a["stopOnEntry"].as_bool().unwrap_or(false);
+                    lines = std::fs::read_to_string(&program).unwrap_or_default().lines().map(str::to_string).collect();
+                    send(&mut w, ok(json!({})));
+                    send(&mut w, json!({"type": "event", "event": "initialized"}));
+                }
+                "setBreakpoints" => {
+                    bps = a["breakpoints"].as_array().map(|b| b.iter().filter_map(|x| x["line"].as_u64().map(|l| l as u32)).collect()).unwrap_or_default();
+                    let out: Vec<Value> = bps.iter().map(|l| json!({"verified": true, "line": l})).collect();
+                    send(&mut w, ok(json!({"breakpoints": out})));
+                }
+                "configurationDone" => {
+                    send(&mut w, ok(json!({})));
+                    if stop_on_entry {
+                        at = 1;
+                        send(&mut w, json!({"type": "event", "event": "stopped", "body": {"reason": "entry", "threadId": 1}}));
+                    } else if bps.contains(&1) {
+                        at = 1;
+                        send(&mut w, json!({"type": "event", "event": "stopped", "body": {"reason": "breakpoint", "threadId": 1}}));
+                    } else {
+                        let mut a2 = at;
+                        run(&mut w, &mut send, &lines, &bps, &mut a2, 1, false);
+                        at = a2;
+                    }
+                }
+                "threads" => send(&mut w, ok(json!({"threads": [{"id": 1, "name": "main"}]}))),
+                "stackTrace" => send(&mut w, ok(json!({"stackFrames": [{"id": 1, "name": "main", "line": at, "column": 1, "source": {"path": program}}], "totalFrames": 1}))),
+                "scopes" => send(&mut w, ok(json!({"scopes": [{"name": "Locals", "variablesReference": 7, "expensive": false}]}))),
+                "variables" => {
+                    let text = lines.get(at as usize - 1).cloned().unwrap_or_default();
+                    send(&mut w, ok(json!({"variables": [
+                        {"name": "line", "value": at.to_string(), "type": "int", "variablesReference": 0},
+                        {"name": "text", "value": format!("{text:?}"), "type": "str", "variablesReference": 0}
+                    ]})));
+                }
+                "next" | "stepIn" | "stepOut" => {
+                    send(&mut w, ok(json!({})));
+                    let mut a2 = at;
+                    run(&mut w, &mut send, &lines, &bps, &mut a2, at, true);
+                    at = a2;
+                }
+                "continue" => {
+                    send(&mut w, ok(json!({"allThreadsContinued": true})));
+                    let mut a2 = at;
+                    run(&mut w, &mut send, &lines, &bps, &mut a2, at, false);
+                    at = a2;
+                }
+                "disconnect" => {
+                    send(&mut w, ok(json!({})));
+                    send(&mut w, json!({"type": "event", "event": "terminated"}));
+                    return;
+                }
+                _ => send(&mut w, ok(json!({}))),
+            }
+        }
+    })?;
+    RpcProcess::from_streams("fake-dap", Box::new(client_r), Box::new(client_w), None)
+}

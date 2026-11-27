@@ -102,6 +102,9 @@ pub struct Scheme {
     /// Text colour of errors and warnings (also underlined).
     pub diag_error: Color,
     pub diag_warning: Color,
+    /// A line with a breakpoint, and the line the debugger stopped at.
+    pub breakpoint: Style,
+    pub exec_bar: Style,
 }
 
 /// Highlight kinds, in index order (the same list as turbine-syntax's).
@@ -182,6 +185,8 @@ impl Scheme {
             bold_keywords: false,
             diag_error: vga::LIGHT_RED,
             diag_warning: vga::LIGHT_MAGENTA,
+            breakpoint: s!(WHITE on RED),
+            exec_bar: s!(BLACK on CYAN),
         }
     }
 
@@ -230,6 +235,8 @@ impl Scheme {
             bold_keywords: false,
             diag_error: vga::LIGHT_RED,
             diag_warning: vga::LIGHT_MAGENTA,
+            breakpoint: s!(WHITE on RED),
+            exec_bar: s!(BLACK on CYAN),
         }
     }
 
@@ -259,6 +266,7 @@ impl Scheme {
         };
         s.diag_error = vga::RED;
         s.diag_warning = vga::MAGENTA;
+        s.exec_bar = s!(WHITE on BLUE);
         s
     }
 
@@ -301,6 +309,8 @@ impl Scheme {
             bold_keywords: true,
             diag_error: a,
             diag_warning: a,
+            breakpoint: r,
+            exec_bar: Style { attrs: Attrs { bold: true, ..Attrs::default() }, ..r },
         }
     }
 

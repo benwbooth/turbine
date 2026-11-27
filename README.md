@@ -74,6 +74,11 @@ comes back once the action has finished on screen.
   gutter and the message on the status line (F8 / Shift+F8 step through
   them), completion (Ctrl+Space, filtering as you type), go to definition
   (F12) and Topic Search (Ctrl+F1, the server's hover text)
+- Debugging with Borland's keys over the Debug Adapter Protocol (lldb-dap,
+  gdb, codelldb, debugpy, dlv, or `TURBINE_DAP_<LANG>`): Ctrl+F8 breakpoint,
+  Ctrl+F9 run, F7 trace into, F8 step over, F4 go to cursor, Ctrl+F2 reset;
+  red breakpoint bars, a cyan execution bar, Output and Debug (call stack,
+  variables) windows along the bottom
 - Unicode: grapheme clusters, East Asian wide characters (two cells each),
   combining marks, emoji, and bidirectional text with an RTL mode
 - Encodings detected on open and kept on save: UTF-8/16 (with or without
@@ -93,7 +98,7 @@ comes back once the action has finished on screen.
   pastes. Copies reach your system clipboard (OSC 52), even over SSH.
 - The automation socket, plus `--headless --script` for tests and screenshots
 
-The plan covers much more: DAP,
+The plan covers much more:
 WASI extensions, Emacs and VS Code keymaps, AI completion and an
 assistant, hearth AI hub integration, a global menu, desktop and web front
 ends (a cxx-qt Qt app and a Leptos web app, no JavaScript), and retro

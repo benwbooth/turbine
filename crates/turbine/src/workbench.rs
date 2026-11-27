@@ -4,7 +4,9 @@
 use crate::agent::{Driver, Output, Step};
 use crate::vim::{self, Keymap};
 use turbine_term::{MouseOutcome, Spawn, TerminalView};
+use turbine_services::dap::{self, DapClient, DapEvent, Frame, Launch, Variable};
 use turbine_services::lsp::{self, CompletionItem, LspClient, LspEvent, Pos};
+use std::collections::{BTreeMap, BTreeSet};
 use turbine_ui::editor::DiagMark;
 use turbine_ui::popup::{ListPopup, PopupResult};
 use turbine_vi::{ExAction, Out as VimOut, Session};
@@ -31,6 +33,34 @@ struct Completion {
     /// Indexes into `items` that match what's typed.
     shown: Vec<usize>,
     popup: ListPopup,
+}
+
+/// Starts a debug adapter for a language: None when there is none.
+pub type DapSpawner = Box<dyn Fn(&str, Launch, BTreeMap<PathBuf, BTreeSet<u32>>) -> Option<std::io::Result<DapClient>>>;
+
+/// `TURBINE_DAP_<LANG>` ("fake" = the built-in test adapter), else the
+/// first installed adapter for the language.
+fn default_dap_spawner() -> DapSpawner {
+    Box::new(|lang, launch, bps| {
+        let var = format!("TURBINE_DAP_{}", lang.to_uppercase().replace('-', "_"));
+        let argv: Vec<String> = match std::env::var(&var) {
+            Ok(v) if v.trim() == "fake" => {
+                return Some(turbine_services::fake::fake_debug_adapter().map(|rpc| DapClient::with_rpc(rpc, launch, bps)));
+            }
+            Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),
+            _ => dap::adapter_for(lang)?,
+        };
+        Some(DapClient::start(&argv, launch, bps))
+    })
+}
+
+/// A debugging session.
+struct Debug {
+    client: DapClient,
+    frames: Vec<Frame>,
+    scopes: Vec<(String, Vec<Variable>)>,
+    /// Breakpoint set by Go to Cursor, removed at the next stop.
+    temp: Option<(PathBuf, u32)>,
 }
 
 /// Starts a language server for (language, project root): None when there
@@ -90,6 +120,8 @@ struct EdWin {
     lsp_key: Option<LspKey>,
     lsp_sent: Option<u64>,
     was_dirty: bool,
+    /// "output" or "debug" for those windows.
+    special: Option<&'static str>,
 }
 
 impl EdWin {
@@ -131,6 +163,12 @@ pub struct Workbench {
     lsp_spawn: LspSpawner,
     lsp_requests: HashMap<(LspKey, i64), (LspReq, u32)>,
     completion: Option<Completion>,
+    /// Breakpoints: file (canonical) → lines, 1-based.
+    breakpoints: BTreeMap<PathBuf, BTreeSet<u32>>,
+    debug: Option<Debug>,
+    dap_spawn: DapSpawner,
+    /// What Run starts, per project: (program, arguments).
+    run_config: HashMap<PathBuf, (PathBuf, Vec<String>)>,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -257,18 +295,20 @@ fn menus() -> Vec<Menu> {
         Menu::new(
             "~R~un",
             vec![
-                soon("~R~un", "Ctrl+F9", "run.run"),
-                soon("Start ~D~ebugging", "", "run.debug"),
-                soon("Program R~e~set", "Ctrl+F2", "run.reset"),
-                soon("~G~o to Cursor", "F4", "run.to_cursor"),
-                soon("~T~race Into", "F7", "run.step_into"),
-                soon("~S~tep Over", "F8", "run.step_over"),
-                soon("~A~rguments...", "", "run.arguments"),
+                it("~R~un", "Ctrl+F9", "run.run"),
+                it("Start ~D~ebugging", "", "run.debug"),
+                it("Program R~e~set", "Ctrl+F2", "run.reset"),
+                it("~G~o to Cursor", "F4", "run.to_cursor"),
+                it("~T~race Into", "F7", "run.step_into"),
+                it("~S~tep Over", "F8", "run.step_over"),
+                it("Step O~u~t", "", "run.step_out"),
+                it("~P~ause", "", "run.pause"),
+                it("~A~rguments...", "", "run.arguments"),
                 sep(),
-                soon("Toggle ~B~reakpoint", "Ctrl+F8", "run.breakpoint"),
+                it("Toggle ~B~reakpoint", "Ctrl+F8", "run.breakpoint"),
                 soon("Add ~W~atch...", "Ctrl+F7", "run.watch"),
                 soon("E~v~aluate/Modify...", "Ctrl+F4", "run.evaluate"),
-                soon("~C~all Stack", "Ctrl+F3", "run.stack"),
+                it("~C~all Stack", "Ctrl+F3", "run.stack"),
                 sep(),
                 soon("C~o~mpile", "Alt+F9", "build.compile"),
                 soon("~M~ake", "F9", "build.make"),
@@ -382,6 +422,10 @@ impl Workbench {
             lsp_spawn: default_lsp_spawner(),
             lsp_requests: HashMap::new(),
             completion: None,
+            breakpoints: BTreeMap::new(),
+            debug: None,
+            dap_spawn: default_dap_spawner(),
+            run_config: HashMap::new(),
         };
         for f in files {
             wb.open_path(f);
@@ -451,12 +495,322 @@ impl Workbench {
             win.zoomed = false;
         }
         self.next_id += 1;
-        let mut ew = EdWin { win, ed: EditorView::new(doc), vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false };
+        let mut ew = EdWin { win, ed: EditorView::new(doc), vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None };
         if self.keymap == Keymap::Vim {
             ew.vim = Some(vim::attach(&mut ew.ed));
         }
         self.windows.push(ew);
         self.renumber();
+    }
+
+    #[allow(dead_code)] // tests
+    pub fn set_dap_spawner(&mut self, f: DapSpawner) {
+        self.dap_spawn = f;
+    }
+
+    fn canon(p: &Path) -> PathBuf {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    }
+
+    /// The window that shows a special pane ("output", "debug"), made if needed.
+    fn special_window(&mut self, kind: &'static str) -> usize {
+        if let Some(i) = self.windows.iter().position(|w| w.special == Some(kind)) {
+            return i;
+        }
+        let d = self.desktop();
+        let (title, rect) = match kind {
+            "output" => ("Output", Rect::new(d.x, d.bottom() - (d.h / 3).max(6), d.w / 2, (d.h / 3).max(6))),
+            _ => ("Debug", Rect::new(d.x + d.w / 2, d.bottom() - (d.h / 3).max(6), d.w - d.w / 2, (d.h / 3).max(6))),
+        };
+        let mut win = Window::new(self.next_id, title, rect);
+        win.min_h = 4;
+        self.next_id += 1;
+        let mut ed = EditorView::new(Document::new());
+        ed.line_numbers = false;
+        let mut w = EdWin {
+            win,
+            ed,
+            vim: None,
+            term: None,
+            term_text: String::new(),
+            lang: None,
+            lang_for: Some(None),
+            hl_sent: None,
+            lsp_key: None,
+            lsp_sent: None,
+            was_dirty: false,
+            special: Some(kind),
+        };
+        w.win.number = None;
+        // Below the active window, so the code stays in front.
+        let at = self.windows.len().saturating_sub(1);
+        self.windows.insert(at, w);
+        self.renumber();
+        at
+    }
+
+    fn append_output(&mut self, text: &str) {
+        let i = self.special_window("output");
+        let ed = &mut self.windows[i].ed;
+        let end = ed.doc.rope.len_chars();
+        ed.doc.insert(end, text, end);
+        ed.doc.dirty = false;
+        ed.cursor = ed.doc.rope.len_chars();
+    }
+
+    fn show_debug_info(&mut self) {
+        let Some(d) = &self.debug else { return };
+        let mut t = String::from("Call stack\n");
+        for f in &d.frames {
+            let place = f.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            t.push_str(&format!("  {}  {}:{}\n", f.name, place, f.line));
+        }
+        for (scope, vars) in &d.scopes {
+            t.push_str(&format!("\n{scope}\n"));
+            for v in vars {
+                let kind = if v.kind.is_empty() { String::new() } else { format!(": {}", v.kind) };
+                t.push_str(&format!("  {}{kind} = {}\n", v.name, v.value));
+            }
+        }
+        let i = self.special_window("debug");
+        let ed = &mut self.windows[i].ed;
+        ed.doc = Document::from_str(&t);
+        ed.cursor = 0;
+    }
+
+    /// Guess what Run should start for the active file.
+    fn guess_program(&self) -> Option<(PathBuf, PathBuf, String)> {
+        let w = self.windows.iter().rev().find(|w| w.term.is_none() && w.special.is_none() && w.ed.doc.path.is_some())?;
+        let path = w.ed.doc.path.clone()?;
+        let lang = w.lang.clone().unwrap_or_default();
+        let root = lsp::project_root(&path);
+        if let Some((p, _)) = self.run_config.get(&root) {
+            return Some((root.clone(), p.clone(), lang));
+        }
+        let program = match lang.as_str() {
+            "rust" => {
+                let name = std::fs::read_to_string(root.join("Cargo.toml"))
+                    .ok()
+                    .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("name").map(|r| r.trim_start_matches([' ', '=']).trim().trim_matches('"').to_string())))
+                    .unwrap_or_else(|| "main".into());
+                root.join("target/debug").join(name)
+            }
+            "c" | "cpp" => path.with_extension(""),
+            _ => path.clone(),
+        };
+        Some((root, program, lang))
+    }
+
+    fn arguments_dialog(&mut self) {
+        let Some((root, program, _)) = self.guess_program() else {
+            self.say("Open a file of the program first");
+            return;
+        };
+        let args = self.run_config.get(&root).map(|(_, a)| a.join(" ")).unwrap_or_default();
+        let d = Dialog::new(&format!("arguments:{}", root.display()), "Program and Arguments", 60, 11)
+            .input("program", 1, 2, 54, "~P~rogram to run:", &program.display().to_string())
+            .input("args", 1, 5, 54, "~A~rguments:", &args)
+            .button("ok", 16, 7, "O~K~", true)
+            .button("cancel", 32, 7, "Cancel", false);
+        self.dialog = Some(d);
+    }
+
+    fn start_debugging(&mut self, stop_on_entry: bool) {
+        let Some((root, program, lang)) = self.guess_program() else {
+            self.say("Open a file of the program to debug first");
+            return;
+        };
+        let args = self.run_config.get(&root).map(|(_, a)| a.clone()).unwrap_or_default();
+        let launch = Launch { program: program.clone(), args, cwd: root.clone(), stop_on_entry, extra: serde_json::Value::Null };
+        match (self.dap_spawn)(&lang, launch, self.breakpoints.clone()) {
+            None => self.say(format!("No debugger for {lang}: install lldb-dap, gdb, debugpy or dlv")),
+            Some(Err(e)) => self.say(format!("Debugger didn't start: {e}")),
+            Some(Ok(c)) => {
+                self.say(format!("Debugging {} with {}", program.display(), c.name()));
+                self.debug = Some(Debug { client: c, frames: Vec::new(), scopes: Vec::new(), temp: None });
+                self.debug_layout();
+            }
+        }
+    }
+
+    fn debug_command(&mut self, cmd: &str) {
+        let paused = self.debug.as_ref().is_some_and(|d| !d.client.running);
+        match cmd {
+            "run.run" if paused => self.debug.as_mut().unwrap().client.continue_(),
+            "run.run" | "run.debug" if self.debug.is_none() => self.start_debugging(false),
+            "run.step_into" if self.debug.is_none() => self.start_debugging(true),
+            "run.step_into" if paused => self.debug.as_mut().unwrap().client.step_in(),
+            "run.step_over" if self.debug.is_none() => self.start_debugging(true),
+            "run.step_over" if paused => self.debug.as_mut().unwrap().client.step_over(),
+            "run.step_out" if paused => self.debug.as_mut().unwrap().client.step_out(),
+            "run.pause" => {
+                if let Some(d) = &mut self.debug {
+                    d.client.pause();
+                }
+            }
+            "run.reset" => {
+                if let Some(mut d) = self.debug.take() {
+                    d.client.stop();
+                    self.clear_exec_line();
+                    self.say("Program reset");
+                }
+            }
+            "run.to_cursor" => {
+                let Some(w) = self.windows.last() else { return };
+                let Some(path) = w.ed.doc.path.clone().map(|p| Self::canon(&p)) else { return };
+                let line = w.ed.cursor_line_col().0 as u32 + 1;
+                let added = self.breakpoints.entry(path.clone()).or_default().insert(line);
+                let lines = self.breakpoints.get(&path).cloned().unwrap_or_default();
+                match &mut self.debug {
+                    Some(d) => {
+                        d.client.set_breakpoints(&path, lines);
+                        if added {
+                            d.temp = Some((path, line));
+                        }
+                        if !d.client.running {
+                            d.client.continue_();
+                        }
+                    }
+                    None => {
+                        self.start_debugging(false);
+                        if let (Some(d), true) = (&mut self.debug, added) {
+                            d.temp = Some((path, line));
+                        }
+                    }
+                }
+            }
+            "run.breakpoint" => {
+                let Some(w) = self.windows.last() else { return };
+                let Some(path) = w.ed.doc.path.clone().map(|p| Self::canon(&p)) else {
+                    self.say("Save the file first to set breakpoints in it");
+                    return;
+                };
+                let line = w.ed.cursor_line_col().0 as u32 + 1;
+                let set = self.breakpoints.entry(path.clone()).or_default();
+                if !set.remove(&line) {
+                    set.insert(line);
+                }
+                let lines = set.clone();
+                if lines.is_empty() {
+                    self.breakpoints.remove(&path);
+                }
+                if let Some(d) = &mut self.debug {
+                    d.client.set_breakpoints(&path, lines);
+                }
+            }
+            "run.stack" => {
+                self.special_window("debug");
+                self.show_debug_info();
+            }
+            _ if self.debug.as_ref().is_some_and(|d| d.client.running) => self.say("The program is running (Run > Pause stops it)"),
+            _ => {}
+        }
+    }
+
+    /// Output and Debug along the bottom, code windows above them.
+    fn debug_layout(&mut self) {
+        self.special_window("output");
+        self.special_window("debug");
+        let d = self.desktop();
+        let panel_h = (d.h / 3).max(6).min(d.h - 6);
+        let top = d.bottom() - panel_h;
+        for w in &mut self.windows {
+            match w.special {
+                Some("output") => {
+                    w.win.zoomed = false;
+                    w.win.rect = Rect::new(d.x, top, d.w / 2, panel_h);
+                }
+                Some(_) => {
+                    w.win.zoomed = false;
+                    w.win.rect = Rect::new(d.x + d.w / 2, top, d.w - d.w / 2, panel_h);
+                }
+                None if w.win.rect.bottom() > top && w.term.is_none() => {
+                    w.win.zoomed = false;
+                    w.win.rect.y = w.win.rect.y.min(top - 6).max(d.y);
+                    w.win.rect.h = (top - w.win.rect.y).max(6);
+                }
+                None => {}
+            }
+        }
+    }
+
+    fn clear_exec_line(&mut self) {
+        for w in &mut self.windows {
+            w.ed.exec_line = None;
+        }
+    }
+
+    /// Breakpoint marks into editors, and the debugger's events.
+    fn update_debug(&mut self) {
+        for w in &mut self.windows {
+            if w.term.is_some() || w.special.is_some() {
+                continue;
+            }
+            let want = w.ed.doc.path.as_ref().map(|p| Self::canon(p)).and_then(|p| self.breakpoints.get(&p));
+            w.ed.breakpoints = want.map(|s| s.iter().map(|l| *l as usize - 1).collect()).unwrap_or_default();
+        }
+        let Some(d) = &mut self.debug else { return };
+        let events = d.client.poll();
+        for e in events {
+            match e {
+                DapEvent::Stopped { reason, frames, .. } => {
+                    let top = frames.first().cloned();
+                    if let Some(d) = &mut self.debug {
+                        d.frames = frames;
+                        if let Some((p, l)) = d.temp.take() {
+                            if let Some(set) = self.breakpoints.get_mut(&p) {
+                                set.remove(&l);
+                                let lines = set.clone();
+                                d.client.set_breakpoints(&p, lines);
+                            }
+                        }
+                    }
+                    self.clear_exec_line();
+                    if let Some(f) = top {
+                        if let Some(p) = &f.path {
+                            let target = Self::canon(p);
+                            match self.windows.iter().position(|w| w.ed.doc.path.as_ref().is_some_and(|q| Self::canon(q) == target)) {
+                                Some(i) => {
+                                    let w = self.windows.remove(i);
+                                    self.windows.push(w);
+                                    self.renumber();
+                                }
+                                None => self.open_path(p),
+                            }
+                            if let Some(w) = self.windows.last_mut() {
+                                let line = (f.line as usize).saturating_sub(1).min(w.ed.doc.len_lines().saturating_sub(1));
+                                w.ed.exec_line = Some(line);
+                                w.ed.cursor = w.ed.doc.rope.line_to_char(line);
+                                w.ed.anchor = None;
+                            }
+                        }
+                        self.say(format!("Stopped ({reason}) in {} at line {}", f.name, f.line));
+                    }
+                    self.show_debug_info();
+                }
+                DapEvent::Variables { scopes } => {
+                    if let Some(d) = &mut self.debug {
+                        d.scopes = scopes;
+                    }
+                    self.show_debug_info();
+                }
+                DapEvent::Continued => self.clear_exec_line(),
+                DapEvent::Output { category, text } => {
+                    if category != "telemetry" {
+                        self.append_output(&text);
+                    }
+                }
+                DapEvent::Breakpoint { line, verified: false, .. } => self.say(format!("Breakpoint at line {line} can't be set there")),
+                DapEvent::Breakpoint { .. } | DapEvent::Log(_) => {}
+                DapEvent::Failed(m) => self.say(format!("Debugger: {m}")),
+                DapEvent::Terminated | DapEvent::Exited(_) => {
+                    self.debug = None;
+                    self.clear_exec_line();
+                    self.say("Program finished");
+                    break;
+                }
+            }
+        }
     }
 
     #[allow(dead_code)] // used by tests; settings will choose servers later
@@ -785,7 +1139,7 @@ impl Workbench {
         if let Some(e) = view.error() {
             self.say(format!("Terminal: {e}"));
         }
-        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false });
+        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None });
         self.renumber();
     }
 
@@ -883,6 +1237,9 @@ impl Workbench {
                 }
             }
             "lsp.complete" => self.start_completion(),
+            "run.run" | "run.debug" | "run.step_into" | "run.step_over" | "run.step_out" | "run.pause" | "run.reset"
+            | "run.to_cursor" | "run.breakpoint" | "run.stack" => self.debug_command(cmd),
+            "run.arguments" => self.arguments_dialog(),
             "lsp.hover" => self.lsp_request(LspReq::Hover),
             "go.definition" => self.lsp_request(LspReq::Definition),
             "go.next_problem" | "go.prev_problem" => {
@@ -1148,6 +1505,12 @@ impl Workbench {
             return;
         }
         let kind = d.kind.clone();
+        if let Some(root) = kind.strip_prefix("arguments:") {
+            let program = PathBuf::from(d.value("program").unwrap_or_default().trim());
+            let args: Vec<String> = d.value("args").unwrap_or_default().split_whitespace().map(str::to_string).collect();
+            self.run_config.insert(PathBuf::from(root), (program, args));
+            return;
+        }
         if let Some(dir) = kind.strip_prefix("open:") {
             let dir = PathBuf::from(dir);
             let typed = d.value("path").unwrap_or_default();
@@ -1391,6 +1754,20 @@ impl Workbench {
             Some("go.definition")
         } else if k.is(Key::F(1), Mods::CTRL) {
             Some("lsp.hover")
+        } else if k.is(Key::F(9), Mods::CTRL) {
+            Some("run.run")
+        } else if k.is(Key::F(7), Mods::NONE) {
+            Some("run.step_into")
+        } else if k.is(Key::F(8), Mods::NONE) && self.debug.is_some() {
+            Some("run.step_over")
+        } else if k.is(Key::F(4), Mods::NONE) {
+            Some("run.to_cursor")
+        } else if k.is(Key::F(2), Mods::CTRL) {
+            Some("run.reset")
+        } else if k.is(Key::F(8), Mods::CTRL) {
+            Some("run.breakpoint")
+        } else if k.is(Key::F(3), Mods::CTRL) {
+            Some("run.stack")
         } else if k.is(Key::F(8), Mods::NONE) || k.is(Key::F(8), Mods::ALT) {
             Some("go.next_problem")
         } else if k.is(Key::F(8), Mods::SHIFT) || k.is(Key::F(7), Mods::ALT) {
@@ -2127,6 +2504,7 @@ impl App for Workbench {
         }
         self.update_highlights();
         self.update_lsp();
+        self.update_debug();
         if let Some(rx) = &self.requests {
             let reqs: Vec<Request> = rx.try_iter().collect();
             for r in reqs {
@@ -2165,7 +2543,7 @@ impl App for Workbench {
         let msg_tick = self.message.as_ref().map(|(_, t)| *t + Duration::from_secs(4));
         let poll = self.requests.as_ref().map(|_| now + Duration::from_millis(50));
         // Terminals are read on ticks: ~60 a second while one is open.
-        let lsp_waiting = self.lsp.values().any(|c| c.waiting() > 0);
+        let lsp_waiting = self.lsp.values().any(|c| c.waiting() > 0) || self.debug.is_some();
         let term_tick = (any_term || self.hl_pending > 0 || lsp_waiting).then(|| now + Duration::from_millis(16));
         // Servers send diagnostics unasked: look a few times a second.
         let lsp_tick = (!self.lsp.is_empty()).then(|| now + Duration::from_millis(100));
@@ -2588,6 +2966,48 @@ mod tests {
         wait_until(&mut wb, "hover", |wb| wb.dialog.as_ref().is_some_and(|d| d.kind == "hover"));
         let text = wb.dialog.as_ref().unwrap().value("text").unwrap_or_default();
         assert!(text.contains("fake hover: println"), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn debugger_breakpoint_step_continue_output() {
+        let dir = std::env::temp_dir().join(format!("turbine-dbg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("prog.py");
+        std::fs::write(&f, "print(a)\nx = 1\nprint(b)\nprint(c)\n").unwrap();
+        let mut wb = Workbench::new(&[f]);
+        wb.set_lsp_spawner(Box::new(|_, _| None));
+        wb.set_dap_spawner(Box::new(|_, launch, bps| {
+            Some(turbine_services::fake::fake_debug_adapter().map(|rpc| DapClient::with_rpc(rpc, launch, bps)))
+        }));
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+        let code = |wb: &Workbench| wb.windows.iter().position(|w| w.special.is_none()).unwrap();
+        let special = |wb: &Workbench, k: &str| wb.windows.iter().find(|w| w.special == Some(k)).map(|w| w.ed.doc.rope.to_string()).unwrap_or_default();
+
+        keys(&mut wb, &["Down", "Down", "Ctrl+F8"]);
+        wb.tick(Instant::now());
+        assert_eq!(wb.windows[code(&wb)].ed.breakpoints, vec![2]);
+
+        keys(&mut wb, &["Ctrl+F9"]);
+        wait_until(&mut wb, "stop at the breakpoint", |wb| wb.windows.iter().any(|w| w.ed.exec_line == Some(2)));
+        wait_until(&mut wb, "variables", |wb| special(wb, "debug").contains("line: int = 3"));
+        assert_eq!(special(&wb, "output"), "a\n");
+        // The bar colours: exec line wins over the breakpoint's red.
+        let mut surf = Surface::new(100, 30);
+        wb.render(&mut surf);
+
+        keys(&mut wb, &["F8"]);
+        wait_until(&mut wb, "step", |wb| wb.windows.iter().any(|w| w.ed.exec_line == Some(3)));
+        assert_eq!(special(&wb, "output"), "a\nb\n");
+
+        keys(&mut wb, &["Ctrl+F9"]);
+        wait_until(&mut wb, "finish", |wb| wb.debug.is_none());
+        assert_eq!(special(&wb, "output"), "a\nb\nc\n");
+        assert!(wb.windows.iter().all(|w| w.ed.exec_line.is_none()));
+        // F8 means "next problem" again when not debugging.
+        keys(&mut wb, &["F8"]);
+        assert!(wb.debug.is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
