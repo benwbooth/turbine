@@ -410,7 +410,7 @@ fn menus() -> Vec<Menu> {
                 sep(),
                 it("~L~ine Numbers", "", "view.line_numbers"),
                 it("Right to Le~f~t", "", "view.rtl"),
-                soon("~W~ord Wrap", "Alt+Z", "view.wrap"),
+                it("~W~ord Wrap", "Alt+Z", "view.wrap"),
                 sep(),
                 it("~F~old", "Ctrl+Shift+[", "view.fold"),
                 it("~U~nfold", "Ctrl+Shift+]", "view.unfold"),
@@ -820,6 +820,7 @@ impl Workbench {
         self.next_id += 1;
         let mut ed = EditorView::new(doc);
         ed.line_numbers = self.shell.line_numbers.unwrap_or(self.theme.style.line_numbers);
+        ed.wrap = self.shell.word_wrap;
         let mut ew = EdWin { win, ed, vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, lang_fixed: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: None, mirror: None };
         if self.keymap == Keymap::Vim {
             ew.vim = Some(vim::attach(&mut ew.ed));
@@ -2153,6 +2154,7 @@ impl Workbench {
                     "view.breadcrumbs" => it.checked = Some(self.shell.dock.breadcrumbs),
                     "view.minimap" => it.checked = Some(self.shell.minimap.unwrap_or(self.theme.style.icons)),
                     "selection.column" => it.checked = Some(self.windows.last().is_some_and(|w| w.ed.column_mode)),
+                    "view.wrap" => it.checked = Some(self.shell.word_wrap),
                     _ => {}
                 }
             }
@@ -2321,6 +2323,10 @@ impl Workbench {
             "go.definition" => self.lsp_request(LspReq::Definition),
             "build.make" | "build.all" | "build.compile" | "build.stop" | "terminal.task" | "terminal.build" | "run.without_debug" => self.build_command(cmd),
             "view.preview" => self.open_preview(),
+            "view.wrap" => {
+                let on = !self.windows.iter().rev().find(|w| w.term.is_none() && w.special.is_none()).is_some_and(|w| w.ed.wrap);
+                self.setting_set("word_wrap", if on { "on" } else { "off" });
+            }
             c if c.starts_with("git.") => self.git_command(c),
             c if self.extras_command(c) => {}
             "run.watch" => self.add_watch_dialog(),
@@ -3278,6 +3284,8 @@ impl Workbench {
             Some("lsp.signature")
         } else if k.is_ctrl('.') {
             Some("edit.quick_fix")
+        } else if k.is_alt('z') {
+            Some("view.wrap")
         } else if k.is(Key::Left, Mods::ALT) && self.windows.last().is_some_and(|w| w.term.is_none()) {
             Some("go.back")
         } else if k.is(Key::Right, Mods::ALT) && self.windows.last().is_some_and(|w| w.term.is_none()) {

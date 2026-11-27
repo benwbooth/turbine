@@ -53,6 +53,8 @@ pub(super) struct Shell {
     pub split: Option<(u32, u32, usize)>,
     /// Ctrl+\ with one editor: the file picked next opens beside it.
     pub split_pending: Option<u32>,
+    /// Long lines wrap (new editors too).
+    pub word_wrap: bool,
     /// Each mirror group's document as last synced: (version, dirty, path).
     pub mirrored: HashMap<u32, (u64, bool, Option<PathBuf>)>,
     /// The breadcrumbs from the last layout: their places, labels and where
@@ -94,6 +96,7 @@ impl Shell {
             chat_agent: false,
             split: None,
             split_pending: None,
+            word_wrap: false,
             mirrored: HashMap::new(),
             crumbs: Vec::new(),
             minimap: None,

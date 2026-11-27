@@ -58,6 +58,7 @@ pub struct DiagMark {
 /// The minimap's width in cells (eight chars of text each, as braille
 /// dots), and the lines in each of its rows.
 mod multi;
+mod wrap;
 mod structure;
 pub use structure::Structure;
 
@@ -98,6 +99,8 @@ pub struct EditorView {
     /// several; column selection mode (Shift+Up/Down add cursors).
     pub cursors: Vec<(usize, Option<usize>)>,
     pub column_mode: bool,
+    /// Long lines wrap at the window's edge (View > Word Wrap).
+    pub wrap: bool,
     /// Extra selected char ranges (vim's visual block).
     pub block: Vec<(usize, usize)>,
     /// Inlay hints from the language server, per line: (byte, text), shown
@@ -162,6 +165,7 @@ impl EditorView {
             block: Vec::new(),
             cursors: Vec::new(),
             column_mode: false,
+            wrap: false,
             found: Vec::new(),
             found_current: None,
             structure: Structure::default(),
@@ -246,12 +250,11 @@ impl EditorView {
     /// Where the cursor is on screen (from the last draw), if visible.
     pub fn cursor_screen_pos(&self) -> Option<Point> {
         let (line, col) = self.cursor_line_col();
-        let x = self.area.x + self.gutter_width() + col as i32 - self.scroll_x as i32;
         if self.hidden(line) {
             return None;
         }
-        let y = self.area.y + self.rows_between(self.scroll_y, line);
-        let p = Point::new(x, y);
+        let (row, x) = self.screen_place(line, col);
+        let p = Point::new(self.area.x + self.gutter_width() + x as i32, self.area.y + row);
         self.area.contains(p).then_some(p)
     }
 
@@ -394,6 +397,12 @@ impl EditorView {
     fn vertical(&mut self, delta: isize, select: bool) {
         let (line, col) = self.cursor_line_col();
         let col = *self.pref_col.get_or_insert(col);
+        if let Some(ch) = self.wrapped_vertical(delta, col) {
+            let pref = self.pref_col;
+            self.move_to(ch, select);
+            self.pref_col = pref;
+            return;
+        }
         // (Folded lines are stepped over.)
         let target = self.step_visible(line, delta);
         let byte = self.byte_at_col(target, col);
@@ -531,6 +540,9 @@ impl EditorView {
     }
 
     fn pos_to_char(&self, p: Point) -> usize {
+        if let Some(ch) = self.wrapped_pos(p.y - self.area.y, p.x - self.area.x - self.gutter_width()) {
+            return ch;
+        }
         let line = self.step_visible(self.scroll_y, (p.y - self.area.y).max(0) as isize);
         let col = (self.scroll_x as i32 + p.x - self.area.x - self.gutter_width()).max(0) as usize;
         let byte = self.byte_at_col(line, col);
@@ -688,6 +700,22 @@ impl EditorView {
         self.unfold_around(line);
         let h = self.area.h.max(1);
         let w = (self.area.w - self.gutter_width()).max(1) as usize;
+        let ww = self.wrap_width();
+        if ww > 0 {
+            // (Wrapped: the cursor's row in view; no sideways scrolling.)
+            self.scroll_x = 0;
+            if line < self.scroll_y {
+                self.scroll_y = line;
+            }
+            while self.scroll_y < line && self.screen_place(line, col).0 >= h {
+                let next = self.step_visible(self.scroll_y, 1);
+                if next == self.scroll_y {
+                    break;
+                }
+                self.scroll_y = next;
+            }
+            return;
+        }
         if line < self.scroll_y {
             self.scroll_y = line;
         } else if self.rows_between(self.scroll_y, line) >= h {
@@ -729,136 +757,149 @@ impl EditorView {
             self.scroll_y = self.step_visible(self.scroll_y, 0);
         }
         let shown = self.visible_lines(self.scroll_y, area.h.max(0) as usize);
-        for (row, &li) in shown.iter().enumerate() {
-            let row = row as i32;
-            let y = area.y + row;
-            if gw > 0 {
-                let n = format!("{:>w$} ", li + 1, w = (gw - 1) as usize);
-                c.print(area.x, y, &n, s.editor_gutter);
-                if let Some(sev) = self.diagnostics.iter().filter(|d| d.line == li).map(|d| d.severity).min() {
-                    let color = if sev == 1 { s.diag_error } else if sev == 2 { s.diag_warning } else { s.editor_gutter.fg };
-                    c.print(area.x + gw - 1, y, "■", s.editor_gutter.fg(color));
-                } else if self.folds.contains_key(&li) {
-                    c.print(area.x + gw - 1, y, "▸", s.editor_gutter);
-                } else if self.foldable(li).is_some() {
-                    c.print(area.x + gw - 1, y, "▾", s.editor_gutter);
+        let wrap_w = self.wrap_width();
+        let mut row: i32 = 0;
+        for &li in shown.iter() {
+            let nrows = if wrap_w > 0 { self.line_rows(li, wrap_w) } else { 1 };
+            for sub in 0..nrows {
+                if row >= area.h {
+                    break;
                 }
-            }
-            let text = self.doc.line(li);
-            let line_start = self.doc.rope.line_to_char(li);
-            let (placed, total) = self.layout_line(li, &text);
-            // Borland's bars: the execution line, else a breakpoint line.
-            let bar = if self.exec_line == Some(li) {
-                Some(s.exec_bar)
-            } else if self.breakpoints.contains(&li) {
-                Some(s.breakpoint)
-            } else {
-                match self.line_bg.get(li) {
-                    Some(1) => Some(s.diff_add),
-                    Some(2) => Some(s.diff_del),
-                    Some(3) => Some(s.diff_hunk),
-                    _ => None,
+                let y = area.y + row;
+                row += 1;
+                // (Wrapped: each row shows its own stretch of the line.)
+                let sx = if wrap_w > 0 { sub * wrap_w } else { self.scroll_x };
+                if gw > 0 && sub == 0 {
+                    let n = format!("{:>w$} ", li + 1, w = (gw - 1) as usize);
+                    c.print(area.x, y, &n, s.editor_gutter);
+                    if let Some(sev) = self.diagnostics.iter().filter(|d| d.line == li).map(|d| d.severity).min() {
+                        let color = if sev == 1 { s.diag_error } else if sev == 2 { s.diag_warning } else { s.editor_gutter.fg };
+                        c.print(area.x + gw - 1, y, "■", s.editor_gutter.fg(color));
+                    } else if self.folds.contains_key(&li) {
+                        c.print(area.x + gw - 1, y, "▸", s.editor_gutter);
+                    } else if self.foldable(li).is_some() {
+                        c.print(area.x + gw - 1, y, "▾", s.editor_gutter);
+                    }
                 }
-            };
-            let diff_line = bar.is_some() && self.exec_line != Some(li) && !self.breakpoints.contains(&li);
-            if let Some(b) = bar {
-                c.fill(Rect::new(text_x, y, area.w - gw, 1), " ", b);
-            }
-            let mut tc = c.sub(Rect::new(text_x, y, area.w - gw, 1));
-            for p in &placed {
-                let x = text_x + p.col as i32 - self.scroll_x as i32;
-                if x + p.width as i32 <= text_x || x >= area.right() {
-                    continue;
-                }
-                let ch = line_start + p.char_off;
-                let selected = sel.is_some_and(|(a, b)| ch >= a && ch < b)
-                    || self.block.iter().any(|&(a, b)| ch >= a && ch < b)
-                    || (!self.cursors.is_empty() && self.in_extra_selection(ch));
-                // (Find's matches: the current one, then the others.)
-                let found = if self.found.is_empty() {
-                    None
+                let text = self.doc.line(li);
+                let line_start = self.doc.rope.line_to_char(li);
+                let (placed, total) = self.layout_line(li, &text);
+                // Borland's bars: the execution line, else a breakpoint line.
+                let bar = if self.exec_line == Some(li) {
+                    Some(s.exec_bar)
+                } else if self.breakpoints.contains(&li) {
+                    Some(s.breakpoint)
                 } else {
-                    let k = self.found.partition_point(|&(_, e)| e <= ch);
-                    self.found.get(k).filter(|&&(a, _)| a <= ch).map(|_| self.found_current == Some(k))
+                    match self.line_bg.get(li) {
+                        Some(1) => Some(s.diff_add),
+                        Some(2) => Some(s.diff_del),
+                        Some(3) => Some(s.diff_hunk),
+                        _ => None,
+                    }
                 };
-                let st = if selected {
-                    s.editor_selection
-                } else if let Some(cur) = found {
-                    if cur { s.find_current } else { s.find_match }
-                } else if let Some(b) = bar.filter(|_| !diff_line) {
-                    b
-                } else if diff_line && self.words.get(li).is_some_and(|w| w.iter().any(|(a, b)| (*a as usize) <= p.offset && p.offset < *b as usize)) {
-                    // (A diff's changed words stand out.)
-                    if self.line_bg.get(li) == Some(&2) { s.diff_del_word } else { s.diff_add_word }
-                } else {
-                    // (The language server's meaning first, then tree-sitter's.)
-                    let find = |spans: Option<&Vec<(u32, u32, u8)>>| {
-                        spans.and_then(|spans| spans.iter().rev().find(|(a, b, _)| (*a as usize) <= p.offset && p.offset < *b as usize)).map(|&(_, _, k)| k as usize)
+                let diff_line = bar.is_some() && self.exec_line != Some(li) && !self.breakpoints.contains(&li);
+                if let Some(b) = bar {
+                    c.fill(Rect::new(text_x, y, area.w - gw, 1), " ", b);
+                }
+                let mut tc = c.sub(Rect::new(text_x, y, area.w - gw, 1));
+                for p in &placed {
+                    if wrap_w > 0 && (p.col < sx || p.col >= sx + wrap_w) {
+                        continue;
+                    }
+                    let x = text_x + p.col as i32 - sx as i32;
+                    if x + p.width as i32 <= text_x || x >= area.right() {
+                        continue;
+                    }
+                    let ch = line_start + p.char_off;
+                    let selected = sel.is_some_and(|(a, b)| ch >= a && ch < b)
+                        || self.block.iter().any(|&(a, b)| ch >= a && ch < b)
+                        || (!self.cursors.is_empty() && self.in_extra_selection(ch));
+                    // (Find's matches: the current one, then the others.)
+                    let found = if self.found.is_empty() {
+                        None
+                    } else {
+                        let k = self.found.partition_point(|&(_, e)| e <= ch);
+                        self.found.get(k).filter(|&&(a, _)| a <= ch).map(|_| self.found_current == Some(k))
                     };
-                    let semantic = if self.semantic_version == self.doc.version { find(self.semantic.get(li)) } else { None };
-                    let kind = semantic.or_else(|| find(self.highlights.get(li)));
-                    match kind {
-                        Some(k) => {
-                            let mut st = s.editor;
-                            if let Some(Some(c)) = s.syntax.get(k) {
-                                st.fg = *c;
+                    let st = if selected {
+                        s.editor_selection
+                    } else if let Some(cur) = found {
+                        if cur { s.find_current } else { s.find_match }
+                    } else if let Some(b) = bar.filter(|_| !diff_line) {
+                        b
+                    } else if diff_line && self.words.get(li).is_some_and(|w| w.iter().any(|(a, b)| (*a as usize) <= p.offset && p.offset < *b as usize)) {
+                        // (A diff's changed words stand out.)
+                        if self.line_bg.get(li) == Some(&2) { s.diff_del_word } else { s.diff_add_word }
+                    } else {
+                        // (The language server's meaning first, then tree-sitter's.)
+                        let find = |spans: Option<&Vec<(u32, u32, u8)>>| {
+                            spans.and_then(|spans| spans.iter().rev().find(|(a, b, _)| (*a as usize) <= p.offset && p.offset < *b as usize)).map(|&(_, _, k)| k as usize)
+                        };
+                        let semantic = if self.semantic_version == self.doc.version { find(self.semantic.get(li)) } else { None };
+                        let kind = semantic.or_else(|| find(self.highlights.get(li)));
+                        match kind {
+                            Some(k) => {
+                                let mut st = s.editor;
+                                if let Some(Some(c)) = s.syntax.get(k) {
+                                    st.fg = *c;
+                                }
+                                if k == 0 && s.bold_keywords {
+                                    st.attrs.bold = true;
+                                }
+                                st
                             }
-                            if k == 0 && s.bold_keywords {
-                                st.attrs.bold = true;
+                            None => s.editor,
+                        }
+                    };
+                    // (A diff's line: its colour behind the syntax colours.)
+                    let st = match bar {
+                        Some(b) if diff_line && !selected && found.is_none() && st.bg == s.editor.bg => Style { bg: b.bg, fg: if st.fg == s.editor.fg { b.fg } else { st.fg }, ..st },
+                        _ => st,
+                    };
+                    let st = match self.diagnostics.iter().filter(|d| d.line == li).find(|d| {
+                        p.offset >= d.start && (p.offset < d.end || (d.end <= d.start && p.offset == d.start))
+                    }) {
+                        Some(d) if !selected => {
+                            let mut st = st;
+                            st.attrs.underline = true;
+                            match d.severity {
+                                1 => st.fg = s.diag_error,
+                                2 => st.fg = s.diag_warning,
+                                _ => {}
                             }
                             st
                         }
-                        None => s.editor,
+                        _ => st,
+                    };
+                    let g = &text[p.offset..p.offset + p.len];
+                    if g == "\t" {
+                        tc.fill(Rect::new(x, y, p.width as i32, 1), " ", st);
+                    } else {
+                        tc.print(x, y, g, st);
                     }
-                };
-                // (A diff's line: its colour behind the syntax colours.)
-                let st = match bar {
-                    Some(b) if diff_line && !selected && found.is_none() && st.bg == s.editor.bg => Style { bg: b.bg, fg: if st.fg == s.editor.fg { b.fg } else { st.fg }, ..st },
-                    _ => st,
-                };
-                let st = match self.diagnostics.iter().filter(|d| d.line == li).find(|d| {
-                    p.offset >= d.start && (p.offset < d.end || (d.end <= d.start && p.offset == d.start))
-                }) {
-                    Some(d) if !selected => {
-                        let mut st = st;
-                        st.attrs.underline = true;
-                        match d.severity {
-                            1 => st.fg = s.diag_error,
-                            2 => st.fg = s.diag_warning,
-                            _ => {}
-                        }
-                        st
-                    }
-                    _ => st,
-                };
-                let g = &text[p.offset..p.offset + p.len];
-                if g == "\t" {
-                    tc.fill(Rect::new(x, y, p.width as i32, 1), " ", st);
-                } else {
-                    tc.print(x, y, g, st);
                 }
-            }
-            // Inlay hints (types, parameter names) in their places, dimmed.
-            for (b, t) in self.line_inlays(li) {
-                let x = text_x + self.col_of(li, *b) as i32 - self.scroll_x as i32;
-                tc.print(x, y, t, s.editor_ghost);
-            }
-            // A folded line ends in ⋯ (what's hidden).
-            if self.folds.contains_key(&li) {
-                let x = text_x + total as i32 - self.scroll_x as i32;
-                tc.print(x + 1, y, "⋯", s.editor_ghost);
-            }
-            // Selected newline shows as one highlighted cell.
-            let eol = line_start + text.chars().count();
-            if sel.is_some_and(|(a, b)| eol >= a && eol < b) {
-                let x = text_x + total as i32 - self.scroll_x as i32;
-                tc.print(x, y, " ", s.editor_selection);
-            }
-            if li == cur_line {
-                if let Some(g) = &self.ghost {
-                    let first = g.lines().next().unwrap_or("");
-                    let x = text_x + cur_col as i32 - self.scroll_x as i32;
-                    tc.print(x, y, first, s.editor_ghost);
+                // Inlay hints (types, parameter names) in their places, dimmed.
+                for (b, t) in self.line_inlays(li) {
+                    let x = text_x + self.col_of(li, *b) as i32 - sx as i32;
+                    tc.print(x, y, t, s.editor_ghost);
+                }
+                // A folded line ends in ⋯ (what's hidden).
+                if self.folds.contains_key(&li) {
+                    let x = text_x + total as i32 - sx as i32;
+                    tc.print(x + 1, y, "⋯", s.editor_ghost);
+                }
+                // Selected newline shows as one highlighted cell.
+                let eol = line_start + text.chars().count();
+                if sel.is_some_and(|(a, b)| eol >= a && eol < b) {
+                    let x = text_x + total as i32 - sx as i32;
+                    tc.print(x, y, " ", s.editor_selection);
+                }
+                if li == cur_line {
+                    if let Some(g) = &self.ghost {
+                        let first = g.lines().next().unwrap_or("");
+                        let x = text_x + cur_col as i32 - sx as i32;
+                        tc.print(x, y, first, s.editor_ghost);
+                    }
                 }
             }
         }
@@ -868,11 +909,11 @@ impl EditorView {
             if self.hidden(l) || l < self.scroll_y {
                 continue;
             }
-            let row = self.rows_between(self.scroll_y, l);
+            let (row, cx) = self.screen_place(l, self.col_of(l, b));
             if row >= area.h {
                 continue;
             }
-            let x = text_x + self.col_of(l, b) as i32 - self.scroll_x as i32;
+            let x = text_x + cx as i32;
             if x >= text_x && x < area.right() {
                 let st = Style { fg: s.editor.bg, bg: s.editor.fg, ..s.editor };
                 let t = self.doc.line(l);
@@ -881,8 +922,9 @@ impl EditorView {
             }
         }
         if focused {
-            let x = text_x + cur_col as i32 - self.scroll_x as i32;
-            let y = area.y + if self.hidden(cur_line) { -1 } else { self.rows_between(self.scroll_y, cur_line) };
+            let (crow, cx) = self.screen_place(cur_line, cur_col);
+            let x = text_x + cx as i32;
+            let y = area.y + if self.hidden(cur_line) { -1 } else { crow };
             let shape = self.cursor_shape.unwrap_or(if self.overwrite { CursorShape::Block } else { CursorShape::Underline });
             c.set_cursor(Point::new(x, y), shape);
         }

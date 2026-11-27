@@ -79,6 +79,13 @@ impl EditorView {
 
     /// Rows on screen from line `a` down to line `b` (visible lines in a..b).
     pub(super) fn rows_between(&self, a: usize, b: usize) -> i32 {
+        let w = self.wrap_width();
+        if w > 0 {
+            if b < a {
+                return -self.rows_between(b, a);
+            }
+            return (a..b).filter(|&l| !self.hidden(l)).map(|l| self.line_rows(l, w) as i32).sum();
+        }
         if self.folds.is_empty() {
             return b as i32 - a as i32;
         }

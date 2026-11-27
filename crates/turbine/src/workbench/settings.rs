@@ -31,6 +31,7 @@ const DEFS: &[Def] = &[
     Def { key: "line_numbers", category: "Editor", label: "Line numbers", description: "Number the lines in editors (QBasic and Edit never did).", kind: Kind::Bool },
     Def { key: "keymap", category: "Editor", label: "Keymap", description: "CUA keys (DOS and Windows style) or Vim.", kind: Kind::Choice },
     Def { key: "tab_complete", category: "Editor", label: "AI tab completion", description: "Grey suggestions from the AI model as you type; Tab takes one.", kind: Kind::Bool },
+    Def { key: "word_wrap", category: "Editor", label: "Word wrap", description: "Long lines wrap at the window's edge instead of running off it (Alt+Z).", kind: Kind::Bool },
     Def { key: "inlay_hints", category: "Editor", label: "Inlay hints", description: "Grey types and parameter names the language server adds between the words (they aren't in the file).", kind: Kind::Bool },
     Def { key: "semantic", category: "Editor", label: "Semantic highlighting", description: "Colour words by what the language server knows they are (a type, a function), over the syntax colours.", kind: Kind::Bool },
     Def { key: "sidebar", category: "Layout", label: "Primary side bar", description: "The Explorer, Outline, Search, Source Control, Run and Debug and Extensions at the left (Ctrl+B).", kind: Kind::Bool },
@@ -61,6 +62,7 @@ impl Workbench {
             "keymap" => self.keymap.name().to_string(),
             "tab_complete" => b(self.tab_complete),
             "inlay_hints" => b(!self.lspx.inlays_off),
+            "word_wrap" => b(self.shell.word_wrap),
             "semantic" => b(!self.lspx.semantic_off),
             "sidebar" => b(self.shell.dock.left.visible),
             "panel" => b(self.shell.dock.bottom.visible),
@@ -114,6 +116,12 @@ impl Workbench {
             }
             "keymap" => self.set_keymap(if value == Keymap::Vim.name() { Keymap::Vim } else { Keymap::Cua }),
             "tab_complete" => self.tab_complete = on,
+            "word_wrap" => {
+                self.shell.word_wrap = on;
+                for w in self.windows.iter_mut().filter(|w| w.term.is_none() && w.dock.is_none() && w.special.is_none()) {
+                    w.ed.wrap = on;
+                }
+            }
             "inlay_hints" => {
                 self.lspx.inlays_off = !on;
                 for w in &mut self.windows {
@@ -153,6 +161,7 @@ impl Workbench {
             "tab_complete": self.tab_complete,
             "watches": self.dbx.watches,
             "recent_files": self.extras.recent,
+            "word_wrap": self.shell.word_wrap,
             "inlay_hints": !self.lspx.inlays_off,
             "semantic": !self.lspx.semantic_off,
             "hidden_files": self.shell.explorer.show_hidden,
@@ -172,6 +181,9 @@ impl Workbench {
         }
         if let Some(b) = v["tab_complete"].as_bool() {
             self.tab_complete = b;
+        }
+        if let Some(b) = v["word_wrap"].as_bool() {
+            self.setting_set("word_wrap", if b { "on" } else { "off" });
         }
         if let Some(a) = v["recent_files"].as_array() {
             self.extras.recent = a.iter().filter_map(|x| x.as_str().map(PathBuf::from)).collect();
