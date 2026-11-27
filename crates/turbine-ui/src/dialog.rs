@@ -21,7 +21,9 @@ use turbine_text::unicode::{grapheme_boundaries, str_width};
 pub enum Control {
     /// Text; `id` (may be empty) lets `set_label` change it.
     Label { id: String, text: String },
-    Input { id: String, label: String, value: String, cursor: usize },
+    /// A text field. `fresh`: its text is as it was given, shown
+    /// highlighted, and typing replaces it (as DOS dialogs did).
+    Input { id: String, label: String, value: String, cursor: usize, fresh: bool },
     Button { id: String, label: String, default: bool },
     /// A list; `header` is a column title row; `activates`: Enter and
     /// double-click report Activated (else Enter presses the default button).
@@ -187,7 +189,7 @@ pub fn label(text: &str) -> Item {
 }
 /// A text field; its label (with a `~h~otkey`) beside or above it.
 pub fn input(id: &str, label: &str, value: &str) -> Item {
-    Item::control(Control::Input { id: id.into(), label: label.into(), value: value.into(), cursor: value.len() })
+    Item::control(Control::Input { id: id.into(), label: label.into(), value: value.into(), cursor: value.len(), fresh: !value.is_empty() })
 }
 pub fn button(id: &str, label: &str, default: bool) -> Item {
     Item::control(Control::Button { id: id.into(), label: label.into(), default })
@@ -729,10 +731,11 @@ impl Dialog {
 
     pub fn set_value(&mut self, id: &str, v: &str) {
         for p in &mut self.controls {
-            if let Control::Input { id: i, value, cursor, .. } = &mut p.control {
+            if let Control::Input { id: i, value, cursor, fresh, .. } = &mut p.control {
                 if i == id {
                     *value = v.to_string();
                     *cursor = value.len();
+                    *fresh = !value.is_empty();
                 }
             }
         }
@@ -920,7 +923,24 @@ impl Dialog {
                 Key::Left | Key::Up => self.step_focus(-1),
                 _ => {}
             },
-            Control::Input { id, value, cursor, .. } => {
+            Control::Input { id, value, cursor, fresh, .. } => {
+                // Highlighted text: typing (or Backspace, Delete) replaces
+                // it; moving the cursor keeps it.
+                if std::mem::take(fresh) {
+                    match ev.key {
+                        Key::Char(_) if !ev.mods.ctrl && !ev.mods.alt => {
+                            value.clear();
+                            *cursor = 0;
+                        }
+                        Key::Backspace | Key::Delete => {
+                            value.clear();
+                            *cursor = 0;
+                            return DialogResult::Changed(id.clone());
+                        }
+                        Key::Enter | Key::Tab | Key::BackTab | Key::Esc | Key::Up | Key::Down => *fresh = true,
+                        _ => {}
+                    }
+                }
                 let b = grapheme_boundaries(value);
                 let before = value.clone();
                 match ev.key {
@@ -1036,7 +1056,11 @@ impl Dialog {
     }
 
     pub fn handle_paste(&mut self, text: &str) -> DialogResult {
-        if let Control::Input { id, value, cursor, .. } = &mut self.controls[self.focus].control {
+        if let Control::Input { id, value, cursor, fresh, .. } = &mut self.controls[self.focus].control {
+            if std::mem::take(fresh) {
+                value.clear();
+                *cursor = 0;
+            }
             let t: String = text.chars().filter(|c| !c.is_control()).collect();
             value.insert_str(*cursor, &t);
             *cursor += t.len();
@@ -1196,7 +1220,8 @@ impl Dialog {
                     }
                     return DialogResult::None;
                 }
-                Control::Input { value, cursor, .. } => {
+                Control::Input { value, cursor, fresh, .. } => {
+                    *fresh = false;
                     let pad = if self.boxed.get(i).copied().flatten().is_some() { 0 } else { 1 };
                     let col = (ev.pos.x - ir.x - pad).max(0) as usize;
                     let mut w = 0;
@@ -1317,7 +1342,8 @@ impl Dialog {
                         c.print_hot(cr.x + 1, cr.y, title, s.dialog, s.label_hotkey);
                     }
                 }
-                Control::Input { label, value, cursor, .. } => {
+                Control::Input { label, value, cursor, fresh, .. } => {
+                    let fresh = *fresh && focused && !value.is_empty();
                     let boxed = self.boxed[i].is_some();
                     if !label.is_empty() {
                         // (Boxed: the label beside the field, as in QBasic.)
@@ -1333,7 +1359,7 @@ impl Dialog {
                     let before = str_width(&value[..*cursor]) as i32;
                     let skip = (before - cr.w + 2).max(0);
                     let mut sub = c.sub(field);
-                    sub.print(cr.x - skip + 1, cr.y, value, s.input);
+                    sub.print(cr.x - skip + 1, cr.y, value, if fresh { s.menu_selected } else { s.input });
                     if focused {
                         sub.set_cursor(Point::new(cr.x + 1 + before - skip, cr.y), CursorShape::Underline);
                     }
@@ -1652,6 +1678,21 @@ mod tests {
         d.handle_mouse(&m(MouseKind::Up(Button::Left), corner));
         d.layout(Rect::new(0, 0, 100, 40), &theme);
         assert_eq!((d.rect.w, d.rect.h), (r.w + 10, r.h + 5));
+    }
+
+    #[test]
+    fn a_given_value_is_replaced_by_typing_or_kept_by_moving() {
+        let mk = || Dialog::new("t", "T").body(input("name", "Name:", "old.txt")).buttons(vec![button("ok", "OK", true)]);
+        let mut d = mk();
+        d.handle_key(&KeyEvent::plain(Key::Char('n')));
+        assert_eq!(d.value("name").as_deref(), Some("n"));
+        let mut d = mk();
+        d.handle_key(&KeyEvent::plain(Key::End));
+        d.handle_key(&KeyEvent::plain(Key::Char('x')));
+        assert_eq!(d.value("name").as_deref(), Some("old.txtx"));
+        let mut d = mk();
+        d.handle_key(&KeyEvent::plain(Key::Backspace));
+        assert_eq!(d.value("name").as_deref(), Some(""));
     }
 
     #[test]

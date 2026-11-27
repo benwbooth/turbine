@@ -10,6 +10,7 @@ use turbine_ui::list::ListView;
 use turbine_ui::theme::vga;
 use turbine_ui::Canvas;
 
+mod explorer_ops;
 mod find;
 mod shell;
 use find::FindBar;
@@ -250,6 +251,8 @@ pub struct Workbench {
     shell: Shell,
     /// Find and Replace in the editor.
     find: FindBar,
+    /// The Explorer's file operations and right-click menu.
+    ex: explorer_ops::ExOps,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -540,6 +543,7 @@ impl Workbench {
             look_path: None,
             shell: Shell::new(shell::project_of(files), !files.is_empty()),
             find: FindBar::default(),
+            ex: explorer_ops::ExOps::default(),
         };
         for f in files {
             // (A folder is the project: the Explorer shows it.)
@@ -2405,6 +2409,9 @@ impl Workbench {
             return;
         }
         let kind = d.kind.clone();
+        if self.ex_dialog_done(&kind, &d) {
+            return;
+        }
         if kind == "agent" {
             let t = d.value("task").unwrap_or_default();
             if !t.trim().is_empty() {
@@ -3221,6 +3228,7 @@ impl Workbench {
         }
         root = self.shell_nodes(root);
         root = self.find_nodes(root);
+        root = self.ex_nodes(root);
         if let Some(d) = &self.dialog {
             root = root.child(d.automation_node());
         }
@@ -3479,6 +3487,7 @@ impl App for Workbench {
         // now, not only when the screen is drawn.)
         self.layout_dock();
         self.update_views();
+        self.ex_poll();
         self.layout_dialogs();
         let mut any_term = false;
         for w in &mut self.windows {
@@ -3686,6 +3695,7 @@ impl App for Workbench {
                 comp.popup.draw(&mut c, at, desk, &theme);
             }
         }
+        self.draw_ex(&mut c, &theme);
         self.draw_find(&mut c, &theme);
         self.draw_palette(&mut c, &theme);
         self.layout_dialogs();
@@ -4236,6 +4246,54 @@ mod tests {
         let mut wb3 = Workbench::new(&[dir.clone()]);
         wb3.set_look_path(look);
         assert_eq!(wb3.shell.explorer.root, dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn explorer_creates_renames_and_trashes_files() {
+        let (dir, mut wb) = project("exops");
+        // (A trash of the test's own: never the real one.)
+        let trash = dir.join(".test-trash");
+        // SAFETY: tests that read TURBINE_TRASH all set it to their own folder first.
+        unsafe { std::env::set_var("TURBINE_TRASH", &trash) };
+        wait_until(&mut wb, "the listing", |wb| wb.shell.explorer.list.rows.len() >= 3);
+        keys(&mut wb, &["Ctrl+Shift+E"]);
+        // The header's New File button (the project row), a name, OK: it
+        // exists and opens.
+        let r = run(&mut wb, json!({"cmd": "click", "target": "explorer.new_file"}));
+        assert_eq!(r["ok"], true, "{r}");
+        run(&mut wb, json!({"cmd": "type", "text": "new.txt"}));
+        keys(&mut wb, &["Enter"]);
+        wait_until(&mut wb, "the new file", |wb| title(wb) == "new.txt");
+        assert!(dir.join("new.txt").is_file());
+        // A folder from the right-click menu.
+        keys(&mut wb, &["Ctrl+Shift+E", "Home", "Shift+F10"]);
+        assert!(wb.ex.menu.is_some());
+        run(&mut wb, json!({"cmd": "click", "target": "menuitem:New Folder"}));
+        run(&mut wb, json!({"cmd": "type", "text": "docs"}));
+        keys(&mut wb, &["Enter"]);
+        wait_until(&mut wb, "the new folder", |_| dir.join("docs").is_dir());
+        // Rename new.txt (F2): the open editor follows the file.
+        wait_until(&mut wb, "new.txt listed", |wb| wb.shell.explorer.list.rows.iter().any(|r| r.text == "new.txt"));
+        let i = wb.shell.explorer.list.rows.iter().position(|r| r.text == "new.txt").unwrap();
+        wb.shell.explorer.list.select(i);
+        // (The old name is highlighted: typing replaces it.)
+        keys(&mut wb, &["Ctrl+Shift+E", "F2"]);
+        run(&mut wb, json!({"cmd": "type", "text": "renamed.txt"}));
+        keys(&mut wb, &["Enter"]);
+        wait_until(&mut wb, "the rename", |_| dir.join("renamed.txt").is_file());
+        wait_until(&mut wb, "the editor's path", |wb| wb.windows.iter().any(|w| w.ed.doc.path.as_deref() == Some(&dir.join("renamed.txt"))));
+        // Delete: asks, then moves it to the trash (with its .trashinfo).
+        wait_until(&mut wb, "renamed.txt listed", |wb| wb.shell.explorer.list.rows.iter().any(|r| r.text == "renamed.txt"));
+        let i = wb.shell.explorer.list.rows.iter().position(|r| r.text == "renamed.txt").unwrap();
+        wb.shell.explorer.list.select(i);
+        keys(&mut wb, &["Ctrl+Shift+E", "Delete"]);
+        assert_eq!(wb.dialog.as_ref().map(|d| d.title.as_str()), Some("Delete"));
+        keys(&mut wb, &["Enter"]);
+        wait_until(&mut wb, "the trash", |_| trash.join("files/renamed.txt").is_file());
+        assert!(!dir.join("renamed.txt").exists());
+        let info = std::fs::read_to_string(trash.join("info/renamed.txt.trashinfo")).unwrap();
+        assert!(info.contains("Path=") && info.contains("renamed.txt"), "{info}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

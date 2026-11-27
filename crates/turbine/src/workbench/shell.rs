@@ -658,6 +658,9 @@ impl Workbench {
             self.palette_key(k);
             return true;
         }
+        if self.ex_key(k) {
+            return true;
+        }
         let cmd = if k.is_ctrl('f') && !k.mods.shift && !vim_editor && !self.windows.last().is_some_and(|w| w.is_terminal() && self.shell.focus == Focus::Editors) {
             Some("search.find")
         } else if k.is_ctrl('h') && !k.mods.shift && !vim_editor && self.shell.focus == Focus::Editors && self.windows.last().is_some_and(|w| w.dock.is_none()) {
@@ -871,6 +874,9 @@ impl Workbench {
                 ListOut::Activated(i) | ListOut::Selected(i) if matches!(m.kind, MouseKind::Down(_)) => self.palette_pick(i),
                 _ => {}
             }
+            return true;
+        }
+        if self.ex_mouse(m) {
             return true;
         }
         let l = self.layout();

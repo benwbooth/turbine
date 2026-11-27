@@ -85,9 +85,29 @@ impl ListPopup {
         }
     }
 
+    /// Where it goes: below `at` (or above when there's no room), inside
+    /// `screen`. (Draw does this too; call it first when clicks or agents
+    /// need the place before a draw.)
+    pub fn place(&mut self, at: Point, screen: Rect) -> usize {
+        let room_below = screen.bottom() - (at.y + 1) - 2;
+        let room_above = at.y - screen.y - 2;
+        let below = room_below >= self.items.len().min(self.max_rows) as i32 || room_below >= room_above;
+        let room = if below { room_below } else { room_above }.max(1);
+        let rows = (self.items.len().min(self.max_rows) as i32).min(room);
+        let label_w = self.items.iter().map(|(l, _)| str_width(l)).max().unwrap_or(0) as i32;
+        let detail_w = self.items.iter().map(|(_, d)| str_width(d)).max().unwrap_or(0).min(30) as i32;
+        let w = (label_w + if detail_w > 0 { detail_w + 2 } else { 0 } + 4).clamp(12, screen.w - 2);
+        let h = rows + 2;
+        let y = if below { at.y + 1 } else { (at.y - h).max(screen.y) };
+        let x = (at.x - 1).min(screen.right() - w - 2).max(screen.x);
+        self.rect = Rect::new(x, y, w, h);
+        rows as usize
+    }
+
     /// Draw below `at` (or above it when there's no room), inside `screen`.
     pub fn draw(&mut self, c: &mut Canvas, at: Point, screen: Rect, theme: &Theme) {
         let s = &theme.scheme;
+        self.place(at, screen);
         // The side with more room, and only as many rows as fit there.
         let room_below = screen.bottom() - (at.y + 1) - 2;
         let room_above = at.y - screen.y - 2;

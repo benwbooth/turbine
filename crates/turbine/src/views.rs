@@ -211,6 +211,21 @@ impl Explorer {
         self.paths.get(i)
     }
 
+    /// Read every open folder again (after files changed).
+    pub fn refresh_all(&mut self) {
+        self.refreshed = Instant::now();
+        for d in self.expanded.clone() {
+            self.request(&d);
+        }
+    }
+
+    /// Close every folder.
+    pub fn collapse_all(&mut self) {
+        self.expanded = HashSet::from([self.root.clone()]);
+        self.rebuild();
+        self.list.select(0);
+    }
+
     /// Open or close a folder.
     pub fn toggle(&mut self, dir: &Path) {
         if dir == self.root {
