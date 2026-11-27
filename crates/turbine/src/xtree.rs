@@ -720,6 +720,7 @@ impl XTree {
                 }
                 let name = if *depth == 0 { p.display().to_string() } else { p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() };
                 let x = c.print(self.tree_rect.x + 1, y, &prefix, f);
+                let x = c.print(x, y, &format!("{} ", crate::filetypes::icon(&name, true, self.expanded.contains(p))), colour::tagged());
                 let st = if i == self.tree_sel { if focused && !self.in_files { colour::bar() } else { colour::bar_off() } } else { colour::text() };
                 c.print(x, y, &name, st);
             }
@@ -748,11 +749,19 @@ impl XTree {
             let p = dir.join(&e.name);
             let tagged = self.tagged.contains(&p);
             let mark = if tagged { "♦" } else { " " };
-            let mut name: String = e.name.chars().take(colw - 3).collect();
+            // (Its type's icon and colour, as the Explorer shows them.)
+            let shown = format!("{} {}", crate::filetypes::icon(&e.name, false, false), e.name);
+            let mut name: String = shown.chars().take(colw - 3).collect();
             if str_width(&name) < colw - 3 {
                 name.push_str(&" ".repeat(colw - 3 - str_width(&name)));
             }
-            let st = if k == self.file_sel && (self.in_files || self.files_full) { if focused { colour::bar() } else { colour::bar_off() } } else if tagged { colour::tagged() } else { colour::text() };
+            let st = if k == self.file_sel && (self.in_files || self.files_full) {
+                if focused { colour::bar() } else { colour::bar_off() }
+            } else if tagged {
+                colour::tagged()
+            } else {
+                Style::new(crate::filetypes::colour(&e.name, false), vga::BLUE)
+            };
             c.print(x, y, &name, st);
             c.print(x + colw as i32 - 3, y, mark, colour::tagged());
         }
