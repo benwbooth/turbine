@@ -57,6 +57,8 @@ pub(super) struct Shell {
     /// The breadcrumbs from the last layout: their places, labels and where
     /// each goes.
     pub crumbs: Vec<(Rect, String, Crumb)>,
+    /// Editors show a minimap (None: as the control style says).
+    pub minimap: Option<bool>,
 }
 
 /// Where a breadcrumb goes.
@@ -90,6 +92,7 @@ impl Shell {
             split_pending: None,
             mirrored: HashMap::new(),
             crumbs: Vec::new(),
+            minimap: None,
         }
     }
 }
@@ -166,6 +169,11 @@ impl Workbench {
             }
         }
         self.shell.dock.icons = self.theme.style.icons;
+        // (Minimaps in every editor, as set or as the style has it.)
+        let mm = self.shell.minimap.unwrap_or(self.theme.style.icons);
+        for w in self.windows.iter_mut().filter(|w| w.dock.is_none() && w.term.is_none()) {
+            w.ed.minimap = mm && w.special.is_none();
+        }
         let l = self.layout();
         self.layout_editor_tabs(&l);
         self.layout_crumbs(&l);
@@ -774,7 +782,7 @@ impl Workbench {
     pub(super) fn layout_json(&self) -> Value {
         let d = &self.shell.dock;
         let part = |p: &crate::dock::Part| json!({"visible": p.visible, "size": p.size, "active": p.current().filter(|t| !matches!(t, Tab::Pane(_))).map(|t| t.key())});
-        json!({"left": part(&d.left), "bottom": part(&d.bottom), "right": part(&d.right), "editor_tabs": d.editor_tabs, "breadcrumbs": d.breadcrumbs})
+        json!({"left": part(&d.left), "bottom": part(&d.bottom), "right": part(&d.right), "editor_tabs": d.editor_tabs, "breadcrumbs": d.breadcrumbs, "minimap": self.shell.minimap})
     }
 
     pub(super) fn apply_layout_json(&mut self, v: &Value) {
@@ -802,6 +810,7 @@ impl Workbench {
         if let Some(b) = v["breadcrumbs"].as_bool() {
             self.shell.dock.breadcrumbs = b;
         }
+        self.shell.minimap = v["minimap"].as_bool();
     }
 
     // ---- commands -------------------------------------------------------------------------
@@ -848,6 +857,7 @@ impl Workbench {
             "view.secondary" => self.toggle_part(Side::Right),
             "view.editor_tabs" => self.shell.dock.editor_tabs = !self.shell.dock.editor_tabs,
             "view.breadcrumbs" => self.shell.dock.breadcrumbs = !self.shell.dock.breadcrumbs,
+            "view.minimap" => self.shell.minimap = Some(!self.shell.minimap.unwrap_or(self.theme.style.icons)),
             "ai.chat" => self.show_chat(),
             "view.focus_editor" => self.focus_editor(),
             "view.split" => self.toggle_split(),

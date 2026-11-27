@@ -375,6 +375,7 @@ fn menus() -> Vec<Menu> {
                 it("Split Edi~t~or", "Ctrl+\\", "view.split"),
                 it("Editor Ta~b~s", "", "view.editor_tabs"),
                 it("Brea~d~crumbs", "", "view.breadcrumbs"),
+                it("~M~inimap", "", "view.minimap"),
                 it("Reset La~y~out", "", "view.reset_layout"),
                 sep(),
                 it("~L~ine Numbers", "", "view.line_numbers"),
@@ -1985,6 +1986,7 @@ impl Workbench {
                     "view.secondary" => it.checked = Some(self.shell.dock.right.visible),
                     "view.editor_tabs" => it.checked = Some(self.shell.dock.editor_tabs),
                     "view.breadcrumbs" => it.checked = Some(self.shell.dock.breadcrumbs),
+                    "view.minimap" => it.checked = Some(self.shell.minimap.unwrap_or(self.theme.style.icons)),
                     _ => {}
                 }
             }
@@ -4496,6 +4498,39 @@ mod tests {
         assert_eq!(wb.shell.focus, Focus::View(crate::dock::Tab::Explorer));
         assert!(wb.shell.explorer.expanded.contains(&dir.join("src")));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_wheel_and_the_minimap_scroll_without_jumping_back() {
+        let mut wb = bench();
+        wb.dispatch(Event::Resize(140, 40));
+        let text: String = (0..400).map(|i| format!("fn line_{i}() {{}}\n")).collect();
+        run(&mut wb, json!({"cmd": "type", "text": text}));
+        keys(&mut wb, &["Ctrl+Home"]);
+        let mut surf = Surface::new(140, 40);
+        wb.render(&mut surf);
+        let i = wb.editor_index().unwrap();
+        let mr = wb.windows[i].ed.minimap_rect().expect("a minimap in a wide editor");
+        // The wheel scrolls, and the next draw doesn't jump back to the cursor.
+        let inner = wb.windows[i].win.inner();
+        let wheel = MouseEvent { kind: MouseKind::ScrollDown, pos: Point::new(inner.x + 5, inner.y + 5), mods: Mods::NONE };
+        wb.dispatch(Event::Mouse(wheel));
+        wb.render(&mut surf);
+        let i = wb.editor_index().unwrap();
+        assert_eq!(wb.windows[i].ed.scroll_y, 3);
+        // A click near the minimap's bottom: down to the lines shown there
+        // (the minimap shows the stretch around the view), cursor unmoved.
+        let click = |kind| Event::Mouse(MouseEvent { kind, pos: Point::new(mr.x + 2, mr.bottom() - 1), mods: Mods::NONE });
+        wb.dispatch(click(MouseKind::Down(Button::Left)));
+        wb.dispatch(click(MouseKind::Up(Button::Left)));
+        wb.render(&mut surf);
+        let ed = &wb.windows[wb.editor_index().unwrap()].ed;
+        assert!(ed.scroll_y > 40, "{}", ed.scroll_y);
+        assert_eq!(ed.cursor_line_col().0, 0);
+        // View > Minimap turns it off.
+        wb.run_command("view.minimap");
+        wb.render(&mut surf);
+        assert!(wb.windows[wb.editor_index().unwrap()].ed.minimap_rect().is_none());
     }
 
     #[test]

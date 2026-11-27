@@ -51,6 +51,7 @@ private:
     void afterInput();
     QPoint cellAt(QPointF pos) const;
     bool drawShape(QPainter* p, char32_t c, const QRectF& r, const QColor& fg, const QColor& bg);
+    void brailleDots(QPainter* p, const QRectF& r, char32_t c, const QColor& fg);
     void paintVga(QPainter* p);
 
     // The frame to paint, taken on the GUI thread: Turbine's state lives

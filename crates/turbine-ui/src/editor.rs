@@ -55,6 +55,11 @@ pub struct DiagMark {
     pub message: String,
 }
 
+/// The minimap's width in cells (eight chars of text each, as braille
+/// dots), and the lines in each of its rows.
+pub const MINIMAP_W: i32 = 10;
+const MINIMAP_LINES: usize = 4;
+
 #[derive(Debug)]
 pub struct EditorView {
     pub doc: Document,
@@ -89,6 +94,14 @@ pub struct EditorView {
     /// Text area from the last draw, for mouse hit testing.
     area: Rect,
     dragging: bool,
+    /// A minimap at the right (Cursor's), when there's room; where it was
+    /// drawn, and a drag on it.
+    pub minimap: bool,
+    minimap_rect: Option<Rect>,
+    minimap_drag: bool,
+    /// The cursor and text the view last followed: it scrolls to the
+    /// cursor only when one of them changes (so the wheel can scroll away).
+    followed: (usize, u64),
 }
 
 impl EditorView {
@@ -114,6 +127,10 @@ impl EditorView {
             found_current: None,
             area: Rect::default(),
             dragging: false,
+            minimap: false,
+            minimap_rect: None,
+            minimap_drag: false,
+            followed: (usize::MAX, u64::MAX),
         }
     }
 
@@ -435,7 +452,101 @@ impl EditorView {
         self.doc.line_byte_to_char(line, byte)
     }
 
+    /// The first line the minimap shows (it scrolls with the text when the
+    /// file is longer than it can show at two lines a row).
+    fn minimap_top(&self, h: i32) -> usize {
+        let total = self.doc.len_lines();
+        let cap = (h.max(1) as usize) * MINIMAP_LINES;
+        if total <= cap {
+            return 0;
+        }
+        let room = total.saturating_sub(self.area.h.max(1) as usize).max(1);
+        (self.scroll_y.min(room) * (total - cap)) / room
+    }
+
+    /// Scroll so the line under the minimap's row `y` is in the middle.
+    fn minimap_scroll_to(&mut self, y: i32) {
+        let Some(mr) = self.minimap_rect else { return };
+        let line = self.minimap_top(mr.h) + (y - mr.y).clamp(0, mr.h - 1) as usize * MINIMAP_LINES;
+        let h = self.area.h.max(1) as usize;
+        let max = self.doc.len_lines().saturating_sub(h);
+        self.scroll_y = line.saturating_sub(h / 2).min(max);
+    }
+
+    fn draw_minimap(&self, c: &mut Canvas, theme: &Theme) {
+        let Some(mr) = self.minimap_rect else { return };
+        let s = &theme.scheme;
+        let top = self.minimap_top(mr.h);
+        let (vis_a, vis_b) = (self.scroll_y, self.scroll_y + self.area.h.max(1) as usize);
+        // Braille: each cell is 2 dots across by 4 down; a dot is 4 chars of
+        // a line, lit when any of them isn't blank, in the code's colour.
+        const BITS: [[u32; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
+        let total = self.doc.len_lines();
+        for row in 0..mr.h {
+            let first = top + row as usize * MINIMAP_LINES;
+            // The lines in this row: their text, and a colour per dot column.
+            let lines: Vec<Option<(Vec<char>, usize)>> = (0..MINIMAP_LINES)
+                .map(|d| {
+                    let li = first + d;
+                    (li < total).then(|| (self.doc.line(li).chars().collect(), li))
+                })
+                .collect();
+            let in_view = (first..first + MINIMAP_LINES).any(|l| l >= vis_a && l < vis_b && l < total.max(1));
+            // (The view's rows: a cyan band, its dots dark.)
+            let bg = if in_view { s.find_match.bg } else { s.editor.bg };
+            for k in 0..mr.w as usize {
+                let mut bits = 0u32;
+                let mut colour = None;
+                for (dy, line) in lines.iter().enumerate() {
+                    let Some((chars, li)) = line else { continue };
+                    for dx in 0..2 {
+                        let from = (k * 2 + dx) * 4;
+                        let Some(off) = (from..from + 4).find(|&i| chars.get(i).is_some_and(|c| !c.is_whitespace())) else { continue };
+                        bits |= BITS[dx][dy];
+                        if colour.is_none() {
+                            let byte: usize = chars[..off].iter().map(|c| c.len_utf8()).sum();
+                            let kind = self
+                                .highlights
+                                .get(*li)
+                                .and_then(|spans| spans.iter().rev().find(|(a, b, _)| (*a as usize) <= byte && byte < *b as usize))
+                                .map(|&(_, _, k)| k as usize);
+                            colour = Some(kind.and_then(|k| s.syntax.get(k).copied().flatten()).unwrap_or(s.editor.fg));
+                        }
+                    }
+                }
+                let glyph = char::from_u32(0x2800 + bits).unwrap_or(' ').to_string();
+                let fg = if in_view { s.find_match.fg } else { colour.unwrap_or(s.editor.fg) };
+                c.print(mr.x + k as i32, mr.y + row, &glyph, crate::theme::Style::new(fg, bg));
+            }
+        }
+    }
+
     pub fn handle_mouse(&mut self, ev: &MouseEvent) -> bool {
+        // The minimap: a click or drag scrolls there.
+        if let Some(mr) = self.minimap_rect {
+            match ev.kind {
+                MouseKind::Down(Button::Left) if mr.contains(ev.pos) => {
+                    self.minimap_drag = true;
+                    self.minimap_scroll_to(ev.pos.y);
+                    return true;
+                }
+                MouseKind::Drag(Button::Left) if self.minimap_drag => {
+                    self.minimap_scroll_to(ev.pos.y);
+                    return true;
+                }
+                MouseKind::Up(_) if self.minimap_drag => {
+                    self.minimap_drag = false;
+                    return true;
+                }
+                MouseKind::ScrollUp | MouseKind::ScrollDown if mr.contains(ev.pos) => {
+                    let up = ev.kind == MouseKind::ScrollUp;
+                    let max = self.doc.len_lines().saturating_sub(1);
+                    self.scroll_y = if up { self.scroll_y.saturating_sub(6) } else { (self.scroll_y + 6).min(max) };
+                    return true;
+                }
+                _ => {}
+            }
+        }
         match ev.kind {
             MouseKind::Down(Button::Left) if self.area.contains(ev.pos) => {
                 let ch = self.pos_to_char(ev.pos);
@@ -467,6 +578,11 @@ impl EditorView {
         }
     }
 
+    /// The minimap's place (for clicks routed here).
+    pub fn minimap_rect(&self) -> Option<Rect> {
+        self.minimap_rect
+    }
+
     fn gutter_width(&self) -> i32 {
         if self.line_numbers { self.doc.len_lines().to_string().len().max(3) as i32 + 1 } else { 0 }
     }
@@ -491,9 +607,19 @@ impl EditorView {
     /// the frame: right edge and bottom edge, given by `vbar`/`hbar`.
     pub fn draw(&mut self, c: &mut Canvas, area: Rect, theme: &Theme, focused: bool, follow_cursor: bool) {
         let s = &theme.scheme;
+        // The minimap takes the right columns when the editor is wide enough.
+        let full = area;
+        self.minimap_rect = (self.minimap && area.w >= 50).then(|| Rect::new(area.right() - MINIMAP_W, area.y, MINIMAP_W, area.h));
+        let area = if self.minimap_rect.is_some() { Rect::new(area.x, area.y, area.w - MINIMAP_W - 1, area.h) } else { area };
         self.area = area;
-        if follow_cursor {
+        let now = (self.cursor, self.doc.version);
+        if follow_cursor && now != self.followed {
             self.ensure_cursor_visible();
+        }
+        self.followed = now;
+        if let Some(mr) = self.minimap_rect {
+            c.fill(Rect::new(mr.x - 1, full.y, 1, full.h), " ", s.editor);
+            self.draw_minimap(c, theme);
         }
         let gw = self.gutter_width();
         let text_x = area.x + gw;

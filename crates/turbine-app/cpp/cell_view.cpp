@@ -351,8 +351,27 @@ void CellView::wheelEvent(QWheelEvent* e)
     afterInput();
 }
 
+void CellView::brailleDots(QPainter* p, const QRectF& r, char32_t c, const QColor& fg)
+{
+    // Dots 1-8: (column, row) for each bit of the pattern.
+    static const int pos[8][2] = { { 0, 0 }, { 0, 1 }, { 0, 2 }, { 1, 0 }, { 1, 1 }, { 1, 2 }, { 0, 3 }, { 1, 3 } };
+    const unsigned bits = unsigned(c - 0x2800);
+    const qreal dw = std::max<qreal>(1, std::round(r.width() / 4));
+    const qreal dh = std::max<qreal>(1, std::round(r.height() / 8));
+    for (int i = 0; i < 8; ++i) {
+        if (!(bits & (1u << i))) continue;
+        const qreal x = r.x() + std::round(r.width() * (0.25 + 0.5 * pos[i][0])) - dw / 2;
+        const qreal y = r.y() + std::round(r.height() * (0.125 + 0.25 * pos[i][1])) - dh / 2;
+        p->fillRect(QRectF(x, y, dw, dh), fg);
+    }
+}
+
 bool CellView::drawShape(QPainter* p, char32_t c, const QRectF& r, const QColor& fg, const QColor& bg)
 {
+    if (c >= 0x2800 && c <= 0x28FF) {
+        brailleDots(p, r, c, fg);
+        return true;
+    }
     // Blocks and shades.
     switch (c) {
     case 0x2588: p->fillRect(r, fg); return true;                                                  // █
@@ -454,8 +473,15 @@ void CellView::paintVga(QPainter* p)
                         ++x1;
                     }
                 }
-                p->setPen(fg);
-                p->drawText(QPoint(x * gw, y * gh + ascent), run);
+                const char32_t ch = run.size() == 1 ? run.at(0).unicode() : 0;
+                if (ch >= 0x2800 && ch <= 0x28FF) {
+                    // Braille (the minimap): lit dots only, as blocks on the
+                    // VGA grid (fonts draw the unlit ones as circles).
+                    brailleDots(p, QRectF(x * gw, y * gh, gw, gh), ch, fg);
+                } else {
+                    p->setPen(fg);
+                    p->drawText(QPoint(x * gw, y * gh + ascent), run);
+                }
             }
             if (c.flags & 4) p->fillRect(QRect(x * gw, y * gh + 15 * m_k, (x1 - x) * gw, m_k), fg);
             x = x1;
