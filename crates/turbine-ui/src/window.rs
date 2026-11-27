@@ -188,8 +188,11 @@ impl Window {
                 Some(n) => format!("[{n}] {title}"),
                 None => title.to_string(),
             };
-            let mut tc = c.sub(Rect::new(self.rect.x, self.rect.y, (self.rect.w - 5).max(0), 1));
-            tc.print(self.rect.x + 1, self.rect.y, &text, bar);
+            // The control box at the left (■ on grey), the title centred.
+            c.print(self.rect.x, self.rect.y, "■", s.frame_icons);
+            let mut tc = c.sub(Rect::new(self.rect.x + 2, self.rect.y, (self.rect.w - 7).max(0), 1));
+            let tw = turbine_text::unicode::str_width(&text) as i32;
+            tc.print(self.rect.x + ((self.rect.w - tw) / 2).max(2), self.rect.y, &text, bar);
             let x = self.rect.right() - 4;
             c.print(x, self.rect.y, "▼", s.frame_icons);
             c.print(x + 2, self.rect.y, "▲", s.frame_icons);

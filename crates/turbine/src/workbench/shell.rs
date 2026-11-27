@@ -63,10 +63,29 @@ impl Shell {
     }
 }
 
-/// An editor tab's text: the file's name, * when changed.
-fn editor_tab_name(w: &EdWin) -> String {
+/// A file's icon by its type (editor tabs).
+pub(super) fn file_icon(name: &str) -> &'static str {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "rs" => "🦀",
+        "py" | "pyi" => "🐍",
+        "md" | "markdown" | "txt" | "rst" => "📝",
+        "js" | "mjs" | "ts" | "tsx" | "jsx" => "📜",
+        "toml" | "json" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "nix" | "lock" => "📋",
+        "c" | "h" | "cc" | "cpp" | "hpp" | "zig" | "go" | "java" | "cs" | "swift" | "kt" => "🔧",
+        "bas" | "bi" | "pas" => "💾",
+        "sh" | "bash" | "zsh" | "fish" => "🐚",
+        "html" | "css" | "qml" => "🎨",
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "bmp" => "📷",
+        _ => "📄",
+    }
+}
+
+/// An editor tab's text: the file's icon and name, * when changed.
+fn editor_tab_name(w: &EdWin, icons: bool) -> String {
     let name = w.ed.doc.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| w.win.title.clone());
-    format!(" {name}{} ", if w.ed.doc.dirty { "*" } else { "" })
+    let icon = if icons { format!("{} ", file_icon(&name)) } else { String::new() };
+    format!(" {icon}{name}{} ", if w.ed.doc.dirty { "*" } else { "" })
 }
 
 /// The project a file belongs to (its repository or build root), else the
@@ -115,6 +134,7 @@ impl Workbench {
                 self.shell.focus = Focus::Editors;
             }
         }
+        self.shell.dock.icons = self.theme.style.icons;
         let l = self.layout();
         self.layout_editor_tabs(&l);
         // (The views' lists learn their places here too, so keys and agents
@@ -152,13 +172,16 @@ impl Workbench {
         let Some(tr) = l.editor_tabs else { return };
         let mut eds: Vec<&EdWin> = self.windows.iter().filter(|w| w.dock.is_none()).collect();
         eds.sort_by_key(|w| w.win.id);
+        let icons = self.theme.style.icons;
         let mut x = tr.x;
         for w in eds {
-            let wdt = str_width(&editor_tab_name(w)) as i32 + 2;
+            // (Text, ×, and a rounded end or a │.)
+            let wdt = str_width(&editor_tab_name(w, icons)) as i32 + 2 + i32::from(icons);
             if x + wdt > tr.right() {
                 break;
             }
-            self.shell.editor_tab_rects.push((w.win.id, Rect::new(x, tr.y, wdt - 1, 1), Rect::new(x + wdt - 2, tr.y, 1, 1)));
+            let x0 = x + i32::from(icons);
+            self.shell.editor_tab_rects.push((w.win.id, Rect::new(x0, tr.y, wdt - 1 - i32::from(icons), 1), Rect::new(x + wdt - 2, tr.y, 1, 1)));
             x += wdt;
         }
     }
@@ -178,13 +201,31 @@ impl Workbench {
 
     /// A tab's title (the counts on Problems, a docked window's title).
     fn tab_title(&self, t: Tab) -> String {
-        match t {
+        let name = match t {
             Tab::Pane(id) => self.windows.iter().find(|w| w.win.id == id).map(|w| w.win.title.clone()).unwrap_or_default(),
             Tab::Problems if self.shell.problem_count != (0, 0) => {
                 format!("Problems {}", self.shell.problem_count.0 + self.shell.problem_count.1)
             }
             t => t.name().to_string(),
+        };
+        if !self.theme.style.icons {
+            return name;
         }
+        let icon = match t {
+            Tab::Explorer => "📁",
+            Tab::Outline => "🧭",
+            Tab::Search => "🔍",
+            Tab::Scm => "🌿",
+            Tab::Debug => "🐞",
+            Tab::Problems => "❗",
+            Tab::Pane(id) => match self.windows.iter().find(|w| w.win.id == id) {
+                Some(w) if w.term.is_some() => "💻",
+                Some(w) if w.special == Some("chat") => "💬",
+                Some(w) if w.special == Some("debug") => "🐞",
+                _ => "📜",
+            },
+        };
+        format!("{icon} {name}")
     }
 
     // ---- keeping the views current ----------------------------------------------------
@@ -1001,12 +1042,21 @@ impl Workbench {
             c.fill(tr, " ", s.menu);
             let front = self.editor_index().map(|i| self.windows[i].win.id);
             let mut tc = c.sub(tr);
+            let icons = theme.style.icons;
             for (id, r, x) in &self.shell.editor_tab_rects {
                 let Some(w) = self.windows.iter().find(|w| w.win.id == *id) else { continue };
-                let stl = if Some(*id) == front { s.menu_selected } else { s.menu };
-                tc.print(r.x, r.y, &editor_tab_name(w), stl);
+                let on = Some(*id) == front;
+                let stl = if on { s.menu_selected } else { s.menu };
+                tc.print(r.x, r.y, &editor_tab_name(w, icons), stl);
                 tc.print(x.x, x.y, "×", stl);
-                tc.print(x.x + 1, x.y, "│", s.menu);
+                if icons && on {
+                    // The front tab as a pill.
+                    let cap = Style::new(stl.bg, s.menu.bg);
+                    tc.print(r.x - 1, r.y, crate::dock::CAP_LEFT, cap);
+                    tc.print(x.x + 1, x.y, crate::dock::CAP_RIGHT, cap);
+                } else if !icons {
+                    tc.print(x.x + 1, x.y, "│", s.menu);
+                }
             }
         }
         let focused_side = self.focused_side();
@@ -1056,7 +1106,7 @@ impl Workbench {
                     let sr = &mut self.shell.search;
                     sr.query.draw(c, Rect::new(inner.x, inner.y, inner.w, 1), theme, f && sr.in_field, "Search (Enter)");
                     let status = if sr.busy() { "Searching…".to_string() } else { sr.status.clone() };
-                    c.sub(inner).print(inner.x + 1, inner.y + 1, &status, Style::new(s.editor_gutter.fg, s.editor.bg));
+                    c.sub(inner).print(inner.x + 1, inner.y + 1, &status, Style::new(s.panel_frame.fg, s.panel.bg));
                     sr.list.draw(c, Rect::new(inner.x, inner.y + 2, inner.w, (inner.h - 2).max(0)), theme, f && !sr.in_field);
                 }
                 Some(Tab::Scm) => {
@@ -1064,7 +1114,7 @@ impl Workbench {
                     let sc = &mut self.shell.scm;
                     sc.message.draw(c, Rect::new(inner.x, inner.y, inner.w, 1), theme, f && sc.in_field, "Message (Enter commits)");
                     let info = if sc.status.is_empty() { format!("⎇ {}   Space stages", sc.branch) } else { sc.status.clone() };
-                    c.sub(inner).print(inner.x + 1, inner.y + 1, &info, Style::new(s.editor_gutter.fg, s.editor.bg));
+                    c.sub(inner).print(inner.x + 1, inner.y + 1, &info, Style::new(s.panel_frame.fg, s.panel.bg));
                     sc.list.draw(c, Rect::new(inner.x, inner.y + 2, inner.w, (inner.h - 2).max(0)), theme, f && !sc.in_field);
                 }
                 Some(t) => {

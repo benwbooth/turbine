@@ -3567,6 +3567,14 @@ impl App for Workbench {
                 if w.ed.doc.dirty {
                     wc.print(w.win.rect.x + 1, w.win.rect.bottom() - 1, "*", theme.scheme.frame_icons);
                 }
+                // Borland: the line and column in the bottom edge (═ 72:4 ═).
+                if theme.style.window_numbers && w.win.rect.w > 20 {
+                    let (l, col) = w.ed.cursor_line_col();
+                    let r = w.win.rect;
+                    let at = format!(" {}:{} ", l + 1, col + 1);
+                    wc.fill(Rect::new(r.x + 2, r.bottom() - 1, 11, 1), theme.style.active_frame.h, theme.scheme.frame_active);
+                    wc.print(r.x + 12 - turbine_text::unicode::str_width(&at) as i32, r.bottom() - 1, &at, theme.scheme.frame_active);
+                }
             }
         }
         self.layout_dock();
@@ -4493,7 +4501,11 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[1].contains("[1] UNTITLED") && lines[1].contains('▼') && lines[1].contains('▲'), "{:?}", lines[1]);
         assert_eq!(surf.get(3, 1).unwrap().style.bg, turbine_ui::theme::vga::MAGENTA);
-        assert!(lines[24].contains("F1=Help │"), "{:?}", lines[24]);
+        // VB-DOS's editing status line: <key=what> hints, then │ 00001:001.
+        assert!(lines[24].starts_with(" <F1=Help>") && lines[24].contains("│ 00001:001"), "{:?}", lines[24]);
+        // The control box at the left of the title bar; no black edge column.
+        assert_eq!(lines[1].chars().next(), Some('■'));
+        assert_eq!(surf.get(0, 5).unwrap().style.bg, turbine_ui::theme::vga::BLUE);
     }
 
     #[test]

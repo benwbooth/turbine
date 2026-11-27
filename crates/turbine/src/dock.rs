@@ -10,7 +10,7 @@
 
 use turbine_text::unicode::str_width;
 use turbine_ui::frame::draw_frame;
-use turbine_ui::theme::Theme;
+use turbine_ui::theme::{Style, Theme};
 use turbine_ui::{Canvas, Point, Rect};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -108,6 +108,10 @@ impl Layout {
     }
 }
 
+/// Rounded ends for tab pills (Nerd Font / Powerline round caps).
+pub const CAP_LEFT: &str = "\u{e0b6}";
+pub const CAP_RIGHT: &str = "\u{e0b4}";
+
 #[derive(Clone, Copy, Debug)]
 struct Drag {
     side: Side,
@@ -122,6 +126,8 @@ pub struct Dock {
     pub right: Part,
     /// A row of tabs for the open editors above them.
     pub editor_tabs: bool,
+    /// Tabs with emoji icons and rounded ends (from the control style).
+    pub icons: bool,
     drag: Option<Drag>,
 }
 
@@ -132,6 +138,7 @@ impl Default for Dock {
             bottom: Part { visible: false, size: 12, tabs: vec![Tab::Problems], active: 0 },
             right: Part { visible: false, size: 46, tabs: Vec::new(), active: 0 },
             editor_tabs: true,
+            icons: false,
             drag: None,
         }
     }
@@ -225,30 +232,39 @@ impl Dock {
         r.inset(1)
     }
 
-    /// The tabs in a part's top edge: their places and labels. When the
-    /// names don't all fit, the current tab keeps its name and the others
-    /// shrink to a letter (E O S G D, as an activity bar's icons).
+    /// The tabs in a part's top edge, centred like a DOS window's title:
+    /// their places and labels. The current one is a pill (rounded ends)
+    /// when the style has icons. When the names don't all fit, the current
+    /// tab keeps its name and the others shrink to their icon (📁 🔍 🌿, as
+    /// an activity bar), or a letter without icons.
     pub fn tab_rects(&self, side: Side, r: Rect, title: &dyn Fn(Tab) -> String) -> Vec<(Tab, Rect, String)> {
         let part = self.part(side);
+        let caps = |t: Tab| if self.icons && part.current() == Some(t) { 4 } else { 2 };
         let room = r.w - 4;
-        let full: i32 = part.tabs.iter().map(|t| str_width(&title(*t)) as i32 + 3).sum::<i32>() - 1;
-        let label = |t: Tab| {
-            let name = title(t);
-            if full <= room || part.current() == Some(t) {
-                name
-            } else {
-                t.short().map(str::to_string).unwrap_or_else(|| name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default())
+        let width = |labels: &[(Tab, String)]| labels.iter().map(|(t, l)| str_width(l) as i32 + caps(*t)).sum::<i32>() + labels.len().saturating_sub(1) as i32;
+        let mut labels: Vec<(Tab, String)> = part.tabs.iter().map(|t| (*t, title(*t))).collect();
+        if width(&labels) > room {
+            for (t, l) in &mut labels {
+                if part.current() != Some(*t) {
+                    *l = if self.icons {
+                        l.split(' ').next().unwrap_or("").to_string()
+                    } else {
+                        t.short().map(str::to_string).unwrap_or_else(|| l.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default())
+                    };
+                }
             }
-        };
-        let mut x = r.x + 2;
+        }
+        // (Still too wide: drop tabs after the current one, then before.)
+        while width(&labels) > room && labels.len() > 1 {
+            let cur = labels.iter().position(|(t, _)| part.current() == Some(*t)).unwrap_or(0);
+            let drop = if cur + 1 < labels.len() { labels.len() - 1 } else { 0 };
+            labels.remove(drop);
+        }
+        let mut x = r.x + ((r.w - width(&labels)) / 2).max(2);
         let mut out = Vec::new();
-        for t in &part.tabs {
-            let l = label(*t);
-            let w = str_width(&l) as i32 + 2;
-            if x + w > r.right() - 2 {
-                break;
-            }
-            out.push((*t, Rect::new(x, r.y, w, 1), l));
+        for (t, l) in labels {
+            let w = str_width(&l) as i32 + caps(t);
+            out.push((t, Rect::new(x, r.y, w, 1), l));
             x += w + 1;
         }
         out
@@ -294,23 +310,42 @@ impl Dock {
         self.drag = None;
     }
 
-    /// The part's frame and its tabs (the current one lit).
+    /// The part's frame and its tabs (the current one lit), drawn like
+    /// the style's own tool windows: Borland's cyan Help and Watches
+    /// windows, QBasic's Immediate window, VB-DOS's grey Project window.
     pub fn draw_frame(&self, c: &mut Canvas, theme: &Theme, side: Side, r: Rect, focused: bool, title: &dyn Fn(Tab) -> String) {
         let s = &theme.scheme;
         let st = &theme.style;
-        let (fc, style) = if focused { (st.active_frame, s.frame_active) } else { (st.inactive_frame, s.frame) };
-        c.fill(r, " ", s.editor);
-        draw_frame(c, r, fc, style);
-        if st.title_bar {
-            // VB-DOS: a filled title bar row carries the tabs.
-            let bar = if focused { s.title_active } else { s.title_inactive };
-            c.fill(Rect::new(r.x, r.y, r.w, 1), " ", bar);
-        }
+        c.fill(r, " ", s.panel);
+        // (VB-DOS's tool windows have a single black frame, not a title bar.)
+        let fc = if st.title_bar { turbine_ui::theme::SINGLE } else if focused { st.active_frame } else { st.inactive_frame };
+        let fs = if focused && !st.title_bar { Style { fg: s.frame_active.fg, ..s.panel_frame } } else { s.panel_frame };
+        draw_frame(c, r, fc, fs);
         let part = self.part(side);
         for (t, tr, label) in self.tab_rects(side, r, title) {
             let on = part.current() == Some(t);
-            let stl = if on { s.frame_icons } else if st.title_bar { if focused { s.title_active } else { s.title_inactive } } else { style };
-            c.print(tr.x, tr.y, &format!(" {label} "), stl);
+            if !on {
+                c.print(tr.x, tr.y, &format!(" {label} "), fs);
+                continue;
+            }
+            // The current tab: the style's title colours (VB-DOS's magenta
+            // bar, QBasic's reverse title, Borland's green), a pill with
+            // rounded ends when the style has icons.
+            let pill = if st.title_bar {
+                if focused { s.title_active } else { s.title_inactive }
+            } else if st.title_reverse {
+                s.frame_icons
+            } else {
+                s.menu_selected
+            };
+            if self.icons {
+                let cap = Style::new(pill.bg, fs.bg);
+                c.print(tr.x, tr.y, CAP_LEFT, cap);
+                c.print(tr.x + 1, tr.y, &format!(" {label} "), pill);
+                c.print(tr.right() - 1, tr.y, CAP_RIGHT, cap);
+            } else {
+                c.print(tr.x, tr.y, &format!(" {label} "), pill);
+            }
         }
     }
 }

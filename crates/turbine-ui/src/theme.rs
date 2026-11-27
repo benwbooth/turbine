@@ -121,6 +121,12 @@ pub struct Scheme {
     /// Find's matches in the editor, and the current one.
     pub find_match: Style,
     pub find_current: Style,
+    /// Side bars and the panel: like the style's own tool windows (QBasic's
+    /// Immediate window, VB-DOS's grey Project window). Their body, frame,
+    /// and a selected row without focus.
+    pub panel: Style,
+    pub panel_frame: Style,
+    pub panel_selected: Style,
 }
 
 /// Highlight kinds, in index order (the same list as turbine-syntax's).
@@ -214,6 +220,10 @@ impl Scheme {
             button_default: s!(LIGHT_CYAN on GREEN),
             find_match: s!(BLACK on CYAN),
             find_current: s!(BLACK on LIGHT_GREEN),
+            // (Borland's other windows: Help, Watches, Messages are cyan.)
+            panel: s!(BLACK on CYAN),
+            panel_frame: s!(WHITE on CYAN),
+            panel_selected: s!(YELLOW on CYAN),
         }
     }
 
@@ -267,6 +277,9 @@ impl Scheme {
             button_default: s!(BLACK on LIGHT_GRAY),
             find_match: s!(BLACK on CYAN),
             find_current: s!(BLUE on LIGHT_GRAY),
+            panel: s!(LIGHT_GRAY on BLUE),
+            panel_frame: s!(LIGHT_GRAY on BLUE),
+            panel_selected: s!(BLUE on LIGHT_GRAY),
         }
     }
 
@@ -281,8 +294,10 @@ impl Scheme {
         s.menu_hotkey = s!(WHITE on LIGHT_GRAY);
         s.menu_selected = s!(WHITE on BLACK);
         s.menu_selected_hotkey = s!(WHITE on BLACK);
-        s.frame = s!(BLACK on BLACK);
-        s.frame_active = s!(BLACK on BLACK);
+        // (No border lines: a window's edge cells are its own colour, so the
+        // blue runs right to the edge as in VB-DOS, not a black stripe.)
+        s.frame = s!(LIGHT_GRAY on BLUE);
+        s.frame_active = s!(WHITE on BLUE);
         s.frame_icons = s!(BLACK on LIGHT_GRAY);
         s.editor = s!(WHITE on BLUE);
         s.editor_selection = s!(BLUE on LIGHT_GRAY);
@@ -296,6 +311,11 @@ impl Scheme {
         s.title_active = s!(WHITE on MAGENTA);
         s.title_inactive = s!(BLACK on LIGHT_GRAY);
         s.dialog_title = s!(WHITE on MAGENTA);
+        // Tool windows as the Project window: grey, a black frame, the
+        // selected row a black bar.
+        s.panel = s!(BLACK on LIGHT_GRAY);
+        s.panel_frame = s!(BLACK on LIGHT_GRAY);
+        s.panel_selected = s!(LIGHT_GRAY on BLACK);
         s
     }
 
@@ -381,6 +401,9 @@ impl Scheme {
             button_default: n,
             find_match: Style { attrs: Attrs { underline: true, ..Attrs::default() }, ..n },
             find_current: r,
+            panel: n,
+            panel_frame: n,
+            panel_selected: r,
         }
     }
 
@@ -514,6 +537,8 @@ pub struct ControlStyle {
     /// switches to 8-dot characters for its redefined glyphs). The desktop
     /// app draws the VGA font at this width.
     pub dots: u8,
+    /// Emoji icons on tabs (📁 Explorer, 🦀 main.rs) and rounded tab ends.
+    pub icons: bool,
 }
 
 impl ControlStyle {
@@ -552,6 +577,7 @@ impl ControlStyle {
             scheme: None,
             title_bar: false,
             dots: 9,
+            icons: true,
             status_rules: false,
         }
     }
@@ -594,6 +620,7 @@ impl ControlStyle {
             scheme: Some("QBasic"),
             title_bar: false,
             dots: 9,
+            icons: true,
             status_rules: false,
         }
     }
@@ -609,7 +636,8 @@ impl ControlStyle {
             title_reverse: false,
             title_bar: true,
             dots: 8,
-            status_rules: true,
+            icons: true,
+            status_rules: false,
             scheme: Some("VB-DOS"),
             dialog_frame: BLANK,
             controls: ControlLook {
@@ -663,6 +691,7 @@ impl ControlStyle {
             scheme: None,
             title_bar: false,
             dots: 9,
+            icons: false,
             status_rules: false,
         }
     }

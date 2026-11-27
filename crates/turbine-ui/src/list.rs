@@ -235,21 +235,21 @@ impl ListView {
     pub fn draw(&mut self, c: &mut Canvas, r: Rect, theme: &Theme, focused: bool) {
         self.area = r;
         let s = &theme.scheme;
-        let base = s.editor;
+        let base = s.panel;
         c.fill(r, " ", base);
         let n = r.h.max(0) as usize;
         let max = self.rows.len().saturating_sub(n);
         self.scroll = self.scroll.min(max);
         let bar = self.rows.len() > n && n >= 3;
         let text_w = r.w - i32::from(bar);
-        let dim = Style::new(s.editor_gutter.fg, base.bg);
+        let dim = Style::new(s.panel_frame.fg, base.bg);
         for (k, row) in self.rows.iter().enumerate().skip(self.scroll).take(n) {
             let y = r.y + (k - self.scroll) as i32;
             let sel = k == self.selected;
             let stl = if sel && focused {
                 s.menu_selected
             } else if sel {
-                s.editor_selection
+                s.panel_selected
             } else {
                 Style { fg: row.fg.unwrap_or(base.fg), ..base }
             };
