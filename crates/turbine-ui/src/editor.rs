@@ -138,6 +138,9 @@ pub struct EditorView {
     /// Text area from the last draw, for mouse hit testing.
     area: Rect,
     dragging: bool,
+    /// Clicks in a row at one place: (where, when, how many) — two select
+    /// a word, three the line, four the paragraph.
+    clicks: Option<(usize, std::time::Instant, u8)>,
     /// A minimap at the right (Cursor's), when there's room; where it was
     /// drawn, and a drag on it.
     pub minimap: bool,
@@ -189,6 +192,7 @@ impl EditorView {
             semantic_version: u64::MAX,
             area: Rect::default(),
             dragging: false,
+            clicks: None,
             minimap: false,
             minimap_rect: None,
             minimap_drag: false,
@@ -547,6 +551,51 @@ impl EditorView {
         true
     }
 
+    /// What `n` clicks at a char select: 2 its word, 3 its line (with the
+    /// line's end), 4 its paragraph (the non-blank lines around it).
+    fn click_unit(&self, ch: usize, n: u8) -> (usize, usize) {
+        let r = &self.doc.rope;
+        let len = r.len_chars();
+        match n {
+            2 => {
+                let is_w = |c: char| c.is_alphanumeric() || c == '_';
+                let at = ch.min(len.saturating_sub(1));
+                let kind = |c: char| if is_w(c) { 0 } else if c.is_whitespace() { 1 } else { 2 };
+                if len == 0 || r.char(at) == '\n' {
+                    return (ch, ch);
+                }
+                let k = kind(r.char(at));
+                let (mut a, mut b) = (at, at + 1);
+                while a > 0 && r.char(a - 1) != '\n' && kind(r.char(a - 1)) == k {
+                    a -= 1;
+                }
+                while b < len && r.char(b) != '\n' && kind(r.char(b)) == k {
+                    b += 1;
+                }
+                (a, b)
+            }
+            3 => {
+                let l = r.char_to_line(ch);
+                let b = if l + 1 < r.len_lines() { r.line_to_char(l + 1) } else { len };
+                (r.line_to_char(l), b)
+            }
+            _ => {
+                let lines = r.len_lines();
+                let blank = |l: usize| self.doc.line(l).trim().is_empty();
+                let l = r.char_to_line(ch);
+                let (mut a, mut b) = (l, l);
+                while a > 0 && !blank(a - 1) {
+                    a -= 1;
+                }
+                while b + 1 < lines && !blank(b + 1) {
+                    b += 1;
+                }
+                let end = if b + 1 < lines { r.line_to_char(b + 1) } else { len };
+                (r.line_to_char(a), end)
+            }
+        }
+    }
+
     /// The error or warning under a cell of the text (for its tooltip).
     pub fn diagnostic_at(&self, p: Point) -> Option<&DiagMark> {
         if !self.area.contains(p) || (self.line_numbers && p.x < self.area.x + self.gutter_width()) {
@@ -675,6 +724,18 @@ impl EditorView {
             }
             MouseKind::Down(Button::Left) if self.area.contains(ev.pos) => {
                 let ch = self.pos_to_char(ev.pos);
+                let n = match self.clicks {
+                    Some((at, t, n)) if at == ch && t.elapsed() < std::time::Duration::from_millis(400) && !ev.mods.shift => n % 4 + 1,
+                    _ => 1,
+                };
+                self.clicks = Some((ch, std::time::Instant::now(), n));
+                if n > 1 {
+                    let (a, b) = self.click_unit(ch, n);
+                    self.anchor = Some(a);
+                    self.cursor = b;
+                    self.dragging = false;
+                    return true;
+                }
                 self.move_to(ch, ev.mods.shift);
                 if !ev.mods.shift {
                     self.anchor = Some(ch);
@@ -1043,6 +1104,21 @@ impl EditorView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clicks_select_word_line_paragraph() {
+        use super::*;
+        let mut ed = EditorView::new(Document::from_str("one two.three\nnext line\n\nsecond para\n"));
+        let sel = |ed: &EditorView| ed.selected_text().unwrap_or_default();
+        assert_eq!(ed.click_unit(5, 2), (4, 7));
+        ed.anchor = Some(4);
+        ed.cursor = 7;
+        assert_eq!(sel(&ed), "two");
+        let (a, b) = ed.click_unit(5, 3);
+        assert_eq!(ed.doc.rope.slice(a..b).to_string(), "one two.three\n");
+        let (a, b) = ed.click_unit(5, 4);
+        assert_eq!(ed.doc.rope.slice(a..b).to_string(), "one two.three\nnext line\n");
+    }
+
     #[test]
     fn inlay_hints_make_room_and_the_cursor_stays_true() {
         let mut ed = EditorView::new(Document::from_str("let x = 1;"));
