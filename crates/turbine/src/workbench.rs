@@ -4662,6 +4662,33 @@ impl App for Workbench {
                 .map(|d| format!("{} {}", if d.severity == 1 { "■ Error:" } else if d.severity == 2 { "■ Warning:" } else { "■" }, d.message))
         };
         self.status.draw(&mut c, &theme, Rect::new(0, self.size.1 - 1, self.size.0, 1));
+        // Vim's ':' line: the commands it could be, with what each does,
+        // in a box over the status line (Tab picks the lit one).
+        if let Some(v) = self.windows.last().and_then(|w| w.vim.as_ref()).filter(|_| self.dialog.is_none()) {
+            let (choices, pick) = v.command_choices();
+            if !choices.is_empty() {
+                let n = choices.len().min(10);
+                let first = pick.saturating_sub(n - 1).min(choices.len() - n);
+                let name_w = choices.iter().map(|c| str_width(&c.0)).max().unwrap_or(0).min(28);
+                let w = (choices.iter().map(|c| name_w + 2 + str_width(&c.1)).max().unwrap_or(0) + 4).min(self.size.0 as usize - 2) as i32;
+                let r = Rect::new(0, self.size.1 - 1 - n as i32 - 2, w, n as i32 + 2);
+                let s = &theme.scheme;
+                c.fill(r, " ", s.menu);
+                turbine_ui::frame::draw_frame(&mut c, r, theme.style.menu_frame, s.menu);
+                for (k, (name, help)) in choices.iter().enumerate().skip(first).take(n) {
+                    let y = r.y + 1 + (k - first) as i32;
+                    let st = if k == pick { s.menu_selected } else { s.menu };
+                    let line = Rect::new(r.x + 1, y, r.w - 2, 1);
+                    c.fill(line, " ", st);
+                    let mut lc = c.sub(line);
+                    lc.print(r.x + 2, y, name, Style { fg: if k == pick { st.fg } else { s.menu_hotkey.fg }, ..st });
+                    lc.print(r.x + 2 + name_w as i32 + 2, y, help, st);
+                }
+                if theme.style.shadows {
+                    c.shadow(r, s.shadow);
+                }
+            }
+        }
         if let Some((_, Some(col), _)) = &cmdline {
             if self.dialog.is_none() && !self.driver.busy() {
                 c.set_cursor(Point::new(1 + *col as i32, self.size.1 - 1), turbine_ui::CursorShape::Bar);
@@ -4944,6 +4971,18 @@ mod tests {
         wb.dispatch(m(MouseKind::Down(Button::Left), r.y + 1));
         wb.dispatch(m(MouseKind::Up(Button::Left), r.y + 1));
         assert_eq!(line(&wb), end - 1);
+    }
+
+    #[test]
+    fn vims_command_line_lists_what_it_could_be() {
+        let mut wb = bench();
+        wb.set_keymap(Keymap::Vim);
+        run(&mut wb, json!({"cmd": "type", "text": ":wri"}));
+        let mut surf = Surface::new(100, 30);
+        wb.render(&mut surf);
+        let t = surf.to_text();
+        assert!(t.contains("write"), "{t}");
+        keys(&mut wb, &["Esc"]);
     }
 
     #[test]

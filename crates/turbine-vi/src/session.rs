@@ -118,6 +118,12 @@ impl Session {
 
     /// The command line while open (":" + text, cursor column in chars),
     /// else the last message (text, is_error).
+    /// While a command's name is typed after ':': the commands it could be
+    /// (name, what it does), and the one Tab would pick.
+    pub fn command_choices(&self) -> (&[(String, String)], usize) {
+        if self.cmd.is_open() { (&self.cmd.choices, self.cmd.pick) } else { (&[], 0) }
+    }
+
     pub fn command_line(&self) -> Option<(String, Option<usize>, bool)> {
         if self.cmd.is_open() {
             let line = format!("{}{}", self.cmd.kind, self.cmd.text);
