@@ -61,6 +61,9 @@ pub(super) struct Shell {
     pub preview_tab: Option<u32>,
     /// The last click on an editor tab (a double click keeps a preview).
     pub tab_click: Option<(u32, Instant)>,
+    /// The tabs that didn't fit: "▼ n" (its place, how many), and its list.
+    pub tab_more: Option<(Rect, usize)>,
+    pub tab_menu: Option<(turbine_ui::popup::ListPopup, Vec<u32>, Point)>,
     /// The cursor: "Block", "Underline" or "Bar", and whether it blinks.
     pub cursor_style: String,
     pub cursor_blink: bool,
@@ -108,6 +111,8 @@ impl Shell {
             word_wrap: false,
             preview_tab: None,
             tab_click: None,
+            tab_more: None,
+            tab_menu: None,
             cursor_style: "Block".into(),
             cursor_blink: true,
             mirrored: HashMap::new(),
@@ -280,21 +285,59 @@ impl Workbench {
     /// order they were opened, as many as fit.
     fn layout_editor_tabs(&mut self, l: &Layout) {
         self.shell.editor_tab_rects.clear();
+        self.shell.tab_more = None;
         let Some(tr) = l.editor_tabs else { return };
         let mut eds: Vec<&EdWin> = self.windows.iter().filter(|w| w.dock.is_none()).collect();
         eds.sort_by_key(|w| w.win.id);
         let icons = self.theme.style.icons;
-        let mut x = tr.x;
-        for w in eds {
-            // (Text, ×, and a rounded end or a │.)
-            let wdt = str_width(&editor_tab_name(w, icons)) as i32 + 2 + i32::from(icons);
-            if x + wdt > tr.right() {
-                break;
+        let width = |w: &EdWin| str_width(&editor_tab_name(w, icons)) as i32 + 2;
+        let total: i32 = eds.iter().map(|w| width(w)).sum();
+        // Too many: the front tab stays in view, the rest that fit with it,
+        // and "▼ n" opens a list of them all.
+        let more_w = 6;
+        let (shown, overflow) = if total <= tr.w {
+            (eds.clone(), 0)
+        } else {
+            let front = self.editor_index().map(|i| self.windows[i].win.id);
+            let mut start = 0;
+            loop {
+                let mut x = 0;
+                let mut v = Vec::new();
+                for w in &eds[start..] {
+                    if x + width(w) > tr.w - more_w {
+                        break;
+                    }
+                    x += width(w);
+                    v.push(*w);
+                }
+                if front.is_none_or(|f| v.iter().any(|w| w.win.id == f)) || start + 1 >= eds.len() {
+                    let n = eds.len() - v.len();
+                    break (v, n);
+                }
+                start += 1;
             }
-            let x0 = x + i32::from(icons);
-            self.shell.editor_tab_rects.push((w.win.id, Rect::new(x0, tr.y, wdt - 1 - i32::from(icons), 1), Rect::new(x + wdt - 2, tr.y, 1, 1)));
+        };
+        let mut x = tr.x;
+        for w in shown {
+            let wdt = width(w);
+            self.shell.editor_tab_rects.push((w.win.id, Rect::new(x, tr.y, wdt - 1, 1), Rect::new(x + wdt - 2, tr.y, 1, 1)));
             x += wdt;
         }
+        if overflow > 0 {
+            self.shell.tab_more = Some((Rect::new(tr.right() - more_w + 1, tr.y, more_w - 1, 1), overflow));
+        }
+    }
+
+    /// "▼ n": every editor, to pick one.
+    pub(super) fn open_tab_menu(&mut self) {
+        let Some((r, _)) = self.shell.tab_more else { return };
+        let mut eds: Vec<(u32, String)> = self.windows.iter().filter(|w| w.dock.is_none()).map(|w| (w.win.id, editor_tab_name(w, self.theme.style.icons).trim().to_string())).collect();
+        eds.sort_by_key(|e| e.0);
+        let items = eds.iter().map(|(_, n)| (n.clone(), String::new())).collect();
+        let mut popup = turbine_ui::popup::ListPopup::new(items);
+        let at = Point::new((r.x - 24).max(0), r.y + 1);
+        popup.place(at, self.screen());
+        self.shell.tab_menu = Some((popup, eds.into_iter().map(|e| e.0).collect(), at));
     }
 
     /// The breadcrumbs: the file's folders from the project down, the file,
@@ -1325,6 +1368,10 @@ impl Workbench {
         }
         // Editor tabs.
         if let Some(tr) = l.editor_tabs {
+            if press && self.shell.tab_more.is_some_and(|(r, _)| r.contains(m.pos)) {
+                self.open_tab_menu();
+                return true;
+            }
             if tr.contains(m.pos) {
                 if press {
                     let hit = self.shell.editor_tab_rects.iter().find(|(_, r, _)| r.contains(m.pos)).copied();
@@ -1527,6 +1574,9 @@ impl Workbench {
                 tc.print(r.x, r.y, &editor_tab_name(w, icons), stl);
                 tc.print(x.x, x.y, "×", stl);
                 tc.print(x.x + 1, x.y, " ", stl);
+            }
+            if let Some((mr, n)) = self.shell.tab_more {
+                tc.print(mr.x, mr.y, &format!("▼ {n}"), active);
             }
         }
         // Breadcrumbs.

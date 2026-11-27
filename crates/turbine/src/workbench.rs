@@ -3192,6 +3192,22 @@ impl Workbench {
         if self.dialog.is_none() && self.lsp_menu_key(&k) {
             return;
         }
+        if let Some((popup, ids, _)) = &mut self.shell.tab_menu {
+            match popup.handle_key(&k) {
+                PopupResult::Accept(i) => {
+                    let id = ids[i];
+                    self.shell.tab_menu = None;
+                    if let Some(i) = self.windows.iter().position(|w| w.win.id == id) {
+                        let w = self.windows.remove(i);
+                        self.windows.push(w);
+                        self.renumber();
+                    }
+                }
+                PopupResult::Close => self.shell.tab_menu = None,
+                _ => {}
+            }
+            return;
+        }
         if self.dialog.is_none() {
             if let Some(comp) = &mut self.completion {
                 if comp.waiting.is_none() {
@@ -3664,6 +3680,27 @@ impl Workbench {
         let screen = self.screen();
         let desk = self.desktop();
         if self.dialog.is_none() && self.lspx.menu.is_some() && self.lsp_menu_mouse(&m) {
+            return;
+        }
+        if let Some((popup, ids, _)) = &mut self.shell.tab_menu {
+            match popup.handle_mouse(&m) {
+                PopupResult::Accept(i) => {
+                    let id = ids[i];
+                    self.shell.tab_menu = None;
+                    if let Some(i) = self.windows.iter().position(|w| w.win.id == id) {
+                        let w = self.windows.remove(i);
+                        self.windows.push(w);
+                        self.renumber();
+                    }
+                }
+                PopupResult::Close => self.shell.tab_menu = None,
+                PopupResult::Consumed => {}
+                PopupResult::Ignored => {
+                    if matches!(m.kind, MouseKind::Down(_)) {
+                        self.shell.tab_menu = None;
+                    }
+                }
+            }
             return;
         }
         if self.dialog.is_none() {
@@ -4416,6 +4453,10 @@ impl App for Workbench {
             }
         }
         self.draw_lsp_more(&mut c, &theme);
+        if let Some((popup, _, at)) = &mut self.shell.tab_menu {
+            let at = *at;
+            popup.draw(&mut c, at, screen, &theme);
+        }
         self.draw_ex(&mut c, &theme);
         self.draw_find(&mut c, &theme);
         self.draw_inline(&mut c, &theme);
@@ -5882,6 +5923,35 @@ mod tests {
         let widths: Vec<i32> = seen[..11].iter().map(|s| s.0).collect();
         assert!(widths.windows(2).all(|w| w[1] >= w[0]), "the edge followed the pointer: {widths:?}");
         assert!(seen.iter().all(|s| s.1 == before), "the list stayed put: {before:?} {seen:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn too_many_tabs_overflow_into_a_list() {
+        let dir = std::env::temp_dir().join(format!("turbine-tabs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files: Vec<PathBuf> = (0..14).map(|i| {
+            let p = dir.join(format!("file_number_{i:02}.txt"));
+            std::fs::write(&p, "x").unwrap();
+            p
+        }).collect();
+        let mut wb = Workbench::new(&files);
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+        let mut surf = Surface::new(100, 30);
+        wb.render(&mut surf);
+        let (r, n) = wb.shell.tab_more.expect("an overflow button");
+        assert!(n > 0);
+        // The front editor's tab stays in view.
+        let front = wb.windows[wb.editor_index().unwrap()].win.id;
+        assert!(wb.shell.editor_tab_rects.iter().any(|t| t.0 == front));
+        assert!(surf.to_text().contains(&format!("▼ {n}")));
+        wb.dispatch(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(r.x, r.y), mods: Mods::NONE }));
+        assert!(wb.shell.tab_menu.is_some());
+        keys(&mut wb, &["Home", "Enter"]);
+        assert!(wb.shell.tab_menu.is_none());
+        let w = &wb.windows[wb.editor_index().unwrap()];
+        assert!(w.ed.doc.path.as_ref().unwrap().ends_with("file_number_00.txt"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
