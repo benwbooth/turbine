@@ -4597,7 +4597,11 @@ impl App for Workbench {
         if !self.shell.own_title_bar {
             return self.render_client(surf);
         }
-        self.outer = (surf.w, surf.h);
+        // (The window's size is the front end's, from its resize: the
+        // surface follows it, the client area inside it.)
+        if (surf.w, surf.h) != self.outer {
+            *surf = Surface::new(self.outer.0, self.outer.1);
+        }
         let c = self.client_area();
         if (c.w, c.h) != self.size {
             self.dispatch(Event::Resize(c.w, c.h));
