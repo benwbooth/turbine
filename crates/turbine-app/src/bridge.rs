@@ -136,7 +136,9 @@ pub fn init(files: &[PathBuf]) {
 
 pub fn shutdown() {
     STATE.with(|s| {
-        if let Some(st) = s.borrow_mut().take() {
+        if let Some(mut st) = s.borrow_mut().take() {
+            // (The session, written before going: open files, unsaved text.)
+            st.wb.save_session(true);
             if let Some(p) = st.socket {
                 let _ = std::fs::remove_file(p);
             }

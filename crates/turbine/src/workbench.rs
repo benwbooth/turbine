@@ -22,6 +22,7 @@ mod images;
 mod inline_ai;
 mod lsp_more;
 mod preview;
+mod session;
 mod settings;
 mod shell;
 use find::FindBar;
@@ -291,6 +292,7 @@ pub struct Workbench {
     inline: Option<inline_ai::InlineEdit>,
     /// WebAssembly extensions (started by the front end).
     exts: extensions::ExtState,
+    session: session::SessionState,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -640,6 +642,7 @@ impl Workbench {
             ex: explorer_ops::ExOps::default(),
             inline: None,
             exts: extensions::ExtState::default(),
+            session: session::SessionState::default(),
         };
         for f in files {
             // (A folder is the project: the Explorer shows it.)
@@ -752,6 +755,7 @@ impl Workbench {
             }
         }
         self.look_path = Some(p);
+        self.restore_session();
     }
 
     /// Keep the look and layout for next time (written off the UI thread).
@@ -2225,7 +2229,9 @@ impl Workbench {
             "file.save" => self.save(false),
             "file.save_as" => self.save(true),
             "app.quit" => {
-                if self.windows.iter().any(|w| w.ed.doc.dirty) {
+                // (Hot exit: unsaved text is kept in the session, as VS
+                // Code keeps it, when there's a session to keep it in.)
+                if self.windows.iter().any(|w| w.ed.doc.dirty) && !self.hot_exit() {
                     self.unsaved_dialog("quit");
                 } else {
                     self.quit = true;
@@ -4247,6 +4253,7 @@ impl App for Workbench {
         self.git_tick();
         self.preview_tab_tick();
         self.images_tick();
+        self.session_tick(now);
         // (Closed file managers' state goes; the rest take their answers.)
         let ids: HashSet<u32> = self.windows.iter().map(|w| w.win.id).collect();
         self.xtrees.retain(|id, _| ids.contains(id));
@@ -5039,6 +5046,36 @@ mod tests {
         keys(&mut wb, &["End"]);
         run(&mut wb, json!({"cmd": "type", "text": "("}));
         assert!(wb.find.error.is_some());
+    }
+
+    #[test]
+    fn the_session_comes_back_with_unsaved_text() {
+        let (dir, mut wb) = project("session");
+        let look = dir.join("cfg/look.json");
+        wb.set_look_path(look.clone());
+        wb.goto_file(&dir.join("src/main.rs"), Some(1), 4);
+        run(&mut wb, json!({"cmd": "type", "text": "X"}));
+        wb.run_command("file.new");
+        run(&mut wb, json!({"cmd": "type", "text": "scratch"}));
+        wb.goto_file(&dir.join("notes.md"), Some(0), 0);
+        // Exit keeps it all without asking.
+        wb.run_command("app.quit");
+        assert!(wb.dialog.is_none() && wb.should_quit());
+        wb.save_session(true);
+        let mut wb2 = Workbench::new(&[dir.clone()]);
+        wb2.set_look_path(look);
+        let open: Vec<(Option<PathBuf>, String, bool)> = wb2.windows.iter().filter(|w| w.term.is_none()).map(|w| (w.ed.doc.path.clone(), w.ed.doc.rope.to_string(), w.ed.doc.dirty)).collect();
+        assert_eq!(open.len(), 3, "{open:?}");
+        assert_eq!(open[0].0.as_deref(), Some(dir.join("src/main.rs").as_path()));
+        assert!(open[0].1.contains("    Xlet needle") && open[0].2, "{open:?}");
+        assert_eq!((open[1].0.clone(), open[1].1.as_str(), open[1].2), (None, "scratch", true));
+        assert_eq!(title(&wb2), "notes.md");
+        // The file's unsaved change undoes back to what's on disk.
+        let w = wb2.windows.iter_mut().find(|w| w.ed.doc.path.as_deref() == Some(dir.join("src/main.rs").as_path())).unwrap();
+        assert_eq!(w.ed.cursor, w.ed.doc.line_byte_to_char(1, 5));
+        w.ed.doc.undo();
+        assert!(!w.ed.doc.rope.to_string().contains('X'));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

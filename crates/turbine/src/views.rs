@@ -143,6 +143,15 @@ impl Explorer {
         }
     }
 
+    /// Folders open last time (the session), read again.
+    pub fn restore_expanded(&mut self, dirs: impl IntoIterator<Item = PathBuf>) {
+        for d in dirs {
+            if d.starts_with(&self.root) && d.is_dir() && self.expanded.insert(d.clone()) {
+                self.request(&d);
+            }
+        }
+    }
+
     fn request(&mut self, dir: &Path) {
         if !self.pending.insert(dir.to_path_buf()) {
             return;
@@ -236,7 +245,7 @@ impl Explorer {
             rows.push(Row::new("..").glyph(crate::filetypes::icon("..", true, false)).fg(turbine_ui::theme::vga::WHITE));
             paths.push((parent.to_path_buf(), true));
         }
-        let name = self.root.file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_else(|| self.root.display().to_string());
+        let name = self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.root.display().to_string());
         rows.push(Row::new(name).heading());
         paths.push((self.root.clone(), true));
         self.walk(&self.root.clone(), 0, &mut rows, &mut paths);

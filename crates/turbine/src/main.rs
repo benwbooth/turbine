@@ -198,6 +198,8 @@ fn main() {
     }
 
     let r = turbine_tui::run(&mut wb);
+    // (The session, written before going: open files, unsaved text.)
+    wb.save_session(true);
     if let Some(p) = socket_path {
         let _ = std::fs::remove_file(p);
     }
