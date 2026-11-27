@@ -298,6 +298,8 @@ pub struct Workbench {
     session: session::SessionState,
     tip: tooltip::TipState,
     docviews: HashMap<u32, docview::DocView>,
+    /// The editor's right-click menu: its list, where, each item's command.
+    ed_menu: Option<(ListPopup, Point, Vec<&'static str>)>,
     /// The last key, click or move: for a moment after it, ticks come at
     /// screen rate, so what it started (a listing, colours, a preview)
     /// shows the moment it's ready.
@@ -665,6 +667,7 @@ impl Workbench {
             session: session::SessionState::default(),
             tip: tooltip::TipState::default(),
             docviews: HashMap::new(),
+            ed_menu: None,
             last_input: None,
         };
         for f in files {
@@ -718,6 +721,45 @@ impl Workbench {
             std::mem::swap(&mut self.windows[i].ed, &mut self.docviews.get_mut(&id).unwrap().alt);
         }
         out
+    }
+
+    /// A right-click in the front editor's text: the cursor there (unless
+    /// it's in the selection), and the editor's menu, as VS Code's.
+    fn ed_menu_open(&mut self, p: Point) -> bool {
+        let Some(w) = self.windows.last_mut().filter(|w| w.term.is_none() && w.dock.is_none() && w.special.is_none() && !self.xtrees.contains_key(&w.win.id)) else { return false };
+        if self.docviews.get(&w.win.id).is_some_and(|d| d.mode != docview::Mode::Source) {
+            return false;
+        }
+        let Some(ch) = w.ed.char_at(p) else { return false };
+        if !w.ed.selection().is_some_and(|(a, b)| ch >= a && ch < b) {
+            w.ed.cursor = ch;
+            w.ed.anchor = None;
+        }
+        let has_sel = w.ed.selection().is_some();
+        let lsp = w.lsp_key.is_some();
+        let mut items: Vec<(&str, &str, &'static str)> = Vec::new();
+        if lsp {
+            items.push(("Go to Definition", "F12", "go.definition"));
+            items.push(("Go to References", "Shift+F12", "go.references"));
+            items.push(("Rename Symbol...", "Shift+F2", "edit.rename"));
+            items.push(("Quick Fix...", "Ctrl+.", "edit.quick_fix"));
+        }
+        if has_sel {
+            items.push(("Cut", "Ctrl+X", "edit.cut"));
+            items.push(("Copy", "Ctrl+C", "edit.copy"));
+        }
+        items.push(("Paste", "Ctrl+V", "edit.paste"));
+        items.push(("Select All", "Ctrl+A", "edit.select_all"));
+        items.push(("Toggle Line Comment", "Ctrl+/", "edit.comment"));
+        if lsp {
+            items.push(("Format Document", "Ctrl+Shift+I", "edit.format"));
+        }
+        items.push(("Command Palette...", "Ctrl+Shift+P", "view.palette"));
+        let mut popup = ListPopup::new(items.iter().map(|(l, k, _)| (l.to_string(), k.to_string())).collect());
+        popup.max_rows = 14;
+        popup.place(p, self.screen());
+        self.ed_menu = Some((popup, p, items.iter().map(|i| i.2).collect()));
+        true
     }
 
     /// The Borland line:column cells before the sideways bar in a window's bottom edge.
@@ -3276,6 +3318,18 @@ impl Workbench {
         if self.dialog.is_none() && self.lsp_menu_key(&k) {
             return;
         }
+        if let Some((popup, _, cmds)) = &mut self.ed_menu {
+            match popup.handle_key(&k) {
+                PopupResult::Accept(i) => {
+                    let c = cmds[i];
+                    self.ed_menu = None;
+                    self.run_command(c);
+                }
+                PopupResult::Close => self.ed_menu = None,
+                _ => {}
+            }
+            return;
+        }
         if let Some((popup, ids, _)) = &mut self.shell.tab_menu {
             match popup.handle_key(&k) {
                 PopupResult::Accept(i) => {
@@ -3771,6 +3825,23 @@ impl Workbench {
         let screen = self.screen();
         let desk = self.desktop();
         if self.dialog.is_none() && self.lspx.menu.is_some() && self.lsp_menu_mouse(&m) {
+            return;
+        }
+        // The editor's right-click menu.
+        if let Some((popup, _, cmds)) = &mut self.ed_menu {
+            match popup.handle_mouse(&m) {
+                PopupResult::Accept(i) => {
+                    let c = cmds[i];
+                    self.ed_menu = None;
+                    self.run_command(c);
+                }
+                PopupResult::Close => self.ed_menu = None,
+                PopupResult::Ignored if matches!(m.kind, MouseKind::Down(_)) => self.ed_menu = None,
+                _ => {}
+            }
+            return;
+        }
+        if self.dialog.is_none() && matches!(m.kind, MouseKind::Down(Button::Right)) && self.ed_menu_open(m.pos) {
             return;
         }
         if let Some((popup, ids, _)) = &mut self.shell.tab_menu {
@@ -4603,6 +4674,10 @@ impl App for Workbench {
             }
         }
         self.draw_lsp_more(&mut c, &theme);
+        if let Some((popup, at, _)) = &mut self.ed_menu {
+            let at = *at;
+            popup.draw(&mut c, at, screen, &theme);
+        }
         if let Some((popup, _, at)) = &mut self.shell.tab_menu {
             let at = *at;
             popup.draw(&mut c, at, screen, &theme);
@@ -5500,6 +5575,25 @@ mod tests {
         let text = wb.windows.iter().find(|w| w.win.id == id).unwrap().ed.doc.rope.to_string();
         assert!(text.contains("\"name\": \"new\""), "{text}");
         wait_until(&mut wb, "the tree again", |wb| wb.docviews[&id].tree.as_ref().and_then(|t| t.node(&[0]).and_then(|n| n.value.clone())).as_deref() == Some("new"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_editor_has_a_right_click_menu() {
+        let (dir, mut wb) = project("edmenu");
+        wb.goto_file(&dir.join("notes.md"), Some(0), 0);
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let a = wb.windows.last().unwrap().ed.area();
+        let at = Point::new(a.x + a.w / 2, a.y);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Right), pos: at, mods: Mods::NONE }));
+        assert!(wb.ed_menu.is_some());
+        wb.render(&mut surf);
+        let i = wb.ed_menu.as_ref().unwrap().2.iter().position(|c| *c == "edit.select_all").unwrap();
+        let r = wb.ed_menu.as_ref().unwrap().0.item_rect(i).unwrap();
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(r.x + 1, r.y), mods: Mods::NONE }));
+        assert!(wb.ed_menu.is_none());
+        assert_eq!(wb.windows.last().unwrap().ed.selected_text().as_deref(), Some("# Notes\n"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
