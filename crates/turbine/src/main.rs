@@ -128,6 +128,8 @@ fn main() {
     if !args.headless {
         wb.start_extensions(turbine::workbench::extension_dirs());
     }
+    // (Pictures where the terminal draws them: kitty's graphics protocol.)
+    wb.set_images_inline(!args.headless && turbine_tui::graphics_supported());
     if let Some(k) = args.keymap {
         wb.set_keymap(k);
     }

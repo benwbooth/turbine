@@ -10,6 +10,8 @@
 #include <QtGui/QKeyEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
+#include <QtGui/QImageReader>
+#include <thread>
 #include <QtQuick/QQuickWindow>
 
 #include <algorithm>
@@ -463,6 +465,46 @@ bool CellView::drawShape(QPainter* p, char32_t c, const QRectF& r, const QColor&
     return true;
 }
 
+void CellView::drawPictures(QPainter* p)
+{
+    if (!m_frame) return;
+    for (const auto& im : m_frame->images) {
+        const QString path = QString::fromStdString(std::string(im.path));
+        std::unique_lock<std::mutex> lock(m_picMutex);
+        auto it = m_pictures.find(path);
+        if (it == m_pictures.end()) {
+            // (Read off the UI thread; drawn when it's in.)
+            if (!m_loading.contains(path)) {
+                m_loading.insert(path);
+                std::thread([this, path] {
+                    QImageReader r(path);
+                    r.setAutoTransform(true);
+                    QImage img = r.read();
+                    QMetaObject::invokeMethod(this, [this, path, img] {
+                        {
+                            std::lock_guard<std::mutex> g(m_picMutex);
+                            m_loading.remove(path);
+                            m_pictures.insert(path, img);
+                        }
+                        update();
+                    }, Qt::QueuedConnection);
+                }).detach();
+            }
+            continue;
+        }
+        const QImage img = it.value();
+        lock.unlock();
+        if (img.isNull()) continue;
+        const QRectF cell(im.x * m_cw, im.y * m_ch, im.w * m_cw, im.h * m_ch);
+        QSizeF sz = QSizeF(img.size()).scaled(cell.size(), Qt::KeepAspectRatio);
+        const QRectF target(cell.x() + (cell.width() - sz.width()) / 2, cell.y() + (cell.height() - sz.height()) / 2, sz.width(), sz.height());
+        p->save();
+        p->setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p->drawImage(target, img);
+        p->restore();
+    }
+}
+
 void CellView::paintVga(QPainter* p)
 {
     const turbine::Frame& f = *m_frame;
@@ -547,6 +589,7 @@ void CellView::paintVga(QPainter* p)
     ip.end();
     screen->setRenderHint(QPainter::SmoothPixmapTransform, true);
     screen->drawImage(QRectF(0, 0, m_vgaSize.width() / qreal(m_dots * m_k) * m_cw, m_vgaSize.height() / 16.0 / m_k * m_ch), m_vgaImage);
+    drawPictures(screen);
 }
 
 void CellView::paint(QPainter* p)
@@ -623,6 +666,7 @@ void CellView::paint(QPainter* p)
         }
     }
     p->restore();
+    drawPictures(p);
     // The cursor.
     if (f.cursor_shape >= 0 && f.cursor_x < cols && f.cursor_y < rows && hasActiveFocus() && (m_cursorOn || !f.cursor_blink)) {
         const auto& c = f.cells[size_t(f.cursor_y * cols + f.cursor_x)];

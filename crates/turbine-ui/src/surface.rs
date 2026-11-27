@@ -39,13 +39,16 @@ pub struct Surface {
     pub cursor: Option<(Point, CursorShape)>,
     /// Whether the cursor blinks (a setting).
     pub cursor_blink: bool,
+    /// Pictures over the cells (an image viewer): where, and the file.
+    /// The app draws them; a terminal with kitty's graphics protocol too.
+    pub images: Vec<(Rect, std::path::PathBuf)>,
 }
 
 impl Surface {
     pub fn new(w: i32, h: i32) -> Self {
         let w = w.max(1);
         let h = h.max(1);
-        Surface { w, h, cells: vec![Cell::default(); (w * h) as usize], cursor: None, cursor_blink: true }
+        Surface { w, h, cells: vec![Cell::default(); (w * h) as usize], cursor: None, cursor_blink: true, images: Vec::new() }
     }
 
     pub fn rect(&self) -> Rect {

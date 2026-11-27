@@ -28,6 +28,16 @@ pub mod ffi {
     }
 
     #[namespace = "turbine"]
+    /// A picture over the cells: its cells, and the file.
+    struct FrameImage {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        path: String,
+    }
+
+    #[namespace = "turbine"]
     struct Frame {
         cols: i32,
         rows: i32,
@@ -39,6 +49,7 @@ pub mod ffi {
         cursor_blink: bool,
         /// Dots per character in the VGA font: 9, or 8 (VB-DOS).
         dots: i32,
+        images: Vec<FrameImage>,
     }
 
     extern "Rust" {
@@ -105,6 +116,8 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 /// Set up the workbench (files to open, automation socket, AI).
 pub fn init(files: &[PathBuf]) {
     let mut wb = Workbench::new(files);
+    // (The app draws pictures itself.)
+    wb.set_images_inline(true);
     let (tx, rx) = mpsc::channel::<Request>();
     wb.set_requests(rx);
     let socket = turbine::server::listen(None, tx).ok();
@@ -275,9 +288,10 @@ fn app_frame() -> ffi::Frame {
         };
         st.shown = Some(s.clone());
         let dots = st.wb.theme().style.dots as i32;
-        ffi::Frame { cols: s.w, rows: s.h, cells, cursor_x: cx, cursor_y: cy, cursor_shape: shape, cursor_blink: s.cursor_blink, dots }
+        let images = s.images.iter().map(|(r, p)| ffi::FrameImage { x: r.x, y: r.y, w: r.w, h: r.h, path: p.display().to_string() }).collect();
+        ffi::Frame { cols: s.w, rows: s.h, cells, cursor_x: cx, cursor_y: cy, cursor_shape: shape, cursor_blink: s.cursor_blink, dots, images }
     })
-    .unwrap_or(ffi::Frame { cols: 0, rows: 0, cells: Vec::new(), cursor_x: 0, cursor_y: 0, cursor_shape: -1, cursor_blink: false, dots: 9 })
+    .unwrap_or(ffi::Frame { cols: 0, rows: 0, cells: Vec::new(), cursor_x: 0, cursor_y: 0, cursor_shape: -1, cursor_blink: false, dots: 9, images: Vec::new() })
 }
 
 fn app_take_clipboard() -> String {

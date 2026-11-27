@@ -76,6 +76,44 @@ pub struct Terminal {
     kitty: bool,
     depth: ColorDepth,
     prev: Option<Surface>,
+    /// The terminal draws pictures (kitty's graphics protocol).
+    graphics: bool,
+    /// Pictures ready to send: (path, cols, rows) → kitty's escape codes.
+    sent: std::collections::HashMap<(std::path::PathBuf, i32, i32), String>,
+}
+
+/// Whether the terminal speaks kitty's graphics protocol (kitty, Ghostty,
+/// WezTerm, Tessera); TURBINE_GRAPHICS=0 or 1 says so instead.
+pub fn graphics_supported() -> bool {
+    if let Ok(v) = std::env::var("TURBINE_GRAPHICS") {
+        return v != "0";
+    }
+    std::env::var_os("KITTY_WINDOW_ID").is_some()
+        || std::env::var("TERM").is_ok_and(|t| t.contains("kitty") || t.contains("ghostty"))
+        || std::env::var("TERM_PROGRAM").is_ok_and(|t| matches!(t.as_str(), "Tessera" | "WezTerm" | "ghostty"))
+}
+
+
+/// A picture as kitty's escape codes, scaled for `cols` × `rows` cells of
+/// `cell` pixels each (sent as PNG, in 4 KB pieces).
+fn kitty_picture(path: &std::path::Path, cols: i32, rows: i32, cell: (u32, u32)) -> Option<String> {
+    let img = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?;
+    let (w, h) = ((cols.max(1) as u32 * cell.0).min(4096), (rows.max(1) as u32 * cell.1).min(4096));
+    let img = img.resize(w, h, image::imageops::FilterType::Triangle);
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
+    let data = base64(&png);
+    let mut out = String::new();
+    let chunks: Vec<&str> = data.as_bytes().chunks(4096).map(|c| std::str::from_utf8(c).unwrap_or("")).collect();
+    for (i, c) in chunks.iter().enumerate() {
+        let more = u8::from(i + 1 < chunks.len());
+        if i == 0 {
+            out.push_str(&format!("\x1b_Ga=T,f=100,q=2,C=1,c={cols},r={rows},m={more};{c}\x1b\\"));
+        } else {
+            out.push_str(&format!("\x1b_Gm={more};{c}\x1b\\"));
+        }
+    }
+    Some(out)
 }
 
 impl Terminal {
@@ -102,11 +140,16 @@ impl Terminal {
             restore(kitty);
             hook(info);
         }));
-        Ok(Terminal { out, kitty, depth: ColorDepth::detect(), prev: None })
+        Ok(Terminal { out, kitty, depth: ColorDepth::detect(), prev: None, graphics: graphics_supported(), sent: std::collections::HashMap::new() })
     }
 
     pub fn kitty(&self) -> bool {
         self.kitty
+    }
+
+    /// Whether pictures can be drawn here.
+    pub fn graphics(&self) -> bool {
+        self.graphics
     }
 
     pub fn size(&self) -> (i32, i32) {
@@ -178,6 +221,23 @@ impl Terminal {
         }
         queue!(out, terminal::EndSynchronizedUpdate)?;
         out.flush()?;
+        // Pictures: sent again only when they change (or the screen was
+        // cleared); the old ones taken away first.
+        if self.graphics {
+            let before = self.prev.as_ref().map(|p| p.images.clone()).unwrap_or_default();
+            if full || before != s.images {
+                queue!(out, Print("\x1b_Ga=d,d=A,q=2\x1b\\"))?;
+                let px = terminal::window_size().ok().filter(|w| w.width > 0 && w.columns > 0).map(|w| ((w.width / w.columns) as u32, (w.height / w.rows.max(1)) as u32)).unwrap_or((8, 16));
+                for (r, path) in &s.images {
+                    let key = (path.clone(), r.w, r.h);
+                    if !self.sent.contains_key(&key) {
+                        let codes = kitty_picture(path, r.w, r.h, px).unwrap_or_default();
+                        self.sent.insert(key.clone(), codes);
+                    }
+                    queue!(out, cursor::MoveTo(r.x as u16, r.y as u16), Print(&self.sent[&key]))?;
+                }
+            }
+        }
         self.prev = Some(s.clone());
         Ok(())
     }

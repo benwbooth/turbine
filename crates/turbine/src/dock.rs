@@ -232,7 +232,8 @@ impl Dock {
         let mid = Rect::new(area.x + lw - ol, area.y, (area.w - lw - rw + ol).max(0), area.h);
         let bh = if shown(&self.bottom) { self.bottom.size.clamp(4, (mid.h - 6).max(4)) } else { 0 };
         let bottom = (bh > 0 && mid.h > bh).then(|| Rect::new(mid.x, mid.bottom() - bh, mid.w, bh));
-        let ed = Rect::new(mid.x, mid.y, mid.w, mid.h - bottom.map_or(0, |b| b.h));
+        // (And down onto the panel's top row: one border between them.)
+        let ed = Rect::new(mid.x, mid.y, mid.w, mid.h - bottom.map_or(0, |b| b.h - 1));
         // Breadcrumbs above the editors (none for a file with no path:
         // they'd only repeat its name); the tabs in the editor window's
         // top border, where its title would be (Turbo Vision's way), so a
@@ -381,7 +382,7 @@ mod tests {
         assert_eq!((bottom.x, bottom.w, bottom.bottom()), (29, 120 - 30 - 46 + 1, 41));
         // (The tabs are in the editors' top border, under the breadcrumbs.)
         assert_eq!((l.breadcrumbs.unwrap().y, l.editor_tabs.unwrap().y), (1, 2));
-        assert_eq!((l.editors.y, l.editors.bottom()), (2, bottom.y));
+        assert_eq!((l.editors.y, l.editors.bottom()), (2, bottom.y + 1));
         // A narrow screen: the side bars give way.
         let l = d.layout(Rect::new(0, 1, 60, 20));
         assert!(l.editors.w >= 24, "{l:?}");

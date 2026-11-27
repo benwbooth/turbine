@@ -6,8 +6,11 @@
 
 #include <QtCore/QTimer>
 #include <memory>
+#include <mutex>
 #include <QtGui/QFont>
 #include <QtGui/QImage>
+#include <QtCore/QHash>
+#include <QtCore/QSet>
 #include <QtQuick/QQuickPaintedItem>
 
 namespace turbine { struct Frame; }
@@ -64,6 +67,11 @@ private:
     // (each dot m_k texture pixels), and the texture is stretched to the
     // cells as a 4:3 monitor did: dots 1.35 times taller than wide.
     bool m_vga = false;
+    // Pictures (an image viewer's), loaded on a thread of their own.
+    QHash<QString, QImage> m_pictures;
+    QSet<QString> m_loading;
+    std::mutex m_picMutex;
+    void drawPictures(QPainter* p);
     int m_k = 2, m_dots = 9;
     QFont m_vga9, m_vga8;
     QSize m_vgaSize;

@@ -18,6 +18,7 @@ mod extensions;
 pub use extensions::extension_dirs;
 mod find;
 mod git;
+mod images;
 mod inline_ai;
 mod lsp_more;
 mod preview;
@@ -240,6 +241,11 @@ pub struct Workbench {
     extras: extras::Extras,
     /// File managers (XTree's look), by window.
     xtrees: HashMap<u32, crate::xtree::XTree>,
+    /// Picture viewers, by window; where this frame's pictures go; and
+    /// whether the front end can show them.
+    viewers: HashMap<u32, images::Viewer>,
+    image_places: Vec<(Rect, PathBuf)>,
+    images_inline: bool,
     lsp_spawn: LspSpawner,
     lsp_requests: HashMap<(LspKey, i64), (LspReq, u32)>,
     completion: Option<Completion>,
@@ -604,6 +610,9 @@ impl Workbench {
             git: Default::default(),
             extras: Default::default(),
             xtrees: HashMap::new(),
+            viewers: HashMap::new(),
+            image_places: Vec::new(),
+            images_inline: false,
             lsp_spawn: default_lsp_spawner(),
             lsp_requests: HashMap::new(),
             completion: None,
@@ -767,6 +776,11 @@ impl Workbench {
     /// An agent (or a question for it) is still at work.
     pub fn agent_running(&self) -> bool {
         self.agent.is_some() || self.pending_task.is_some() || self.chat_streaming.is_some() || self.pending_question.is_some()
+    }
+
+    /// The front end can draw pictures (the app; a kitty-graphics terminal).
+    pub fn set_images_inline(&mut self, on: bool) {
+        self.images_inline = on;
     }
 
     pub fn set_socket_path(&mut self, p: PathBuf) {
@@ -2118,6 +2132,11 @@ impl Workbench {
                 self.dialog = Some(d);
                 return;
             }
+            // (Pictures show in a viewer where they can be drawn.)
+            crate::filekind::Kind::Image if self.images_inline => {
+                self.open_image(p);
+                return;
+            }
             _ => {
                 match crate::filekind::open_outside(p) {
                     Ok(()) => self.say(format!("Opened {} in its app", p.display())),
@@ -3422,6 +3441,9 @@ impl Workbench {
                 return;
             }
         }
+        if self.image_key(&k) {
+            return;
+        }
         // The Immediate window runs its lines.
         if self.immediate_key(&k) {
             return;
@@ -4224,6 +4246,7 @@ impl App for Workbench {
         self.preview_tick(now);
         self.git_tick();
         self.preview_tab_tick();
+        self.images_tick();
         // (Closed file managers' state goes; the rest take their answers.)
         let ids: HashSet<u32> = self.windows.iter().map(|w| w.win.id).collect();
         self.xtrees.retain(|id, _| ids.contains(id));
@@ -4316,6 +4339,8 @@ impl App for Workbench {
         c.fill(desk, theme.scheme.desktop_char, theme.scheme.desktop);
         let n = self.windows.len();
         let has_modal = self.dialog.is_some() || self.menubar.is_open();
+        self.image_places.clear();
+        let mut to_view: Vec<(u32, Rect)> = Vec::new();
         for (i, w) in self.windows.iter_mut().enumerate() {
             if w.dock.is_some() {
                 continue;
@@ -4338,6 +4363,10 @@ impl App for Workbench {
                 w.win.draw_frame(&mut wc, &theme, active);
             }
             let inner = w.win.inner();
+            if w.special == Some("image") {
+                to_view.push((w.win.id, inner));
+                continue;
+            }
             // A file manager: XTree's screen over the whole window.
             if let Some(x) = self.xtrees.get_mut(&w.win.id) {
                 x.draw(&mut wc, w.win.rect, active && !has_modal);
@@ -4370,6 +4399,16 @@ impl App for Workbench {
                     wc.print(r.x + 12 - turbine_text::unicode::str_width(&at) as i32, r.bottom() - 1, &at, theme.scheme.frame_active);
                 }
             }
+        }
+        // Picture viewers (only the front one's picture, as windows overlap).
+        for (id, inner) in to_view {
+            let mut vc = c.sub(desk);
+            self.draw_viewer(&mut vc, id, inner);
+        }
+        let front = self.windows.iter().rev().find(|w| w.dock.is_none()).map(|w| w.win.id);
+        let front_rect = self.windows.iter().find(|w| Some(w.win.id) == front).map(|w| w.win.rect);
+        if let Some(fr) = front_rect {
+            self.image_places.retain(|(r, _)| fr.contains(Point::new(r.x, r.y)));
         }
         self.sync_mirrors();
         self.layout_dock();
@@ -4481,6 +4520,8 @@ impl App for Workbench {
             shell::join_borders(surf, &parts);
         }
         surf.cursor_blink = self.shell.cursor_blink;
+        // (No pictures under a dialog or a menu.)
+        surf.images = if self.dialog.is_none() && !self.menubar.is_open() && self.shell.palette.is_none() { std::mem::take(&mut self.image_places) } else { Vec::new() };
         let in_editor = self.dialog.is_none() && self.overwrite_q.is_none() && self.shell.focus == Focus::Editors && self.shell.palette.is_none();
         if let Some((p, s)) = surf.cursor {
             if !in_editor && s != shape {
@@ -5952,6 +5993,29 @@ mod tests {
         assert!(wb.shell.tab_menu.is_none());
         let w = &wb.windows[wb.editor_index().unwrap()];
         assert!(w.ed.doc.path.as_ref().unwrap().ends_with("file_number_00.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pictures_open_in_a_viewer_fitted_to_it() {
+        let dir = std::env::temp_dir().join(format!("turbine-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("wide.png");
+        image::RgbImage::new(400, 100).save(&p).unwrap();
+        let mut wb = Workbench::new(&[]);
+        wb.driver.cps = 0.0;
+        wb.set_images_inline(true);
+        wb.dispatch(Event::Resize(100, 30));
+        wb.open_path(&p);
+        assert_eq!(wb.windows.last().unwrap().special, Some("image"));
+        wait_until(&mut wb, "its size", |wb| wb.viewers.values().any(|v| v.dims == Some((400, 100))));
+        let mut surf = Surface::new(100, 30);
+        wb.render(&mut surf);
+        let (r, path) = surf.images.first().cloned().expect("a picture placed");
+        assert_eq!(path, p);
+        // 4:1 with cells twice as tall as wide: twice as many columns as rows... times 4.
+        assert!((r.w as f64 / r.h as f64 - 8.0).abs() < 1.0, "{r:?}");
+        assert!(surf.to_text().contains("400 × 100"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
