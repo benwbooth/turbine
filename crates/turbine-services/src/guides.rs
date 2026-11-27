@@ -88,6 +88,10 @@ impl Guide {
 const GNU_DROP: &str = ".contents, .shortcontents, .contents-heading, .shortcontents-heading, a.copiable-link, .nav-panel, .header, .navigation, hr, .chapter-toc, .section-toc, div.printindex, table[class$='-printindex'], table[class^='index-']";
 
 pub static GUIDES: &[Guide] = &[
+    // tessh's own two, from the installed tessh (`tessh --guide`).
+    g(&["tessh"], "tessh guide", "MIT", "https://github.com/benwbooth/tessera/blob/main/LICENSE", &["tessh:"], "", "tessh").id("tessh"),
+    g(&["tessh"], "Advanced tessh Scripting Guide", "Public domain (the ABS Guide, ported)", "https://github.com/benwbooth/tessera/tree/main/tessh/doc/advanced",
+        &["tessh:advanced"], "", "tessh").id("tessh-advanced"),
     gi(&["python", "python3"], "The Python Tutorial", "PSF License 2.0", "https://docs.python.org/3/license.html",
         ("https://docs.python.org/3/tutorial/index.html", "div.toctree-wrapper li.toctree-l1 > a"), "div.body", "python"),
     g(&["rust"], "The Rust Programming Language", "MIT or Apache-2.0", "https://github.com/rust-lang/book/blob/main/LICENSE-MIT",
@@ -1383,6 +1387,19 @@ pub fn is_kept(lang: &str) -> bool {
 /// off the UI thread.
 pub fn guide_markdown(lang: &str, refresh: bool) -> Result<String, String> {
     let g = find(lang).ok_or_else(|| format!("No guide for {lang}."))?;
+    // (tessh's come from the tessh installed, so they match it: kept only
+    // for when it isn't there.)
+    if let Some(topic) = g.pages.first().and_then(|p| p.strip_prefix("tessh:")) {
+        let path = cache_path(g);
+        return match tessh_guide(topic) {
+            Ok(md) => {
+                let _ = std::fs::create_dir_all(cache_dir());
+                let _ = std::fs::write(&path, format!("{CONVERT_VERSION}\n{md}"));
+                Ok(md)
+            }
+            Err(e) => std::fs::read_to_string(&path).map(|t| t.strip_prefix(CONVERT_VERSION).unwrap_or(&t).trim_start().to_string()).map_err(|_| e),
+        };
+    }
     let path = cache_path(g);
     let kept = std::fs::read_to_string(&path).ok();
     tidy_once();
@@ -1418,6 +1435,26 @@ pub fn guide_markdown(lang: &str, refresh: bool) -> Result<String, String> {
         }
     };
     Ok(md.strip_prefix(CONVERT_VERSION).map(|m| m.trim_start_matches('\n').to_string()).unwrap_or(md))
+}
+
+/// A tessh guide from `tessh --guide [topic]`, else (the main one) from
+/// GitHub.
+fn tessh_guide(topic: &str) -> Result<String, String> {
+    let mut cmd = std::process::Command::new("tessh");
+    cmd.arg("--guide");
+    if !topic.is_empty() {
+        cmd.arg(topic);
+    }
+    let out = cmd.env("NO_COLOR", "1").stdin(std::process::Stdio::null()).output();
+    let clean = |t: &str| t.lines().filter(|l| !l.starts_with("<!-- help:")).collect::<Vec<_>>().join("\n");
+    match out {
+        Ok(o) if o.status.success() && o.stdout.len() > 100 => Ok(clean(&String::from_utf8_lossy(&o.stdout))),
+        _ if topic.is_empty() => {
+            let url = "https://raw.githubusercontent.com/benwbooth/tessera/main/tessh/doc/guide.md";
+            ureq::get(url).call().map_err(|e| format!("tessh isn't installed, and {url}: {e}"))?.body_mut().read_to_string().map(|t| clean(&t)).map_err(|e| e.to_string())
+        }
+        _ => Err("Install tessh to read this guide (nix run github:benwbooth/tessera#tessh)".into()),
+    }
 }
 
 /// What a guide being fetched is doing now ("" when nothing).

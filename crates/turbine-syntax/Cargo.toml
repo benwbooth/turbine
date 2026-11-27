@@ -29,3 +29,6 @@ tree-sitter-rust = "0.24.2"
 tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
+tree-sitter-sequel = "0.3.13"
+# tessh's grammar lives in Tessera; scripts/sync-tessh-grammar.sh copies it here.
+tree-sitter-tessh = { path = "../../vendor/tree-sitter-tessh" }

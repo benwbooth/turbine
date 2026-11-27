@@ -523,3 +523,38 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+#[cfg(test)]
+mod tessh_tests {
+    use super::*;
+
+    /// tessh's checker and guides, when tessh is installed.
+    #[test]
+    fn tessh_check_and_guides() {
+        if !on_path("tessh") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("turbine-tessh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("bad.tsh");
+        std::fs::write(&f, "def f x\n    print (1 +\n").unwrap();
+        let cmd = check_command("tessh", &f, &dir).unwrap();
+        assert!(cmd.starts_with("tessh --check"));
+        let r = spawn(&cmd, &dir);
+        let mut p = ProblemParser::new(&dir);
+        let mut probs = Vec::new();
+        while let Ok(e) = r.rx.recv() {
+            match e {
+                RunEvent::Line(l) => probs.extend(p.line(&l)),
+                RunEvent::Done(..) => break,
+            }
+        }
+        assert!(!probs.is_empty(), "tessh --check found nothing");
+        assert_eq!(probs[0].path, std::fs::canonicalize(&f).unwrap());
+        let md = crate::guides::guide_markdown("tessh", false).unwrap();
+        assert!(md.starts_with("# tessh guide"), "{}", &md[..80.min(md.len())]);
+        let adv = crate::guides::guide_markdown("tessh-advanced", false).unwrap();
+        assert!(adv.contains("Advanced tessh Scripting Guide"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

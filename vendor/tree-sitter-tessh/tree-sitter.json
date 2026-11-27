@@ -1,0 +1,19 @@
+{
+  "grammars": [
+    {
+      "name": "tessh",
+      "camelcase": "Tessh",
+      "scope": "source.tessh",
+      "path": ".",
+      "file-types": ["tsh"],
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "tessh: Tessera's shell language",
+    "links": {"repository": "https://github.com/benwbooth/tessera"}
+  },
+  "bindings": {"rust": true, "c": false, "go": false, "node": false, "python": false, "swift": false}
+}

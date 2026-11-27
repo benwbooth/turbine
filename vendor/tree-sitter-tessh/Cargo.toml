@@ -1,0 +1,19 @@
+[package]
+name = "tree-sitter-tessh"
+version = "0.1.0"
+edition = "2021"
+description = "tessh grammar for tree-sitter (highlighting and syntax errors)"
+license = "MIT"
+build = "bindings/rust/build.rs"
+include = ["bindings/rust/*", "grammar.js", "queries/*", "src/*"]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1"
+tree-sitter = "0.27"
+
+[build-dependencies]
+cc = "1"
+

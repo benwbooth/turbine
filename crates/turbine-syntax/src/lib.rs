@@ -57,13 +57,16 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("python", "Python"),
     ("ruby", "Ruby"),
     ("rust", "Rust"),
+    ("sql", "SQL"),
+    ("tessh", "tessh"),
     ("toml", "TOML"),
     ("typescript", "TypeScript"),
     ("tsx", "TSX"),
     ("yaml", "YAML"),
 ];
 
-/// The language of a file, from its name, extension or first line.
+/// The language of a file, from its name, extension or first line (the
+/// names Tessera and Helix use).
 pub fn detect(path: Option<&Path>, first_line: &str) -> Option<String> {
     if let Some(p) = path {
         let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -71,8 +74,24 @@ pub fn detect(path: Option<&Path>, first_line: &str) -> Option<String> {
             "makefile" | "gnumakefile" => Some("make"),
             "dockerfile" | "containerfile" => Some("dockerfile"),
             "cmakelists.txt" => Some("cmake"),
-            "cargo.lock" | "flake.lock" => Some(if name == "flake.lock" { "json" } else { "toml" }),
-            ".bashrc" | ".bash_profile" | ".profile" | ".zshrc" | ".zprofile" => Some("bash"),
+            "cargo.lock" => Some("toml"),
+            "flake.lock" | "package-lock.json" => Some("json"),
+            ".bashrc" | ".bash_profile" | ".profile" | ".zshrc" | ".zprofile" | ".zshenv" | "pkgbuild" | ".envrc" => Some("bash"),
+            "login.tsh" | "rc.tsh" | "logout.tsh" => Some("tessh"),
+            "justfile" | ".justfile" => Some("just"),
+            "meson.build" => Some("meson"),
+            "go.mod" => Some("gomod"),
+            "go.work" => Some("gowork"),
+            ".gitignore" | ".dockerignore" => Some("gitignore"),
+            ".gitattributes" => Some("gitattributes"),
+            ".gitconfig" => Some("git-config"),
+            "commit_editmsg" => Some("gitcommit"),
+            "git-rebase-todo" => Some("git-rebase"),
+            "nginx.conf" => Some("nginx"),
+            "caddyfile" => Some("caddyfile"),
+            "build.zig.zon" => Some("zig"),
+            _ if name.starts_with("dockerfile.") => Some("dockerfile"),
+            _ if name.ends_with(".env") || name == ".env" => Some("bash"),
             _ => None,
         };
         if let Some(l) = by_name {
@@ -81,73 +100,181 @@ pub fn detect(path: Option<&Path>, first_line: &str) -> Option<String> {
         let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         let by_ext = match ext.as_str() {
             "rs" => "rust",
-            "py" | "pyw" | "pyi" => "python",
+            "py" | "pyw" | "pyi" | "xsh" => "python",
             "js" | "mjs" | "cjs" | "jsx" => "javascript",
             "ts" | "mts" | "cts" => "typescript",
             "tsx" => "tsx",
             "c" | "h" => "c",
-            "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" | "ipp" => "cpp",
+            "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" | "ipp" | "c++" | "h++" | "ino" => "cpp",
             "go" => "go",
             "java" => "java",
-            "rb" => "ruby",
+            "rb" | "rake" | "gemspec" => "ruby",
             "lua" => "lua",
-            "json" | "jsonc" => "json",
+            "json" | "jsonc" | "json5" => "json",
             "yaml" | "yml" => "yaml",
             "toml" => "toml",
-            "html" | "htm" => "html",
+            "html" | "htm" | "xhtml" => "html",
             "css" => "css",
-            "md" | "markdown" => "markdown",
-            "sh" | "bash" | "zsh" => "bash",
+            "scss" => "scss",
+            "md" | "markdown" | "mdx" => "markdown",
+            "sh" | "bash" | "zsh" | "ksh" | "dash" => "bash",
+            "fish" => "fish",
+            "tsh" | "tessh" => "tessh",
+            "nu" => "nu",
+            "ps1" | "psm1" | "psd1" => "powershell",
             "nix" => "nix",
             "zig" => "zig",
-            "hs" => "haskell",
-            "ml" | "mli" => "ocaml",
+            "hs" | "lhs" => "haskell",
+            "ml" => "ocaml",
+            "mli" => "ocaml_interface",
             "ex" | "exs" => "elixir",
-            "erl" => "erlang",
+            "heex" => "heex",
+            "eex" => "eex",
+            "erl" | "hrl" => "erlang",
             "kt" | "kts" => "kotlin",
             "swift" => "swift",
             "cs" => "c-sharp",
-            "fs" | "fsx" => "fsharp",
+            "fs" | "fsx" | "fsi" => "fsharp",
             "php" => "php",
-            "pl" | "pm" => "perl",
-            "r" => "r",
-            "scala" => "scala",
+            "pl" | "pm" | "t" => "perl",
+            "r" | "rmd" => "r",
+            "scala" | "sc" | "sbt" => "scala",
             "sql" => "sql",
-            "vim" => "vim",
             "el" => "elisp",
-            "clj" | "cljs" | "edn" => "clojure",
-            "scm" | "ss" => "scheme",
+            "clj" | "cljs" | "cljc" | "edn" => "clojure",
+            "scm" | "ss" | "rkt" => "scheme",
+            "fnl" => "fennel",
+            "janet" => "janet-simple",
             "dart" => "dart",
             "jl" => "julia",
-            "qml" => "qml",
-            "xml" | "svg" => "xml",
-            "proto" => "protobuf",
+            "qml" => "qmljs",
+            "xml" | "svg" | "xaml" | "xsd" | "xsl" | "xslt" | "plist" | "csproj" | "vbproj" | "fsproj" | "vcxproj" | "props" | "targets" | "resx"
+            | "nuspec" | "wsdl" | "rss" | "atom" | "kml" | "gpx" | "ui" | "qrc" => "xml",
+            "proto" => "proto",
+            "pas" | "pp" | "inc" | "dpr" => "pascal",
+            "asm" | "s" | "nasm" => "nasm",
+            "f" | "f90" | "f95" | "f03" | "for" => "fortran",
+            "ini" | "cfg" | "conf" | "desktop" | "service" | "timer" | "socket" | "mount" | "target" => "ini",
+            "properties" => "properties",
+            "make" | "mk" => "make",
+            "cmake" => "cmake",
+            "dockerfile" => "dockerfile",
+            "tex" | "sty" | "cls" | "ltx" => "latex",
+            "bib" => "bibtex",
+            "typ" => "typst",
+            "rst" => "rst",
+            "org" => "org",
+            "csv" | "tsv" => "csv",
+            "diff" | "patch" => "diff",
+            "graphql" | "gql" => "graphql",
+            "svelte" => "svelte",
+            "vue" => "vue",
+            "astro" => "astro",
+            "gleam" => "gleam",
+            "odin" => "odin",
+            "v" | "vv" => "v",
+            "nim" | "nims" | "nimble" => "nim",
+            "d" | "di" => "d",
+            "cr" => "crystal",
+            "elm" => "elm",
+            "purs" => "purescript",
+            "hcl" | "tf" | "tfvars" => "hcl",
+            "glsl" | "vert" | "frag" | "geom" | "comp" => "glsl",
+            "wgsl" => "wgsl",
+            "hlsl" => "hlsl",
+            "sol" => "solidity",
+            "vhd" | "vhdl" => "vhdl",
+            "sv" | "svh" | "vh" => "verilog",
+            "tcl" => "tcl",
+            "awk" => "awk",
+            "jq" => "jq",
+            "jsonnet" | "libsonnet" => "jsonnet",
+            "kdl" => "kdl",
+            "ron" => "ron",
+            "dhall" => "dhall",
+            "cue" => "cue",
+            "prisma" => "prisma",
+            "wat" => "wat",
+            "wast" => "wast",
+            "wit" => "wit",
+            "ll" => "llvm",
+            "lean" => "lean",
+            "agda" => "agda",
+            "sml" => "sml",
+            "ada" | "adb" | "ads" => "ada",
+            "groovy" | "gradle" => "groovy",
+            "vala" => "vala",
+            "hare" => "hare",
+            "mojo" => "mojo",
+            "slint" => "slint",
+            "templ" => "templ",
+            "twig" => "twig",
+            "jinja" | "jinja2" | "j2" => "jinja2",
+            "tera" => "tera",
+            "pug" => "pug",
+            "mermaid" | "mmd" => "mermaid",
+            "dot" | "gv" => "dot",
+            "log" => "log",
+            "po" | "pot" => "po",
+            "gd" => "gdscript",
+            "tscn" | "tres" => "godot_resource",
+            "pest" => "pest",
+            "ungram" => "ungrammar",
+            "thrift" => "thrift",
+            "capnp" => "capnp",
+            "smali" => "smali",
+            "robot" => "robot",
+            "feature" => "gherkin",
+            "hurl" => "hurl",
+            "just" => "just",
             "bas" | "bi" | "bm" => "basic",
-            "pas" | "pp" | "inc" => "pascal",
-            "asm" | "s" => "nasm",
-            "f" | "f90" | "for" => "fortran",
             "cob" | "cbl" => "cobol",
             "bat" | "cmd" => "batch",
-            "ps1" => "powershell",
+            "vim" => "vim",
             _ => "",
         };
         if !by_ext.is_empty() {
             return Some(by_ext.into());
         }
     }
-    let l = first_line.trim();
+    let l = first_line.trim_start_matches('\u{feff}').trim();
     if let Some(shebang) = l.strip_prefix("#!") {
-        let prog = shebang.split_whitespace().map(|w| w.rsplit('/').next().unwrap_or(w)).find(|w| *w != "env")?;
+        let mut words = shebang.split_whitespace().map(|w| w.rsplit('/').next().unwrap_or(w));
+        let mut prog = words.next()?;
+        if prog == "env" {
+            prog = words.find(|w| !w.starts_with('-'))?;
+        }
+        let prog = prog.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
         let lang = match prog {
-            p if p.starts_with("python") => "python",
+            "python" | "pypy" => "python",
             "sh" | "bash" | "zsh" | "dash" | "ksh" => "bash",
-            "node" | "deno" | "bun" => "javascript",
+            "fish" => "fish",
+            "tessh" | "tessh-static" => "tessh",
+            "nu" => "nu",
+            "node" | "bun" => "javascript",
+            "deno" | "ts-node" | "tsx" => "typescript",
             "ruby" => "ruby",
-            "lua" => "lua",
+            "lua" | "luajit" => "lua",
             "perl" => "perl",
+            "php" => "php",
+            "pwsh" => "powershell",
+            "Rscript" => "r",
+            "julia" => "julia",
+            "elixir" => "elixir",
+            "escript" => "erlang",
+            "runghc" | "runhaskell" => "haskell",
+            "awk" | "gawk" => "awk",
+            "make" => "make",
+            "nix-shell" => "bash",
             _ => return None,
         };
         return Some(lang.into());
+    }
+    if l.starts_with("<?xml") {
+        return Some("xml".into());
+    }
+    if l.to_ascii_lowercase().starts_with("<!doctype html") || l.starts_with("<html") {
+        return Some("html".into());
     }
     None
 }
@@ -183,6 +310,8 @@ fn make(name: &str) -> Option<Lang> {
         "html" => (tree_sitter_html::LANGUAGE.into(), tree_sitter_html::HIGHLIGHTS_QUERY.into()),
         "css" => (tree_sitter_css::LANGUAGE.into(), tree_sitter_css::HIGHLIGHTS_QUERY.into()),
         "markdown" => (tree_sitter_md::LANGUAGE.into(), tree_sitter_md::HIGHLIGHT_QUERY_BLOCK.into()),
+        "sql" => (tree_sitter_sequel::LANGUAGE.into(), tree_sitter_sequel::HIGHLIGHTS_QUERY.into()),
+        "tessh" => (tree_sitter_tessh::LANGUAGE.into(), tree_sitter_tessh::HIGHLIGHTS_QUERY.into()),
         // Anything else: Helix's grammar for it, if there is one.
         other => {
             grammars::ensure(other).ok()?;
@@ -365,6 +494,67 @@ fn structure(tree: &tree_sitter::Tree, text: &str, end: Instant) -> Structure {
     st
 }
 
+/// Blocks by indentation (a header line, then lines indented under it):
+/// folds, and tessh's definitions (def, class, defmacro, defop).
+fn indent_blocks(text: &str) -> (Vec<(usize, usize)>, Vec<Symbol>) {
+    let lines: Vec<&str> = text.lines().collect();
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let mut folds = Vec::new();
+    let mut defs = Vec::new();
+    let mut open: Vec<(usize, usize)> = Vec::new(); // (line, indent) of headers
+    for (i, l) in lines.iter().enumerate() {
+        if l.trim().is_empty() || l.trim_start().starts_with('#') {
+            continue;
+        }
+        let ind = indent(l);
+        while let Some(&(h, hi)) = open.last() {
+            if ind > hi {
+                break;
+            }
+            open.pop();
+            // The block ends at its last non-blank line.
+            let mut last = i - 1;
+            while last > h && lines[last].trim().is_empty() {
+                last -= 1;
+            }
+            if last > h {
+                folds.push((h, last));
+            }
+        }
+        let depth = open.len();
+        let mut w = l.split_whitespace();
+        let kind = match w.next() {
+            Some("def") => Some("function"),
+            Some("class") => Some("class"),
+            Some("defmacro") | Some("defop") => Some("function"),
+            Some("async") if l.split_whitespace().nth(1) == Some("def") => {
+                w.next();
+                Some("function")
+            }
+            _ => None,
+        };
+        if let (Some(kind), Some(name)) = (kind, w.next()) {
+            let name: String = name.chars().take_while(|c| !matches!(c, '(' | ':' | ' ')).collect();
+            defs.push(Symbol { name, kind, line: i, depth });
+        }
+        if lines.get(i + 1..).and_then(|r| r.iter().find(|x| !x.trim().is_empty())).is_some_and(|n| indent(n) > ind) {
+            open.push((i, ind));
+        }
+    }
+    let n = lines.len();
+    while let Some((h, _)) = open.pop() {
+        let mut last = n.saturating_sub(1);
+        while last > h && lines[last].trim().is_empty() {
+            last -= 1;
+        }
+        if last > h {
+            folds.push((h, last));
+        }
+    }
+    folds.sort();
+    (folds, defs)
+}
+
 /// Highlight spans per line, and the text's structure. None when there's
 /// no grammar.
 pub fn analyze(lang: &str, text: &str, deadline: Duration) -> Option<(Vec<LineSpans>, Structure)> {
@@ -410,7 +600,29 @@ pub fn analyze(lang: &str, text: &str, deadline: Duration) -> Option<(Vec<LineSp
             li += 1;
         }
     }
-    let st = structure(&tree, text, end + Duration::from_millis(500));
+    let mut st = structure(&tree, text, end + Duration::from_millis(500));
+    if lang == "tessh" {
+        // (tessh's grammar is a line at a time: its strings' $x and $(…)
+        // come from its own splitter, its blocks from indentation.)
+        lines = vec![Vec::new(); line_starts.len()];
+        // (Its query's first match wins; here later spans win: reversed.)
+        for (s0, e0, k) in tree_sitter_tessh::highlight::spans(text).into_iter().rev() {
+            let Some(kind) = kind_index(kind_of(k)) else { continue };
+            let mut li = line_starts.partition_point(|&x| x <= s0).saturating_sub(1);
+            while li < line_starts.len() && line_starts[li] < e0 {
+                let ls = line_starts[li];
+                let le = line_starts.get(li + 1).map(|x| x - 1).unwrap_or(text.len());
+                let (a, b) = (s0.max(ls) - ls, e0.min(le).saturating_sub(ls));
+                if b > a {
+                    lines[li].push((a as u32, b as u32, kind));
+                }
+                li += 1;
+            }
+        }
+        let (folds, defs) = indent_blocks(text);
+        st.folds = folds;
+        st.defs = defs.into_iter().map(|d| d.line).collect();
+    }
     Some((lines, st))
 }
 
@@ -459,6 +671,9 @@ fn symbol_kind(node_kind: &str) -> Option<&'static str> {
 /// The definitions in a text, in order (the editor's Outline). None when
 /// there's no grammar for the language.
 pub fn symbols(lang: &str, text: &str, deadline: Duration) -> Option<Vec<Symbol>> {
+    if lang == "tessh" {
+        return Some(indent_blocks(text).1);
+    }
     let l = cached(lang)?;
     let end = Instant::now() + deadline;
     let mut p = Parser::new();
@@ -587,6 +802,28 @@ impl Highlighter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tessh_highlights_folds_outline() {
+        let src = "# tools\ndef greet name\n    print \"hi $name\"\n    if name\n        echo yes\n\nclass Box\n    def size self\n        return 1\nls -la | grep x\n";
+        assert_eq!(super::detect(Some(std::path::Path::new("a.tsh")), ""), Some("tessh".into()));
+        assert_eq!(super::detect(None, "#!/usr/bin/env tessh"), Some("tessh".into()));
+        let (lines, st) = super::analyze("tessh", src, std::time::Duration::from_secs(2)).unwrap();
+        let kind = |line: usize, word: &str| {
+            let l = src.lines().nth(line).unwrap();
+            let b = l.find(word).unwrap() as u32;
+            lines[line].iter().rev().find(|(s, e, _)| *s <= b && b < *e).map(|x| super::KINDS[x.2 as usize])
+        };
+        assert_eq!(kind(1, "def"), Some("keyword"));
+        assert_eq!(kind(2, "$name"), Some("variable"));
+        assert_eq!(kind(0, "tools"), Some("comment"));
+        assert_eq!(kind(9, "-la"), Some("attribute"));
+        assert_eq!(st.folds, vec![(1, 4), (3, 4), (6, 8), (7, 8)]);
+        assert_eq!(st.defs, vec![1, 6, 7]);
+        let syms = super::symbols("tessh", src, std::time::Duration::from_secs(1)).unwrap();
+        let got: Vec<_> = syms.iter().map(|s| (s.name.as_str(), s.kind, s.depth)).collect();
+        assert_eq!(got, vec![("greet", "function", 0), ("Box", "class", 0), ("size", "function", 1)]);
+    }
+
     #[test]
     fn structure_folds_nodes_defs() {
         let src = "fn main() {\n    let x = 1;\n    if x > 0 {\n        go();\n    }\n}\n\nfn go() {}\n";
