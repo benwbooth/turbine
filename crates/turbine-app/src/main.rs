@@ -7,6 +7,8 @@ use cxx_qt_lib::{QQmlApplicationEngine, QString, QUrl};
 use std::path::PathBuf;
 
 fn main() {
+    // (As a grammar's trial child: try it and exit, before any Qt.)
+    turbine::grammars_check_from_args();
     let files: Vec<PathBuf> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).map(PathBuf::from).collect();
     bridge::ffi::create_app();
     bridge::init(&files);

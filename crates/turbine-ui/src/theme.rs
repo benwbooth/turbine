@@ -192,6 +192,30 @@ fn borland_blue_syntax() -> [Option<Color>; 19] {
     ])
 }
 
+/// Code on QBasic's blue, its text light grey: comments cyan (not the
+/// text's grey), keywords white, functions yellow (Turbo Pascal's
+/// identifiers), strings light cyan, numbers light green, types magenta.
+fn qbasic_syntax() -> [Option<Color>; 19] {
+    use vga::*;
+    syntax_table(&[
+        ("keyword", WHITE),
+        ("comment", CYAN),
+        ("string", LIGHT_CYAN),
+        ("number", LIGHT_GREEN),
+        ("constant", LIGHT_GREEN),
+        ("function", YELLOW),
+        ("attribute", LIGHT_GREEN),
+        ("label", LIGHT_GREEN),
+        ("type", LIGHT_MAGENTA),
+        ("constructor", LIGHT_MAGENTA),
+        ("namespace", LIGHT_MAGENTA),
+        ("escape", LIGHT_RED),
+        ("special", LIGHT_RED),
+        ("embedded", LIGHT_RED),
+        ("tag", WHITE),
+    ])
+}
+
 macro_rules! s {
     ($fg:ident on $bg:ident) => {
         Style::new(vga::$fg, vga::$bg)
@@ -304,8 +328,9 @@ impl Scheme {
             agent_pointer: s!(BLACK on YELLOW),
             terminal: s!(LIGHT_GRAY on BLACK),
             // (QBasic and Edit never coloured code; Turbine does, in EGA's
-            // bright colours on the blue, as Borland's editors did.)
-            syntax: borland_blue_syntax(),
+            // bright colours on the blue, as Borland's editors did, with
+            // comments apart from the grey text.)
+            syntax: qbasic_syntax(),
             bold_keywords: false,
             diag_error: vga::LIGHT_RED,
             diag_warning: vga::LIGHT_MAGENTA,

@@ -426,7 +426,9 @@ fn kept_verdict(name: &str) -> Option<bool> {
 
 fn verdict_key(name: &str, file: &Path) -> String {
     let stamp = std::fs::metadata(file).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-    format!("{name}\t{}\t{stamp}\t", file.display())
+    // (v2: verdicts from before the desktop app ran trials properly said
+    // "crashed" for every grammar; those don't count.)
+    format!("v2\t{name}\t{}\t{stamp}\t", file.display())
 }
 
 /// The grammar tried in a child process: this program again with

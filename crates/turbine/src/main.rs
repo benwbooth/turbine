@@ -90,7 +90,7 @@ fn parse_args() -> Result<Args, String> {
 
 fn main() {
     // As a child trying a downloaded grammar: try it and exit.
-    turbine_syntax::grammars::check_from_args();
+    turbine::grammars_check_from_args();
     let argv: Vec<String> = std::env::args().collect();
     if argv.get(1).map(String::as_str) == Some("pack-extension") {
         // A core module built with wit-bindgen -> an extension component.

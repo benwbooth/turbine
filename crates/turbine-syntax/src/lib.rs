@@ -922,6 +922,7 @@ impl Highlighter {
         std::thread::Builder::new()
             .name("turbine-syntax".into())
             .spawn(move || {
+                let mut waited: std::collections::HashSet<String> = std::collections::HashSet::new();
                 while let Ok(first) = jobs.recv() {
                     let mut latest: HashMap<u64, Job> = HashMap::new();
                     latest.insert(first.id, first);
@@ -929,7 +930,21 @@ impl Highlighter {
                         latest.insert(j.id, j);
                     }
                     for (_, j) in latest {
-                        let (lines, structure) = match analyze(&j.lang, &j.text, Duration::from_secs(2)) {
+                        let got = analyze(&j.lang, &j.text, Duration::from_secs(2));
+                        // (A grammar not tried or unpacked yet: plain for now,
+                        // and the real colours once it's ready, once per language.)
+                        if got.is_none() && j.lang != "text" && grammars::is_known(&j.lang) && waited.insert(j.lang.clone()) {
+                            let done = done.clone();
+                            let (id, version, lang, text) = (j.id, j.version, j.lang.clone(), j.text.clone());
+                            std::thread::spawn(move || {
+                                if grammars::ensure(&lang).is_ok() {
+                                    if let Some((l, s)) = analyze(&lang, &text, Duration::from_secs(2)) {
+                                        let _ = done.send(Highlights { id, version, lines: Some(l), structure: Some(s) });
+                                    }
+                                }
+                            });
+                        }
+                        let (lines, structure) = match got {
                             Some((l, s)) => (Some(l), Some(s)),
                             // No grammar (or plain text): what all text
                             // shares, and indentation's folds.

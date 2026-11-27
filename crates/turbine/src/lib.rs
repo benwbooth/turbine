@@ -19,3 +19,9 @@ pub mod views;
 pub mod vim;
 pub mod workbench;
 pub mod xtree;
+
+/// Call first in a front end's main: as a grammar's trial child (a
+/// grammar is tried in a child before it's loaded), try it and exit.
+pub fn grammars_check_from_args() {
+    turbine_syntax::grammars::check_from_args();
+}
