@@ -78,6 +78,12 @@ impl Workbench {
                 }
             }
         }
+        // The file manager's commands, folders, files and figures.
+        if self.dialog.is_none() {
+            if let Some(x) = self.windows.last().filter(|w| w.win.rect.contains(p)).and_then(|w| self.xtrees.get(&w.win.id)) {
+                return x.tip_at(p);
+            }
+        }
         // A tree row cut short: whole.
         if self.dialog.is_none() {
             if let Some(t) = self.docview_tip(p) {

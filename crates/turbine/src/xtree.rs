@@ -849,6 +849,16 @@ impl XTree {
     }
 
     pub fn mouse(&mut self, m: &MouseEvent) -> Out {
+        // The command bars: a click runs it.
+        if matches!(m.kind, MouseKind::Down(Button::Left)) && self.ask.is_none() {
+            if let Some(k) = self.cmd_rects.iter().find(|c| c.0.contains(m.pos)).map(|c| c.1) {
+                return self.key(&k);
+            }
+        }
+        let double = matches!(m.kind, MouseKind::Down(Button::Left)) && self.last_click.is_some_and(|(p, t)| p == m.pos && t.elapsed() < std::time::Duration::from_millis(400));
+        if matches!(m.kind, MouseKind::Down(Button::Left)) {
+            self.last_click = Some((m.pos, std::time::Instant::now()));
+        }
         if !matches!(m.kind, MouseKind::Down(Button::Left)) {
             if matches!(m.kind, MouseKind::ScrollUp | MouseKind::ScrollDown) {
                 let k = if m.kind == MouseKind::ScrollUp { Key::Up } else { Key::Down };
@@ -863,6 +873,10 @@ impl XTree {
             let i = self.tree_top + (m.pos.y - self.tree_rect.y) as usize;
             if i < self.tree.len() {
                 self.select_dir(i);
+                // (A double-click: into its files.)
+                if double {
+                    self.in_files = true;
+                }
             }
         } else if self.files_rect.contains(m.pos) {
             self.in_files = true;
@@ -872,9 +886,49 @@ impl XTree {
             let i = self.file_top + col * rows + (m.pos.y - self.files_rect.y) as usize;
             if i < self.files().len() {
                 self.file_sel = i;
+                // (A double-click edits it.)
+                if double {
+                    return self.current_file().map(Out::Edit).unwrap_or(Out::None);
+                }
             }
         }
         Out::None
+    }
+
+    /// A tooltip for what's under the mouse: a command's meaning, a
+    /// directory's or file's details, a statistic's exact value.
+    pub fn tip_at(&self, p: Point) -> Option<(Rect, String)> {
+        if let Some((r, _, t)) = self.cmd_rects.iter().find(|c| c.0.contains(p)) {
+            return Some((*r, t.clone()));
+        }
+        if let Some((r, t)) = self.stat_rects.iter().find(|c| c.0.contains(p)) {
+            return Some((*r, t.clone()));
+        }
+        if self.tree_rect.contains(p) {
+            let i = self.tree_top + (p.y - self.tree_rect.y) as usize;
+            let (d, _, _) = self.tree.get(i)?;
+            let n = self.dirs.get(d).map(|v| v.iter().filter(|e| !e.dir).count());
+            let what = match n {
+                Some(n) => format!("Folder, {n} file{}", if n == 1 { "" } else { "s" }),
+                None => "Folder (not logged yet)".into(),
+            };
+            return Some((Rect::new(self.tree_rect.x, p.y, self.tree_rect.w, 1), format!("{}\n{what}", d.display())));
+        }
+        if self.files_rect.contains(p) {
+            let rows = self.files_rect.h.max(1) as usize;
+            let colw = (self.files_rect.w as usize / self.file_cols.max(1)).max(1);
+            let col = (p.x - self.files_rect.x) as usize / colw;
+            let i = self.file_top + col * rows + (p.y - self.files_rect.y) as usize;
+            let (path, e) = self.files().into_iter().nth(i)?;
+            let kind = turbine_syntax::detect(Some(&path), "").map(|l| format!("{} file", turbine_syntax::label(&l))).unwrap_or_else(|| "File".into());
+            let mut facts = vec![kind, format!("{} bytes", commas(e.size))];
+            if let Some(t) = e.modified {
+                facts.push(format!("modified {}", crate::views::local_time(t)));
+            }
+            facts.push(crate::views::perms(e.mode));
+            return Some((Rect::new(self.files_rect.x + (col * colw) as i32, p.y, colw as i32, 1), format!("{}\n{}", path.display(), facts.join("  ·  "))));
+        }
+        None
     }
 
     // ---- drawing ------------------------------------------------------------------------
@@ -944,7 +998,8 @@ impl XTree {
         // The files, in columns.
         self.files_rect = if self.files_full { Rect::new(main.x + 1, main.y + 1, side.x - main.x - 1, main.h - 2) } else { Rect::new(main.x + 1, split + 1, side.x - main.x - 1, main.bottom() - split - 2) };
         let files = self.files();
-        let colw = 26usize;
+        // (Details: one file a line with its size, date and permissions.)
+        let colw = if self.details { self.files_rect.w.max(30) as usize } else { 26usize };
         self.file_cols = ((self.files_rect.w as usize) / colw).max(1);
         let rows = self.files_rect.h.max(1) as usize;
         let page = rows * self.file_cols;
@@ -979,46 +1034,69 @@ impl XTree {
             };
             c.print(x, y, &name, st);
             c.print(x + colw as i32 - 3, y, mark, colour::tagged());
+            if self.details && colw >= 60 {
+                let when = e.modified.map(crate::views::local_time).unwrap_or_default();
+                let facts = format!("{:>10}  {}  {}", crate::views::human_size(e.size), when, crate::views::perms(e.mode));
+                c.print(x + colw as i32 - 4 - str_width(&facts) as i32, y, &facts, colour::text());
+            }
         }
         // The statistics.
         let sx = side.x + 2;
         let mut y = side.y + 1;
-        let line = |c: &mut Canvas, y: &mut i32, label: &str, value: String, indent: i32| {
+        // (Short sizes on screen; the exact bytes in each line's tooltip.)
+        let mut stats: Vec<(Rect, String)> = Vec::new();
+        let mut line = |c: &mut Canvas, y: &mut i32, label: &str, value: String, indent: i32, exact: Option<String>| {
             c.print(sx + indent, *y, label, b);
             if !value.is_empty() {
                 c.print(side.right() - 2 - str_width(&value) as i32, *y, &value, colour::text());
             }
+            if let Some(e) = exact {
+                stats.push((Rect::new(side.x + 1, *y, stats_w - 1, 1), e));
+            }
             *y += 1;
         };
+        // (Under "Bytes" a small size is just its number.)
+        let bytes = |n: u64| (if n < 1024 { n.to_string() } else { crate::views::human_size(n) }, Some(format!("{} bytes", commas(n))));
         let all = self.dirs.get(&dir).cloned().unwrap_or_default();
         let total_files = all.iter().filter(|e| !e.dir).count() as u64;
         let total_bytes: u64 = all.iter().filter(|e| !e.dir).map(|e| e.size).sum();
         let match_bytes: u64 = files.iter().map(|e| e.1.size).sum();
         let tagged_here: Vec<&Entry> = files.iter().filter(|e| self.tagged.contains(&e.0)).map(|e| &e.1).collect();
-        line(c, &mut y, &format!("FILE  {}", self.filespec), String::new(), 0);
+        let shown = match self.show {
+            Show::Dir => "",
+            Show::Branch => "  (branch)",
+            Show::Global => "  (all)",
+        };
+        line(c, &mut y, &format!("FILE  {}{shown}", self.filespec), String::new(), 0, Some(format!("Showing {}; sorted by {:?}{}", self.filespec, self.sort, if self.sort_desc { ", descending" } else { "" })));
         c.hline(side.x + 1, y, stats_w - 1, "─", f);
         y += 1;
-        let avail = disk_free(&dir);
-        line(c, &mut y, "DISK", String::new(), 0);
-        line(c, &mut y, "Available", String::new(), 1);
-        line(c, &mut y, "Bytes", avail.map(commas).unwrap_or_else(|| "?".into()), 2);
+        let space = disk_space(&dir);
+        line(c, &mut y, "DISK", String::new(), 0, None);
+        let (free, free_exact) = space.map(|(free, _)| bytes(free)).unwrap_or(("?".into(), None));
+        line(c, &mut y, "Available", free, 1, free_exact.map(|e| format!("{e} free of {}", space.map(|(_, t)| crate::views::human_size(t)).unwrap_or_default())));
         c.hline(side.x + 1, y, stats_w - 1, "─", f);
         y += 1;
-        line(c, &mut y, "DIRECTORY Stats", String::new(), 0);
-        line(c, &mut y, "Total", String::new(), 1);
-        line(c, &mut y, "Files", total_files.to_string(), 2);
-        line(c, &mut y, "Bytes", commas(total_bytes), 2);
-        line(c, &mut y, "Matching", String::new(), 1);
-        line(c, &mut y, "Files", files.len().to_string(), 2);
-        line(c, &mut y, "Bytes", commas(match_bytes), 2);
-        line(c, &mut y, "Tagged", String::new(), 1);
-        line(c, &mut y, "Files", tagged_here.len().to_string(), 2);
-        line(c, &mut y, "Bytes", commas(tagged_here.iter().map(|e| e.size).sum()), 2);
-        line(c, &mut y, if self.in_files { "Current File" } else { "Current Directory" }, String::new(), 1);
-        let cur = if self.in_files { self.current_file().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())) } else { dir.file_name().map(|n| n.to_string_lossy().into_owned()).or(Some("/".into())) };
-        line(c, &mut y, &cur.unwrap_or_default().chars().take(stats_w as usize - 4).collect::<String>(), String::new(), 2);
+        line(c, &mut y, "DIRECTORY Stats", String::new(), 0, None);
+        line(c, &mut y, "Total", String::new(), 1, None);
+        line(c, &mut y, "Files", total_files.to_string(), 2, None);
+        let (v, e) = bytes(total_bytes);
+        line(c, &mut y, "Bytes", v, 2, e);
+        line(c, &mut y, "Matching", String::new(), 1, None);
+        line(c, &mut y, "Files", files.len().to_string(), 2, None);
+        let (v, e) = bytes(match_bytes);
+        line(c, &mut y, "Bytes", v, 2, e);
+        line(c, &mut y, "Tagged", String::new(), 1, None);
+        line(c, &mut y, "Files", tagged_here.len().to_string(), 2, None);
+        let (v, e) = bytes(tagged_here.iter().map(|e| e.size).sum());
+        line(c, &mut y, "Bytes", v, 2, e);
+        line(c, &mut y, if self.in_files { "Current File" } else { "Current Directory" }, String::new(), 1, None);
+        let cur_path = if self.in_files { self.current_file() } else { Some(dir.clone()) };
+        let cur = cur_path.as_ref().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).or(Some("/".into()));
+        line(c, &mut y, &cur.unwrap_or_default().chars().take(stats_w as usize - 4).collect::<String>(), String::new(), 2, cur_path.map(|p| p.display().to_string()));
         let cur_bytes = if self.in_files { self.files().get(self.file_sel).map(|e| e.1.size).unwrap_or(0) } else { total_bytes };
-        line(c, &mut y, "Bytes", commas(cur_bytes), 2);
+        let (v, e) = bytes(cur_bytes);
+        line(c, &mut y, "Bytes", v, 2, e);
+        self.stat_rects = stats;
         // The commands of the window in use, or the question being asked.
         let cy = r.bottom() - cmd_h;
         let k = colour::key();
@@ -1043,26 +1121,91 @@ impl XTree {
             c.print(r.x, cy + 2, "◄┘ ok  ESC cancel", b);
             return;
         }
-        let cmds: &[(&str, &str)] = if self.in_files {
-            &[("C", "opy"), ("D", "elete"), ("E", "dit"), ("F", "ilespec"), ("I", "nvert"), ("M", "ove"), ("O", "pen"), ("R", "ename"), ("T", "ag"), ("U", "ntag"), ("V", "iew"), ("e", "X"), ("Q", "uit")]
+        self.cmd_rects.clear();
+        // (Each a click away, with what it does as its tooltip.)
+        let cmds: &[(&str, &str, &str)] = if self.in_files {
+            &[
+                ("A", "ttribs", "Change permissions (644, +x, -w)"),
+                ("C", "opy", "Copy the tagged files (or this one)"),
+                ("D", "elete", "Delete the tagged files (or this one) to the trash"),
+                ("E", "dit", "Edit this file in Turbine"),
+                ("F", "ilespec", "Show only files matching a pattern (*.rs *.md)"),
+                ("H", "ide", "Hide or show dot files"),
+                ("I", "nvert", "Tag the untagged and untag the tagged"),
+                ("M", "ove", "Move the tagged files (or this one)"),
+                ("O", "pen", "Open in its desktop app"),
+                ("R", "ename", "Rename this file"),
+                ("T", "ag", "Tag this file"),
+                ("U", "ntag", "Untag this file"),
+                ("V", "iew", "View this file"),
+                ("X", "ecute", "Run this file"),
+                ("Q", "uit", "Close the file manager"),
+            ]
         } else {
-            &[("C", "opy"), ("D", "elete"), ("F", "ilespec"), ("I", "nvert"), ("L", "og"), ("M", "akedir"), ("R", "ename"), ("S", "howall"), ("T", "ag"), ("U", "ntag"), ("e", "X"), ("Q", "uit")]
+            &[
+                ("A", "vail", "How much room the disk has"),
+                ("B", "ranch", "List every file in this directory and below"),
+                ("C", "opy", "Copy this directory"),
+                ("D", "elete", "Delete this directory to the trash"),
+                ("F", "ilespec", "Show only files matching a pattern (*.rs *.md)"),
+                ("G", "lobal", "List every file of every directory"),
+                ("H", "ide", "Hide or show dot files"),
+                ("I", "nvert", "Tag the untagged and untag the tagged"),
+                ("L", "og", "Read this directory again"),
+                ("M", "akedir", "Make a directory here"),
+                ("P", "rune", "Delete this directory and everything in it"),
+                ("R", "ename", "Rename this directory"),
+                ("S", "howall", "List every file of every directory"),
+                ("T", "ag", "Tag all its files"),
+                ("U", "ntag", "Untag all its files"),
+                ("X", "ecute", "Open a terminal here"),
+                ("Q", "uit", "Close the file manager"),
+            ]
         };
         let mut x = c.print(r.x, cy, if self.in_files { "FILE" } else { "DIR " }, k);
-        x += 3;
-        for (hot, rest) in cmds {
-            // (eXecute: the X is the hotkey.)
-            if *rest == "X" {
+        x += 2;
+        for (hot, rest, tip) in cmds {
+            let w = (str_width(hot) + str_width(rest)) as i32;
+            if x + w > r.right() {
+                break;
+            }
+            // (eXecute: the X is the hotkey, inside the word.)
+            let x0 = x;
+            if *hot == "X" {
                 let x1 = c.print(x, cy, "e", b);
                 let x1 = c.print(x1, cy, "X", k);
-                x = c.print(x1, cy, "ecute", b) + 2;
-                continue;
+                x = c.print(x1, cy, "ecute", b);
+            } else {
+                let x1 = c.print(x, cy, hot, k);
+                x = c.print(x1, cy, rest, b);
             }
-            let x1 = c.print(x, cy, hot, k);
-            x = c.print(x1, cy, rest, b) + 2;
+            let key = KeyEvent::new(Key::Char(hot.to_ascii_lowercase().chars().next().unwrap_or(' ')), turbine_ui::event::Mods::NONE);
+            self.cmd_rects.push((Rect::new(x0, cy, x - x0, 1), key, tip.to_string()));
+            x += 1;
         }
-        c.print(r.x, cy + 1, "COMMANDS", k);
-        c.print(r.x + 10, cy + 1, "+ - * branches   Tab tree/files   Ctrl+T tag all   Ctrl+U untag all", b);
+        // The second line: XTree Gold's Alt commands and the tree's keys.
+        let alts: &[(&str, &str, KeyEvent, &str)] = &[
+            ("Alt+S", " sort", KeyEvent::new(Key::Char('s'), turbine_ui::event::Mods::ALT), "Sort by name, extension, date or size (again: reversed)"),
+            ("Alt+F", " details", KeyEvent::new(Key::Char('f'), turbine_ui::event::Mods::ALT), "Show sizes, dates and permissions"),
+            ("Alt+C", " compare", KeyEvent::new(Key::Char('c'), turbine_ui::event::Mods::ALT), "Tag files that differ from another directory's"),
+            ("Alt+G", " graft", KeyEvent::new(Key::Char('g'), turbine_ui::event::Mods::ALT), "Move this directory elsewhere"),
+            ("+-*", " branches", KeyEvent::new(Key::Char('*'), turbine_ui::event::Mods::NONE), "+ opens a branch, - closes it, * opens all below"),
+            ("Tab", " tree/files", KeyEvent::new(Key::Tab, turbine_ui::event::Mods::NONE), "Switch between the tree and the files"),
+            ("Ctrl+T", " tag all", KeyEvent::new(Key::Char('t'), turbine_ui::event::Mods::CTRL), "Tag every file shown"),
+            ("Ctrl+U", " untag all", KeyEvent::new(Key::Char('u'), turbine_ui::event::Mods::CTRL), "Untag every file shown"),
+        ];
+        let mut x = c.print(r.x, cy + 1, "COMMANDS", k) + 2;
+        for (key_s, rest, ev, tip) in alts {
+            let w = (str_width(key_s) + str_width(rest)) as i32;
+            if x + w > r.right() {
+                break;
+            }
+            let x0 = x;
+            let x1 = c.print(x, cy + 1, key_s, k);
+            x = c.print(x1, cy + 1, rest, b);
+            self.cmd_rects.push((Rect::new(x0, cy + 1, x - x0, 1), *ev, tip.to_string()));
+            x += 2;
+        }
         let msg = if self.message.is_empty() { if self.in_files { "◄┘ more   F1 help   ESC cancel".to_string() } else { "◄┘ file   F1 help   ESC quit".to_string() } } else { self.message.clone() };
         c.print(r.x, cy + 2, &msg, if self.message.is_empty() { b } else { colour::text() });
     }
@@ -1130,6 +1273,34 @@ mod tests {
 
     fn key(x: &mut XTree, k: Key) -> Out {
         x.key(&KeyEvent::new(k, Mods::NONE))
+    }
+
+    #[test]
+    fn commands_click_and_tell_what_they_do() {
+        let dir = std::env::temp_dir().join(format!("turbine-xtclick-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello").unwrap();
+        std::fs::write(dir.join("sub/b.rs"), "fn b() {}").unwrap();
+        let mut x = XTree::new(&dir);
+        wait(&mut x);
+        let mut surf = turbine_ui::Surface::new(120, 40);
+        let draw = |x: &mut XTree, surf: &mut turbine_ui::Surface| x.draw(&mut surf.canvas(), Rect::new(0, 0, 120, 40), true);
+        draw(&mut x, &mut surf);
+        // Global from the command bar: every logged directory's files.
+        let g = x.cmd_rects.iter().find(|c| c.2.contains("every file of every")).map(|c| c.0).unwrap();
+        x.mouse(&MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(g.x, g.y), mods: turbine_ui::event::Mods::NONE });
+        assert_eq!(x.show, Show::Global);
+        wait(&mut x);
+        assert_eq!(x.files().len(), 2);
+        // Tooltips: a command's meaning, a statistic's exact bytes.
+        draw(&mut x, &mut surf);
+        let t = x.cmd_rects.iter().find(|c| c.2.starts_with("Copy")).map(|c| c.0).unwrap();
+        assert!(x.tip_at(Point::new(t.x, t.y)).unwrap().1.starts_with("Copy"));
+        let s = x.stat_rects.iter().find(|c| c.1.ends_with("bytes") && c.1.starts_with("14")).map(|c| c.0);
+        assert!(s.is_some(), "{:?}", x.stat_rects);
+        // Short sizes on screen.
+        assert!(!surf.to_text().contains("bytes"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
