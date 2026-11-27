@@ -102,6 +102,20 @@ impl<'a> Canvas<'a> {
         Canvas { surf: self.surf, clip }
     }
 
+    /// A cell as drawn (to put it back after something draws over it).
+    pub fn cell(&self, x: i32, y: i32) -> Option<Cell> {
+        self.surf.get(x, y).cloned()
+    }
+
+    /// Put a cell back as it was (inside the clip).
+    pub fn put_cell(&mut self, x: i32, y: i32, cell: Cell) {
+        if self.clip.contains(Point::new(x, y)) {
+            if let Some(c) = self.surf.get_mut(x, y) {
+                *c = cell;
+            }
+        }
+    }
+
     /// The style already drawn at a cell (to draw over it in its colours).
     pub fn style_at(&self, x: i32, y: i32) -> Option<Style> {
         self.surf.get(x, y).map(|c| c.style)

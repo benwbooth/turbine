@@ -4991,7 +4991,22 @@ impl Workbench {
         }
         self.sync_mirrors();
         self.layout_dock();
+        // (The right side bar's left edge is the editors' right, where their
+        // scroll bars are: the windows' cells there are kept over its frame.)
+        let shared: Vec<(i32, i32, turbine_ui::surface::Cell)> = match self.layout().right {
+            Some(r) => self
+                .windows
+                .iter()
+                .filter(|w| w.dock.is_none() && w.win.rect.right() - 1 == r.x)
+                .flat_map(|w| (w.win.rect.y..w.win.rect.bottom()).map(move |y| (r.x, y)))
+                .filter_map(|(x, y)| c.cell(x, y).map(|cell| (x, y, cell)))
+                .collect(),
+            None => Vec::new(),
+        };
         self.draw_shell(&mut c, &theme);
+        for (x, y, cell) in shared {
+            c.put_cell(x, y, cell);
+        }
         // Status bar.
         let info = self
             .windows
@@ -5691,6 +5706,26 @@ mod tests {
         assert_eq!(wb.shell.focus, Focus::Chat);
         run(&mut wb, json!({"cmd": "type", "text": "hi"}));
         assert_eq!(wb.shell.chat_input.text, "hi");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_chat_side_bar_shares_the_editors_border() {
+        let (dir, mut wb) = project("oneborder");
+        std::fs::write(dir.join("long.txt"), "x\n".repeat(300)).unwrap();
+        wb.goto_file(&dir.join("long.txt"), Some(0), 0);
+        wb.run_command("view.secondary");
+        wb.focus_editor();
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let right = wb.layout().right.unwrap();
+        let ed = wb.windows.iter().rev().find(|w| w.dock.is_none()).unwrap().win.rect;
+        assert_eq!(ed.right() - 1, right.x, "one column between them");
+        let y = ed.y + ed.h / 2;
+        let col = |x: i32| surf.get(x, y).unwrap().text.clone();
+        // (The editor's scroll bar on the shared edge; no second line beside it.)
+        assert!(["▒", "░", "█", "▓"].contains(&col(right.x).as_str()), "{:?}", col(right.x));
+        assert!(!["│", "║"].contains(&col(right.x + 1).as_str()) && !["│", "║"].contains(&col(right.x - 1).as_str()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
