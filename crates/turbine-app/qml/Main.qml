@@ -5,8 +5,9 @@ import Turbine.Native
 
 Window {
     id: win
-    width: Math.max(view.cellWidth * 100, 640)
-    height: Math.max(view.cellHeight * 32, 400)
+    // 200 x 64 cells, but never more than most of the screen.
+    width: Math.min(view.cellWidth * 200, Screen.desktopAvailableWidth > 0 ? Screen.desktopAvailableWidth * 0.9 : 1e9)
+    height: Math.min(view.cellHeight * 64, Screen.desktopAvailableHeight > 0 ? Screen.desktopAvailableHeight * 0.9 : 1e9)
     visible: true
     color: "black"
     title: view.title

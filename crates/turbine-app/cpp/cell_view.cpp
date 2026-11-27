@@ -175,6 +175,7 @@ void CellView::tick()
         emit titleChanged();
     }
     if (turbine::app_dirty()) {
+        m_frame = std::make_shared<turbine::Frame>(turbine::app_frame());
         update();
         // Check marks and enabled items may have changed.
         const QString menus = QString::fromStdString(std::string(turbine::app_menus_json()));
@@ -349,7 +350,9 @@ bool CellView::drawShape(QPainter* p, char32_t c, const QRectF& r, const QColor&
 
 void CellView::paint(QPainter* p)
 {
-    const turbine::Frame f = turbine::app_frame();
+    // (The render thread: only the frame taken on the GUI thread, never Turbine itself.)
+    if (!m_frame) return;
+    const turbine::Frame& f = *m_frame;
     const QRectF all = boundingRect();
     p->setRenderHint(QPainter::Antialiasing, false);
     p->setRenderHint(QPainter::TextAntialiasing, true);

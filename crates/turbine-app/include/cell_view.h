@@ -5,8 +5,11 @@
 #pragma once
 
 #include <QtCore/QTimer>
+#include <memory>
 #include <QtGui/QFont>
 #include <QtQuick/QQuickPaintedItem>
+
+namespace turbine { struct Frame; }
 
 class CellView : public QQuickPaintedItem {
     Q_OBJECT
@@ -48,6 +51,9 @@ private:
     QPoint cellAt(QPointF pos) const;
     bool drawShape(QPainter* p, char32_t c, const QRectF& r, const QColor& fg, const QColor& bg);
 
+    // The frame to paint, taken on the GUI thread: Turbine's state lives
+    // there, and paint() runs on Qt Quick's render thread on a real display.
+    std::shared_ptr<turbine::Frame> m_frame;
     QFont m_font, m_bold, m_italic, m_boldItalic;
     qreal m_cw = 8, m_ch = 16, m_ascent = 12;
     int m_cols = 0, m_rows = 0;
