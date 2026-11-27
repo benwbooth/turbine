@@ -537,7 +537,8 @@ pub struct ControlStyle {
     /// switches to 8-dot characters for its redefined glyphs). The desktop
     /// app draws the VGA font at this width.
     pub dots: u8,
-    /// Emoji icons on tabs (📁 Explorer, 🦀 main.rs) and rounded tab ends.
+    /// Icons on tabs and files (monochrome Nerd Font glyphs, one cell, in
+    /// the text's colour) and rounded tab ends.
     pub icons: bool,
 }
 

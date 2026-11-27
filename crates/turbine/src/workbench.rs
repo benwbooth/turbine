@@ -3784,7 +3784,7 @@ impl App for Workbench {
                 let (e, wn) = self.shell.problem_count;
                 format!(
                     "{}■ {e} ▲ {wn}  {lang}  {}:{}  {} {}  {}",
-                    if branch.is_empty() { String::new() } else { format!("⎇ {branch}  ") },
+                    if branch.is_empty() { String::new() } else { format!("{} {branch}  ", if self.theme.style.icons { "\u{e725}" } else { "⎇" }) },
                     l + 1,
                     col + 1,
                     w.ed.doc.encoding.name(),

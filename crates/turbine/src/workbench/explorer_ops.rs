@@ -341,7 +341,7 @@ impl Workbench {
     pub(super) fn ex_buttons(&self, part: Rect) -> Vec<(Rect, &'static str)> {
         let area = self.shell.explorer.list.area;
         let icons = self.theme.style.icons;
-        let labels: [(&str, &str, &'static str); 4] = [("📄", "+F", "new_file"), ("📂", "+D", "new_folder"), ("🔄", "↻", "refresh"), ("🔼", "-", "collapse")];
+        let labels: [(&str, &str, &'static str); 4] = [("\u{ea7f}", "+F", "new_file"), ("\u{ea80}", "+D", "new_folder"), ("\u{eb37}", "↻", "refresh"), ("\u{eac5}", "-", "collapse")];
         let mut x = area.right() - 1 - i32::from(self.shell.explorer.list.rows.len() as i32 > area.h);
         let mut out = Vec::new();
         for (e, t, a) in labels.iter().rev() {
@@ -363,10 +363,10 @@ impl Workbench {
                     let icons = theme.style.icons;
                     for (r, a) in self.ex_buttons(pr) {
                         let label = match (a, icons) {
-                            ("new_file", true) => "📄",
-                            ("new_folder", true) => "📂",
-                            ("refresh", true) => "🔄",
-                            ("collapse", true) => "🔼",
+                            ("new_file", true) => "\u{ea7f}",
+                            ("new_folder", true) => "\u{ea80}",
+                            ("refresh", true) => "\u{eb37}",
+                            ("collapse", true) => "\u{eac5}",
                             ("new_file", false) => "+F",
                             ("new_folder", false) => "+D",
                             ("refresh", false) => "↻",

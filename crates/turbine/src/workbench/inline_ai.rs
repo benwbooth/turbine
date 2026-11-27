@@ -207,7 +207,7 @@ impl Workbench {
         let s = &theme.scheme;
         c.fill(r, " ", s.dialog);
         turbine_ui::frame::draw_frame(c, r, theme.style.menu_frame, s.dialog_frame);
-        let icon = if theme.style.icons { "✨ " } else { "" };
+        let icon = if theme.style.icons { "\u{ec10} " } else { "" };
         turbine_ui::frame::draw_title_in(c, r, &format!("{icon}Edit with AI"), s.dialog_frame, 2);
         if theme.style.shadows {
             c.shadow(r, s.shadow);

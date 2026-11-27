@@ -248,7 +248,7 @@ impl Dock {
     /// The tabs in a part's top edge, centred like a DOS window's title:
     /// their places and labels. The current one is a pill (rounded ends)
     /// when the style has icons. When the names don't all fit, the current
-    /// tab keeps its name and the others shrink to their icon (📁 🔍 🌿, as
+    /// tab keeps its name and the others shrink to their icon (as
     /// an activity bar), or a letter without icons.
     pub fn tab_rects(&self, side: Side, r: Rect, title: &dyn Fn(Tab) -> String) -> Vec<(Tab, Rect, String)> {
         let part = self.part(side);

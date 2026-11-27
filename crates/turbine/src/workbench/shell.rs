@@ -99,21 +99,29 @@ impl Shell {
     }
 }
 
-/// A file's icon by its type (editor tabs).
+/// A file's icon by its type (editor tabs, breadcrumbs): a Nerd Font
+/// glyph, one cell, in the text's own colour.
 pub(super) fn file_icon(name: &str) -> &'static str {
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
-        "rs" => "🦀",
-        "py" | "pyi" => "🐍",
-        "md" | "markdown" | "txt" | "rst" => "📝",
-        "js" | "mjs" | "ts" | "tsx" | "jsx" => "📜",
-        "toml" | "json" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "nix" | "lock" => "📋",
-        "c" | "h" | "cc" | "cpp" | "hpp" | "zig" | "go" | "java" | "cs" | "swift" | "kt" => "🔧",
-        "bas" | "bi" | "pas" => "💾",
-        "sh" | "bash" | "zsh" | "fish" => "🐚",
-        "html" | "css" | "qml" => "🎨",
-        "png" | "jpg" | "jpeg" | "gif" | "svg" | "bmp" => "📷",
-        _ => "📄",
+        "rs" => "\u{e7a8}",
+        "py" | "pyi" => "\u{e73c}",
+        "md" | "markdown" => "\u{e73e}",
+        "js" | "mjs" | "ts" | "tsx" | "jsx" => "\u{e74e}",
+        "json" => "\u{eb0f}",
+        "toml" => "\u{e6b2}",
+        "nix" => "\u{f313}",
+        "yaml" | "yml" | "ini" | "cfg" | "conf" | "lock" => "\u{e615}",
+        "c" | "h" => "\u{e61e}",
+        "cc" | "cpp" | "hpp" | "cxx" => "\u{e61d}",
+        "go" => "\u{e626}",
+        "java" => "\u{e738}",
+        "lua" => "\u{e620}",
+        "sh" | "bash" | "zsh" | "fish" => "\u{f489}",
+        "html" | "htm" => "\u{e736}",
+        "css" => "\u{e749}",
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "bmp" => "\u{eaea}",
+        _ => "\u{ea7b}",
     }
 }
 
@@ -352,18 +360,18 @@ impl Workbench {
             return name;
         }
         let icon = match t {
-            Tab::Explorer => "📁",
-            Tab::Outline => "🧭",
-            Tab::Search => "🔍",
-            Tab::Scm => "🌿",
-            Tab::Debug => "🐞",
-            Tab::Extensions => "🧩",
-            Tab::Problems => "❗",
+            Tab::Explorer => "\u{eaf0}",
+            Tab::Outline => "\u{eb86}",
+            Tab::Search => "\u{ea6d}",
+            Tab::Scm => "\u{ea68}",
+            Tab::Debug => "\u{eb91}",
+            Tab::Extensions => "\u{eae6}",
+            Tab::Problems => "\u{ea6c}",
             Tab::Pane(id) => match self.windows.iter().find(|w| w.win.id == id) {
-                Some(w) if w.term.is_some() => "💻",
-                Some(w) if w.special == Some("chat") => "💬",
-                Some(w) if w.special == Some("debug") => "🐞",
-                _ => "📜",
+                Some(w) if w.term.is_some() => "\u{ea85}",
+                Some(w) if w.special == Some("chat") => "\u{eac7}",
+                Some(w) if w.special == Some("debug") => "\u{eaaf}",
+                _ => "\u{eb9d}",
             },
         };
         format!("{icon} {name}")
@@ -775,9 +783,9 @@ impl Workbench {
     /// The chat's mode pill and its field's hint.
     fn chat_mode_label(&self, icons: bool) -> (String, &'static str) {
         match (self.shell.chat_agent, icons) {
-            (true, true) => (" 🤖 Agent ".into(), "What should the agent do? (Enter)"),
+            (true, true) => (" \u{f06a9} Agent ".into(), "What should the agent do? (Enter)"),
             (true, false) => (" Agent ".into(), "What should the agent do? (Enter)"),
-            (false, true) => (" 💬 Ask ".into(), "Ask about the code… (Enter)"),
+            (false, true) => (" \u{eac7} Ask ".into(), "Ask about the code… (Enter)"),
             (false, false) => (" Ask ".into(), "Ask about the code… (Enter)"),
         }
     }
