@@ -987,7 +987,7 @@ impl EditorView {
     /// The sideways bar over the text's last row (when the window's bottom
     /// edge is shared, as with the panel under it): only while lines are
     /// wider than the window or it's scrolled sideways.
-    pub fn draw_hscroll_inside(&self, c: &mut Canvas, theme: &Theme) {
+    pub fn draw_hscroll_inside(&self, c: &mut Canvas, frame: Rect, theme: &Theme) {
         if self.wrap_width() > 0 {
             return;
         }
@@ -997,8 +997,9 @@ impl EditorView {
         if longest <= w && self.scroll_x == 0 {
             return;
         }
+        // (Across the whole window, the minimap's columns too.)
         let x = self.area.x + self.gutter_width();
-        draw_hscroll(c, x, self.area.bottom() - 1, self.area.w - self.gutter_width(), self.scroll_x, w, longest.max(self.scroll_x + w), theme.scheme.scrollbar, theme.style.scroll);
+        draw_hscroll(c, x, self.area.bottom() - 1, frame.right() - 1 - x, self.scroll_x, w, longest.max(self.scroll_x + w), theme.scheme.scrollbar, theme.style.scroll);
     }
 
     pub fn draw_scrollbars(&self, c: &mut Canvas, frame: Rect, theme: &Theme) {

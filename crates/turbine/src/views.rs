@@ -257,6 +257,12 @@ impl Explorer {
                     None => "Folder".into(),
                 });
             } else {
+                // (What it is: its language, else its kind of file.)
+                let kind = turbine_syntax::detect(Some(p), "").map(|l| format!("{} file", turbine_syntax::label(&l))).unwrap_or_else(|| match crate::filekind::kind_by_name(p) {
+                    Some(k) => k.to_string(),
+                    None => "File".into(),
+                });
+                facts.push(kind);
                 facts.push(human_size(m.size));
             }
             if let Some(t) = m.modified {

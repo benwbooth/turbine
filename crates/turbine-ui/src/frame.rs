@@ -58,8 +58,10 @@ pub fn draw_vscroll(c: &mut Canvas, x: i32, y: i32, h: i32, first: usize, shown:
     c.print(x, y + h - 1, ch[1], style);
     c.vline(x, y + 1, h - 2, ch[4], style);
     let (at, len) = thumb((h - 2).max(0) as usize, first, shown, total);
+    // (A solid dark grey bar, as long as the share in view.)
+    let ts = Style { fg: crate::theme::vga::DARK_GRAY, ..style };
     for i in 0..len {
-        c.print(x, y + 1 + (at + i) as i32, ch[5], style);
+        c.print(x, y + 1 + (at + i) as i32, "█", ts);
     }
 }
 
@@ -87,8 +89,9 @@ pub fn draw_hscroll(c: &mut Canvas, x: i32, y: i32, w: i32, first: usize, shown:
     c.print(x + w - 1, y, ch[3], style);
     c.hline(x + 1, y, w - 2, ch[4], style);
     let (at, len) = thumb((w - 2).max(0) as usize, first, shown, total);
+    let ts = Style { fg: crate::theme::vga::DARK_GRAY, ..style };
     for i in 0..len {
-        c.print(x + 1 + (at + i) as i32, y, ch[5], style);
+        c.print(x + 1 + (at + i) as i32, y, "█", ts);
     }
 }
 

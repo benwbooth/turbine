@@ -143,3 +143,22 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+/// What a file is by its name alone (no reading it): for tooltips.
+pub fn kind_by_name(p: &Path) -> Option<&'static str> {
+    let ext = p.extension()?.to_string_lossy().to_lowercase();
+    Some(match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff" | "avif" | "heic" | "svg" => "Picture",
+        "pdf" => "PDF document",
+        "mp3" | "flac" | "ogg" | "opus" | "wav" | "m4a" | "aac" | "mid" | "midi" => "Sound",
+        "mp4" | "mkv" | "webm" | "avi" | "mov" | "wmv" | "m4v" => "Video",
+        "zip" | "tar" | "gz" | "tgz" | "xz" | "bz2" | "zst" | "7z" | "rar" | "deb" | "rpm" | "iso" => "Archive",
+        "doc" | "docx" | "odt" | "rtf" => "Document",
+        "xls" | "xlsx" | "ods" => "Spreadsheet",
+        "ppt" | "pptx" | "odp" => "Presentation",
+        "ttf" | "otf" | "woff" | "woff2" => "Font",
+        "exe" | "msi" | "appimage" | "so" | "dll" | "o" | "a" => "Program",
+        "txt" | "text" | "log" => "Text",
+        _ => return None,
+    })
+}

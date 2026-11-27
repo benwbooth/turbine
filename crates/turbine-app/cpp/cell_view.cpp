@@ -491,9 +491,11 @@ bool CellView::drawShape(QPainter* p, char32_t c, const QRectF& r, const QColor&
     case 0x258C: p->fillRect(QRectF(r.x(), r.y(), std::round(r.width() / 2), r.height()), fg); return true; // ▌
     case 0x2590: { const qreal w = std::round(r.width() / 2); p->fillRect(QRectF(r.right() - w, r.y(), w, r.height()), fg); return true; } // ▐
     case 0x2591: case 0x2592: case 0x2593: {                                                         // ░ ▒ ▓
-        const qreal a = c == 0x2591 ? 0.25 : c == 0x2592 ? 0.5 : 0.75;
-        QColor m(int(fg.red() * a + bg.red() * (1 - a)), int(fg.green() * a + bg.green() * (1 - a)), int(fg.blue() * a + bg.blue() * (1 - a)));
-        p->fillRect(r, m);
+        // (Dots, as the VGA font has them, on the screen's own pixel grid:
+        // neighbouring cells continue the pattern, no seams.)
+        p->fillRect(r, bg);
+        const Qt::BrushStyle pat = c == 0x2591 ? Qt::Dense5Pattern : c == 0x2592 ? Qt::Dense4Pattern : Qt::Dense3Pattern;
+        p->fillRect(r, QBrush(fg, pat));
         return true;
     }
     default: break;

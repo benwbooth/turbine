@@ -201,6 +201,8 @@ fn colour_line(line: &str, is_dir: bool, base: Style) -> Vec<(String, Style)> {
                 out.push((d.to_string(), fg(vga::YELLOW)));
             } else if f.len() == 9 && f.chars().all(|c| matches!(c, 'r' | 'w' | 'x' | '-')) {
                 out.push((f.to_string(), fg(vga::LIGHT_MAGENTA)));
+            } else if f.ends_with(" file") || matches!(f, "Picture" | "PDF document" | "Sound" | "Video" | "Archive" | "Document" | "Spreadsheet" | "Presentation" | "Font" | "Program" | "Text" | "File") {
+                out.push((f.to_string(), fg(vga::WHITE)));
             } else if f.starts_with("Folder") {
                 out.push((f.to_string(), fg(vga::LIGHT_BLUE)));
             } else {

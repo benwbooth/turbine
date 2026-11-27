@@ -66,6 +66,30 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("yaml", "YAML"),
 ];
 
+/// A language's name for people: Rust, Shell, TOML (Helix's name,
+/// capitalized, when it's not one of the built-in ones).
+pub fn label(lang: &str) -> String {
+    if let Some((_, l)) = BUILTIN.iter().find(|(n, _)| *n == lang) {
+        return l.to_string();
+    }
+    match lang {
+        "nix" => "Nix".into(),
+        "make" => "Makefile".into(),
+        "dockerfile" => "Dockerfile".into(),
+        "c-sharp" => "C#".into(),
+        "xml" => "XML".into(),
+        "ini" => "INI".into(),
+        "diff" => "Diff".into(),
+        "latex" => "LaTeX".into(),
+        "php" => "PHP".into(),
+        "sql" => "SQL".into(),
+        _ => {
+            let mut c = lang.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+        }
+    }
+}
+
 /// The language of a file, from its name, extension or first line (the
 /// names Tessera and Helix use).
 pub fn detect(path: Option<&Path>, first_line: &str) -> Option<String> {

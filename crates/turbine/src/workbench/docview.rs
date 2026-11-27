@@ -245,8 +245,10 @@ fn buttons(w: &EdWin, mode: Mode, preview_wrap: bool) -> Vec<(Rect, &'static str
             ("source", format!("{} Source", radio(mode == Mode::Source)), "Show the text to edit"),
             (other.0, format!("{} {}", radio(mode == other.2), other.1), other.3),
         ];
-        if mode == Mode::Source {
-            items.push(("wrap", format!("[{}] Word Wrap", if w.ed.wrap { "X" } else { " " }), "Wrap long lines at the window's edge (Alt+Z)"));
+        match mode {
+            Mode::Source => items.push(("wrap", format!("[{}] Word Wrap", if w.ed.wrap { "X" } else { " " }), "Wrap long lines at the window's edge (Alt+Z)")),
+            Mode::Preview => items.push(("wrap", format!("[{}] Word Wrap", if preview_wrap { "X" } else { " " }), "Wrap the page at the window's edge, or let lines run on (Alt+Z)")),
+            Mode::Tree => {}
         }
         let mut x = inner.x + 1;
         let mut out = Vec::new();

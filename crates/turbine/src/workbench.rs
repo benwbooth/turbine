@@ -4456,7 +4456,7 @@ impl App for Workbench {
                 w.ed.draw_scrollbars(&mut wc, w.win.rect, &theme);
                 // (Its bottom edge is the panel's top: the bar over the last row.)
                 if panel_top == Some(w.win.rect.bottom() - 1) {
-                    w.ed.draw_hscroll_inside(&mut wc, &theme);
+                    w.ed.draw_hscroll_inside(&mut wc, w.win.rect, &theme);
                 }
                 if w.ed.doc.dirty {
                     wc.print(w.win.rect.x + 1, w.win.rect.bottom() - 1, "*", theme.scheme.frame_icons);
@@ -5229,8 +5229,8 @@ mod tests {
         wait_until(&mut wb, "the rendered page", |wb| wb.docviews.get(&id).is_some_and(|d| d.alt.doc.rope.to_string().contains("Notes") && !d.alt.doc.rope.to_string().contains('#')));
         // Word Wrap off: the page's lines run on (rendered wide).
         let wrapped_lines = wb.docviews[&id].alt.doc.len_lines();
-        run(&mut wb, json!({"cmd": "click", "target": "docview.wrap"}));
-        assert!(!wb.docviews[&id].preview_wrap);
+        let r = run(&mut wb, json!({"cmd": "click", "target": "docview.wrap"}));
+        assert!(!wb.docviews[&id].preview_wrap, "{r}");
         let _ = wrapped_lines;
         // Typing doesn't change the file; Esc is back to Source.
         keys(&mut wb, &["x", "Esc"]);
@@ -5348,7 +5348,7 @@ mod tests {
         let i = wb.shell.explorer.list.rows.iter().position(|r| r.text == "notes.md").unwrap();
         let at = Point::new(a.x + 3, a.y + (i - wb.shell.explorer.list.scroll) as i32);
         let tip = rest(&mut wb, at).unwrap_or_default();
-        assert!(tip.contains(&dir.join("notes.md").display().to_string()) && tip.contains("8 bytes") && tip.contains("modified ") && tip.contains("rw"), "{tip}");
+        assert!(tip.contains(&dir.join("notes.md").display().to_string()) && tip.contains("8 bytes") && tip.contains("Markdown file") && tip.contains("modified ") && tip.contains("rw"), "{tip}");
         // A folder's whole size, counted when asked.
         let i = wb.shell.explorer.list.rows.iter().position(|r| r.text == "src").unwrap();
         wb.ex_command("size", i);
