@@ -451,7 +451,7 @@ pub(super) fn draw(w: &mut EdWin, dv: Option<&mut DocView>, c: &mut Canvas, them
     let inner = w.win.inner();
     let s = &theme.scheme;
     let bar = Rect::new(inner.x, inner.y, inner.w, 1);
-    let bs = Style { fg: s.editor_gutter.fg, ..s.editor };
+    let bs = Style { fg: turbine_ui::theme::vga::CYAN, ..s.editor };
     c.fill(bar, " ", bs);
     let mode = dv.as_ref().map_or(Mode::Source, |d| d.mode);
     let pw = dv.as_ref().is_none_or(|d| d.preview_wrap);

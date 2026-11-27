@@ -694,7 +694,7 @@ impl StructView {
         };
         // The search field.
         let field = Rect::new(r.x, r.y, r.w, 1);
-        let fs = if self.in_search && focused { s.input } else { Style { fg: s.editor_gutter.fg, ..base } };
+        let fs = if self.in_search && focused { s.input } else { Style { fg: turbine_ui::theme::vga::CYAN, ..base } };
         c.fill(field, " ", fs);
         let count = if self.query.is_empty() { String::new() } else { format!("  {} found", self.matches) };
         let label = format!(" Search: {}{}", self.query, if self.in_search && focused { "_" } else { "" });
@@ -763,6 +763,16 @@ impl StructView {
                         _ => format!(" {{{}}}", n.children.len()),
                     };
                     spans.push((what, syn("comment")));
+                    // (A closed one's first value, to tell rows apart: name = "x".)
+                    let open = !self.query.is_empty() || self.open.contains(path);
+                    if !open {
+                        if let Some(c) = n.children.iter().find(|c| c.value.is_some() && c.key.is_some()) {
+                            let v = c.value.clone().unwrap_or_default().replace('\n', "⏎");
+                            let v: String = v.chars().take(40).collect();
+                            spans.push((format!("  {} = ", c.key.clone().unwrap_or_default()), syn("comment")));
+                            spans.push((if c.kind == Kind::Str { format!("\"{v}\"") } else { v }, syn("string")));
+                        }
+                    }
                 }
                 _ => {}
             }
