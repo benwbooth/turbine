@@ -11,6 +11,7 @@ pub mod event;
 pub mod frame;
 pub mod geom;
 pub mod menu;
+pub mod popup;
 pub mod statusbar;
 pub mod surface;
 pub mod theme;

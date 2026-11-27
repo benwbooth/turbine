@@ -69,6 +69,11 @@ comes back once the action has finished on screen.
 - Syntax highlighting with tree-sitter in Borland's colours: 18 grammars
   built in, and any of Helix's ~250 fetched the first time a file needs it.
   Parsing runs off the UI thread.
+- Language servers, started for you per project from ~25 known ones (or
+  `TURBINE_LSP_<LANG>="cmd args"`): problems underlined with a ■ in the
+  gutter and the message on the status line (F8 / Shift+F8 step through
+  them), completion (Ctrl+Space, filtering as you type), go to definition
+  (F12) and Topic Search (Ctrl+F1, the server's hover text)
 - Unicode: grapheme clusters, East Asian wide characters (two cells each),
   combining marks, emoji, and bidirectional text with an RTL mode
 - Encodings detected on open and kept on save: UTF-8/16 (with or without
@@ -88,7 +93,7 @@ comes back once the action has finished on screen.
   pastes. Copies reach your system clipboard (OSC 52), even over SSH.
 - The automation socket, plus `--headless --script` for tests and screenshots
 
-The plan covers much more: LSP, DAP,
+The plan covers much more: DAP,
 WASI extensions, Emacs and VS Code keymaps, AI completion and an
 assistant, hearth AI hub integration, a global menu, desktop and web front
 ends (a cxx-qt Qt app and a Leptos web app, no JavaScript), and retro

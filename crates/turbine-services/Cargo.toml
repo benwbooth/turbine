@@ -1,0 +1,9 @@
+[package]
+name = "turbine-services"
+description = "Turbine's background services: JSON-RPC over stdio (language servers, debug adapters), the AI hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true

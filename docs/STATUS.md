@@ -24,8 +24,11 @@
 | tree-sitter highlighting on a worker thread: 18 built-in grammars + Helix's ~250 on demand (Tessera's loader, grammars trial-loaded in a child) | done |
 | Syntax colours per scheme (Borland style: white keywords, grey comments, cyan strings, green numbers/preprocessor) | done |
 | Language detection by name, extension, shebang | done |
-| LSP client | planned |
-| DAP client | planned |
+| turbine-services: Content-Length JSON-RPC over stdio (reader/writer threads, never blocks the UI); in-process fake server for tests | done |
+| LSP: one server per language + project root (auto-detected from ~25 known servers, or `TURBINE_LSP_<LANG>`), full-text sync, didSave | done |
+| LSP: diagnostics (underline + gutter ■ + status bar message, F8/Shift+F8), completion popup (Ctrl+Space, filters as you type), go to definition (F12), hover (Ctrl+F1 Topic Search) | done |
+| LSP: references, rename, code actions, formatting, signature help, inlay hints, semantic tokens, incremental sync, Problems window | planned |
+| DAP client (on turbine-services' RPC layer) | next |
 | Embedded terminal (turbine-term: libghostty-vt on a PTY; works in TUI mode too) | done |
 | Terminal: kitty/xterm key encoding, bracketed paste, wheel scrollback, DOS palette, title, restart on Enter after exit | done |
 | Terminal: mouse reporting (any mode Ghostty encodes), selection (drag, double-click word, triple-click line, Alt for a block), copy on select, Ctrl+Shift+C/V, Ctrl/Shift+Ins, middle-click paste, wheel = arrows in full-screen programs | done |

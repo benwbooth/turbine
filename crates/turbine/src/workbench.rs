@@ -4,7 +4,54 @@
 use crate::agent::{Driver, Output, Step};
 use crate::vim::{self, Keymap};
 use turbine_term::{MouseOutcome, Spawn, TerminalView};
+use turbine_services::lsp::{self, CompletionItem, LspClient, LspEvent, Pos};
+use turbine_ui::editor::DiagMark;
+use turbine_ui::popup::{ListPopup, PopupResult};
 use turbine_vi::{ExAction, Out as VimOut, Session};
+use std::collections::{HashMap, HashSet};
+
+/// A language server is keyed by language and project folder.
+type LspKey = (String, PathBuf);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LspReq {
+    Hover,
+    Definition,
+}
+
+/// An open (or about to open) completion list.
+struct Completion {
+    win_id: u32,
+    /// Char offset where the word being completed starts.
+    anchor: usize,
+    line: usize,
+    /// Waiting for this request's answer.
+    waiting: Option<(LspKey, i64)>,
+    items: Vec<CompletionItem>,
+    /// Indexes into `items` that match what's typed.
+    shown: Vec<usize>,
+    popup: ListPopup,
+}
+
+/// Starts a language server for (language, project root): None when there
+/// is none for the language.
+pub type LspSpawner = Box<dyn Fn(&str, &Path) -> Option<std::io::Result<LspClient>>>;
+
+/// The default: `TURBINE_LSP_<LANG>` ("fake" = the built-in test server),
+/// else the first installed server for the language.
+fn default_lsp_spawner() -> LspSpawner {
+    Box::new(|lang, root| {
+        let var = format!("TURBINE_LSP_{}", lang.to_uppercase().replace('-', "_"));
+        let argv: Vec<String> = match std::env::var(&var) {
+            Ok(v) if v.trim() == "fake" => {
+                return Some(turbine_services::fake::fake_server().map(|rpc| LspClient::with_rpc(rpc, root, lang)));
+            }
+            Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),
+            _ => lsp::server_for(lang)?,
+        };
+        Some(LspClient::start(&argv, root, lang))
+    })
+}
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -39,6 +86,10 @@ struct EdWin {
     lang: Option<String>,
     lang_for: Option<Option<PathBuf>>,
     hl_sent: Option<u64>,
+    /// Language server: which one, the version it has, dirty last tick.
+    lsp_key: Option<LspKey>,
+    lsp_sent: Option<u64>,
+    was_dirty: bool,
 }
 
 impl EdWin {
@@ -74,6 +125,12 @@ pub struct Workbench {
     highlighter: turbine_syntax::Highlighter,
     /// Highlight requests not answered yet.
     hl_pending: usize,
+    lsp: HashMap<LspKey, LspClient>,
+    /// Languages with no server (or whose server failed): not tried again.
+    lsp_missing: HashSet<String>,
+    lsp_spawn: LspSpawner,
+    lsp_requests: HashMap<(LspKey, i64), (LspReq, u32)>,
+    completion: Option<Completion>,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -128,6 +185,8 @@ fn menus() -> Vec<Menu> {
                 sep(),
                 soon("Toggle Line ~C~omment", "Ctrl+/", "edit.comment"),
                 soon("~F~ormat Document", "Ctrl+Shift+I", "edit.format"),
+                sep(),
+                it("Trigger ~S~uggest", "Ctrl+Space", "lsp.complete"),
             ],
         ),
         Menu::new(
@@ -158,8 +217,8 @@ fn menus() -> Vec<Menu> {
                 it("~G~o to Line Number...", "Ctrl+G", "search.goto"),
                 soon("Find ~P~rocedure...", "Ctrl+Shift+O", "go.symbol"),
                 sep(),
-                soon("Pre~v~ious Error", "Alt+F7", "go.prev_problem"),
-                soon("~N~ext Error", "Alt+F8", "go.next_problem"),
+                it("Pre~v~ious Error", "Alt+F7", "go.prev_problem"),
+                it("~N~ext Error", "Alt+F8", "go.next_problem"),
             ],
         ),
         Menu::new(
@@ -189,7 +248,7 @@ fn menus() -> Vec<Menu> {
                 sep(),
                 soon("Go to ~F~ile...", "Ctrl+P", "go.file"),
                 soon("Go to ~S~ymbol...", "Ctrl+Shift+O", "go.symbol"),
-                soon("Go to ~D~efinition", "F12", "go.definition"),
+                it("Go to ~D~efinition", "F12", "go.definition"),
                 soon("Go to ~R~eferences", "Shift+F12", "go.references"),
                 it("Go to ~L~ine...", "Ctrl+G", "search.goto"),
                 soon("Go to ~B~racket", "Ctrl+Shift+\\", "go.bracket"),
@@ -271,6 +330,7 @@ fn menus() -> Vec<Menu> {
             vec![
                 soon("~C~ontents", "", "help.contents"),
                 soon("~I~ndex", "Shift+F1", "help.index"),
+                it("~T~opic Search", "Ctrl+F1", "lsp.hover"),
                 sep(),
                 it("~K~eyboard...", "F1", "help.keys"),
                 it("~V~im Keys...", "", "help.vim"),
@@ -317,6 +377,11 @@ impl Workbench {
             clipboard_out: None,
             highlighter: turbine_syntax::Highlighter::new(),
             hl_pending: 0,
+            lsp: HashMap::new(),
+            lsp_missing: HashSet::new(),
+            lsp_spawn: default_lsp_spawner(),
+            lsp_requests: HashMap::new(),
+            completion: None,
         };
         for f in files {
             wb.open_path(f);
@@ -386,12 +451,279 @@ impl Workbench {
             win.zoomed = false;
         }
         self.next_id += 1;
-        let mut ew = EdWin { win, ed: EditorView::new(doc), vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None };
+        let mut ew = EdWin { win, ed: EditorView::new(doc), vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false };
         if self.keymap == Keymap::Vim {
             ew.vim = Some(vim::attach(&mut ew.ed));
         }
         self.windows.push(ew);
         self.renumber();
+    }
+
+    #[allow(dead_code)] // used by tests; settings will choose servers later
+    pub fn set_lsp_spawner(&mut self, f: LspSpawner) {
+        self.lsp_spawn = f;
+    }
+
+    /// Start servers for open files, keep them in sync, and act on what
+    /// they send.
+    fn update_lsp(&mut self) {
+        let mut started = Vec::new();
+        for i in 0..self.windows.len() {
+            let w = &self.windows[i];
+            if w.term.is_some() {
+                continue;
+            }
+            let (Some(path), Some(lang)) = (w.ed.doc.path.clone(), w.lang.clone()) else { continue };
+            let key: LspKey = (lang.clone(), lsp::project_root(&path));
+            if !self.lsp.contains_key(&key) && !self.lsp_missing.contains(&lang) {
+                match (self.lsp_spawn)(&lang, &key.1) {
+                    None => {
+                        self.lsp_missing.insert(lang.clone());
+                    }
+                    Some(Err(e)) => {
+                        self.lsp_missing.insert(lang.clone());
+                        started.push(format!("Language server for {lang} didn't start: {e}"));
+                    }
+                    Some(Ok(c)) => {
+                        started.push(format!("Started {} for {}", c.name(), key.1.display()));
+                        self.lsp.insert(key.clone(), c);
+                    }
+                }
+            }
+            let w = &mut self.windows[i];
+            let Some(c) = self.lsp.get_mut(&key) else { continue };
+            let v = w.ed.doc.version;
+            if !c.is_open(&path) {
+                c.did_open(&path, v as i64, &w.ed.doc.rope.to_string());
+            } else if w.lsp_sent != Some(v) {
+                c.did_change(&path, v as i64, &w.ed.doc.rope.to_string());
+            }
+            if w.was_dirty && !w.ed.doc.dirty {
+                c.did_save(&path);
+            }
+            w.was_dirty = w.ed.doc.dirty;
+            w.lsp_sent = Some(v);
+            w.lsp_key = Some(key);
+        }
+        for m in started {
+            self.say(m);
+        }
+        let mut events = Vec::new();
+        for (key, c) in self.lsp.iter_mut() {
+            for e in c.poll() {
+                events.push((key.clone(), e));
+            }
+        }
+        for (key, e) in events {
+            self.lsp_event(key, e);
+        }
+    }
+
+    fn lsp_event(&mut self, key: LspKey, e: LspEvent) {
+        match e {
+            LspEvent::Ready | LspEvent::Log(_) => {}
+            LspEvent::Diagnostics { path, items } => {
+                let want = std::fs::canonicalize(&path).unwrap_or(path);
+                for w in &mut self.windows {
+                    let Some(p) = &w.ed.doc.path else { continue };
+                    if std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) != want {
+                        continue;
+                    }
+                    let doc = &w.ed.doc;
+                    w.ed.diagnostics = items
+                        .iter()
+                        .map(|d| {
+                            let line = d.start.line as usize;
+                            let text = doc.line(line);
+                            let start = lsp::byte_of_utf16(&text, d.start.character);
+                            let end = if d.end.line as usize > line { text.len() } else { lsp::byte_of_utf16(&text, d.end.character) };
+                            let msg = if d.source.is_empty() { d.message.clone() } else { format!("{}: {}", d.source, d.message) };
+                            DiagMark { line, start, end, severity: d.severity, message: msg }
+                        })
+                        .collect();
+                }
+            }
+            LspEvent::Completion { id, items } => {
+                let Some(comp) = &mut self.completion else { return };
+                if comp.waiting.as_ref() != Some(&(key, id)) {
+                    return;
+                }
+                comp.waiting = None;
+                comp.items = items;
+                if comp.items.is_empty() {
+                    self.completion = None;
+                    self.say("No completions here");
+                    return;
+                }
+                self.refilter_completion();
+            }
+            LspEvent::Hover { id, text } => {
+                if self.lsp_requests.remove(&(key, id)).is_none() {
+                    return;
+                }
+                if text.trim().is_empty() {
+                    self.say("Nothing to show here");
+                    return;
+                }
+                let lines: Vec<String> = text.lines().filter(|l| !l.starts_with("```")).map(str::to_string).collect();
+                let w = (lines.iter().map(|l| turbine_text::unicode::str_width(l)).max().unwrap_or(10) as i32 + 6).clamp(30, self.size.0 - 4);
+                let h = (lines.len() as i32 + 6).clamp(8, self.size.1 - 4);
+                let d = Dialog::new("hover", "Topic", w, h)
+                    .list("text", Rect::new(0, 0, w - 4, h - 5), lines, 0)
+                    .button("ok", (w - 10) / 2, h - 4, "O~K~", true);
+                self.dialog = Some(d);
+            }
+            LspEvent::Definition { id, locations } => {
+                if self.lsp_requests.remove(&(key, id)).is_none() {
+                    return;
+                }
+                let Some(loc) = locations.into_iter().next() else {
+                    self.say("No definition found");
+                    return;
+                };
+                let same = self.windows.last().and_then(|w| w.ed.doc.path.clone()).map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+                    == Some(std::fs::canonicalize(&loc.path).unwrap_or(loc.path.clone()));
+                if !same {
+                    if let Some(i) = self.windows.iter().position(|w| {
+                        w.ed.doc.path.as_ref().is_some_and(|p| std::fs::canonicalize(p).ok() == std::fs::canonicalize(&loc.path).ok())
+                    }) {
+                        let w = self.windows.remove(i);
+                        self.windows.push(w);
+                        self.renumber();
+                    } else {
+                        self.open_path(&loc.path);
+                    }
+                }
+                if let Some(w) = self.windows.last_mut() {
+                    let line = loc.start.line as usize;
+                    let text = w.ed.doc.line(line);
+                    let b = lsp::byte_of_utf16(&text, loc.start.character);
+                    w.ed.cursor = w.ed.doc.line_byte_to_char(line, b);
+                    w.ed.anchor = None;
+                }
+            }
+            LspEvent::Failed { id, message } => {
+                let ours = self.lsp_requests.remove(&(key.clone(), id)).is_some()
+                    || self.completion.as_ref().is_some_and(|c| c.waiting.as_ref() == Some(&(key.clone(), id)));
+                if ours {
+                    if self.completion.as_ref().is_some_and(|c| c.waiting.is_some()) {
+                        self.completion = None;
+                    }
+                    self.say(format!("Language server: {message}"));
+                }
+            }
+            LspEvent::Exited(why) => {
+                if let Some(c) = self.lsp.remove(&key) {
+                    self.say(format!("{} stopped: {why}", c.name()));
+                }
+                self.lsp_missing.insert(key.0);
+            }
+        }
+    }
+
+    /// The active editor's server and the cursor's position for it.
+    fn lsp_here(&mut self) -> Option<(LspKey, PathBuf, Pos)> {
+        let w = self.windows.last()?;
+        let key = w.lsp_key.clone()?;
+        let path = w.ed.doc.path.clone()?;
+        let (line, byte) = w.ed.doc.char_to_line_byte(w.ed.cursor);
+        let text = w.ed.doc.line(line);
+        Some((key, path, Pos { line: line as u32, character: lsp::utf16_col(&text, byte) }))
+    }
+
+    fn lsp_request(&mut self, what: LspReq) {
+        let Some((key, path, pos)) = self.lsp_here() else {
+            self.say("No language server for this file");
+            return;
+        };
+        let Some(c) = self.lsp.get_mut(&key) else { return };
+        let id = match what {
+            LspReq::Hover => c.hover(&path, pos),
+            LspReq::Definition => c.definition(&path, pos),
+        };
+        let win = self.windows.last().map(|w| w.win.id).unwrap_or(0);
+        self.lsp_requests.insert((key, id), (what, win));
+    }
+
+    fn start_completion(&mut self) {
+        let Some((key, path, pos)) = self.lsp_here() else {
+            self.say("No language server for this file");
+            return;
+        };
+        let w = self.windows.last().unwrap();
+        let rope = &w.ed.doc.rope;
+        let mut anchor = w.ed.cursor;
+        while anchor > 0 {
+            let c = rope.char(anchor - 1);
+            if c.is_alphanumeric() || c == '_' {
+                anchor -= 1;
+            } else {
+                break;
+            }
+        }
+        let (line, _) = w.ed.doc.char_to_line_byte(w.ed.cursor);
+        let win_id = w.win.id;
+        let Some(c) = self.lsp.get_mut(&key) else { return };
+        let id = c.completion(&path, pos);
+        self.completion = Some(Completion {
+            win_id,
+            anchor,
+            line,
+            waiting: Some((key, id)),
+            items: Vec::new(),
+            shown: Vec::new(),
+            popup: ListPopup::new(Vec::new()),
+        });
+    }
+
+    /// Match the list to what's typed since it opened; close it when the
+    /// cursor leaves the word.
+    fn refilter_completion(&mut self) {
+        let Some(comp) = &mut self.completion else { return };
+        let Some(w) = self.windows.last() else {
+            self.completion = None;
+            return;
+        };
+        let (line, _) = w.ed.doc.char_to_line_byte(w.ed.cursor);
+        if w.win.id != comp.win_id || line != comp.line || w.ed.cursor < comp.anchor {
+            self.completion = None;
+            return;
+        }
+        let typed: String = w.ed.doc.rope.slice(comp.anchor..w.ed.cursor).to_string();
+        if typed.chars().any(|c| !(c.is_alphanumeric() || c == '_')) {
+            self.completion = None;
+            return;
+        }
+        if comp.waiting.is_some() {
+            return;
+        }
+        let t = typed.to_lowercase();
+        let mut shown: Vec<usize> = (0..comp.items.len()).filter(|&i| comp.items[i].label.to_lowercase().starts_with(&t)).collect();
+        if shown.is_empty() {
+            shown = (0..comp.items.len()).filter(|&i| comp.items[i].label.to_lowercase().contains(&t)).collect();
+        }
+        if shown.is_empty() {
+            self.completion = None;
+            return;
+        }
+        let sel_label = comp.shown.get(comp.popup.sel).map(|&i| comp.items[i].label.clone());
+        comp.popup.items = shown.iter().map(|&i| (comp.items[i].label.clone(), comp.items[i].detail.clone())).collect();
+        comp.popup.sel = sel_label.and_then(|l| shown.iter().position(|&i| comp.items[i].label == l)).unwrap_or(0);
+        comp.shown = shown;
+    }
+
+    fn accept_completion(&mut self, i: usize) {
+        let Some(comp) = self.completion.take() else { return };
+        let Some(&idx) = comp.shown.get(i) else { return };
+        let insert = comp.items[idx].insert.clone();
+        let Some(w) = self.windows.last_mut() else { return };
+        let cur = w.ed.cursor;
+        w.ed.doc.break_undo_group();
+        w.ed.doc.remove(comp.anchor, cur, cur);
+        w.ed.doc.insert(comp.anchor, &insert, comp.anchor);
+        w.ed.doc.break_undo_group();
+        w.ed.cursor = comp.anchor + insert.chars().count();
+        w.ed.anchor = None;
     }
 
     /// Detect languages, send changed documents to the highlighter, and
@@ -453,7 +785,7 @@ impl Workbench {
         if let Some(e) = view.error() {
             self.say(format!("Terminal: {e}"));
         }
-        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new(), lang: None, lang_for: None, hl_sent: None });
+        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false });
         self.renumber();
     }
 
@@ -549,6 +881,14 @@ impl Workbench {
                 } else {
                     self.clipboard = clip;
                 }
+            }
+            "lsp.complete" => self.start_completion(),
+            "lsp.hover" => self.lsp_request(LspReq::Hover),
+            "go.definition" => self.lsp_request(LspReq::Definition),
+            "go.next_problem" | "go.prev_problem" => {
+                let fwd = cmd == "go.next_problem";
+                let msg = self.windows.last_mut().and_then(|w| w.ed.goto_diagnostic(fwd));
+                self.say(msg.unwrap_or_else(|| "No problems".into()));
             }
             "search.goto" => {
                 let d = Dialog::new("goto", "Go to Line", 36, 8)
@@ -961,6 +1301,32 @@ impl Workbench {
         if k.kind == KeyKind::Release {
             return;
         }
+        // The completion list takes its keys first; the rest type on.
+        if self.dialog.is_none() {
+            if let Some(comp) = &mut self.completion {
+                if comp.waiting.is_none() {
+                    match comp.popup.handle_key(&k) {
+                        PopupResult::Accept(i) => return self.accept_completion(i),
+                        PopupResult::Close => {
+                            self.completion = None;
+                            return;
+                        }
+                        PopupResult::Consumed => return,
+                        PopupResult::Ignored => {}
+                    }
+                } else if k.key == Key::Esc {
+                    self.completion = None;
+                    return;
+                }
+            }
+        }
+        self.key_inner(k);
+        if self.completion.is_some() {
+            self.refilter_completion();
+        }
+    }
+
+    fn key_inner(&mut self, k: KeyEvent) {
         if let Some(d) = &mut self.dialog {
             match d.handle_key(&k) {
                 DialogResult::None => {}
@@ -1019,7 +1385,17 @@ impl Workbench {
                 VimOut::NotMine => {}
             }
         }
-        let shortcut = if k.is(Key::Char('`'), Mods::CTRL) {
+        let shortcut = if k.is(Key::Char(' '), Mods::CTRL) {
+            Some("lsp.complete")
+        } else if k.is(Key::F(12), Mods::NONE) {
+            Some("go.definition")
+        } else if k.is(Key::F(1), Mods::CTRL) {
+            Some("lsp.hover")
+        } else if k.is(Key::F(8), Mods::NONE) || k.is(Key::F(8), Mods::ALT) {
+            Some("go.next_problem")
+        } else if k.is(Key::F(8), Mods::SHIFT) || k.is(Key::F(7), Mods::ALT) {
+            Some("go.prev_problem")
+        } else if k.is(Key::Char('`'), Mods::CTRL) {
             Some("view.terminal")
         } else if k.is(Key::F(6), Mods::SHIFT) {
             Some("window.prev")
@@ -1288,6 +1664,16 @@ impl Workbench {
     fn mouse(&mut self, m: MouseEvent) {
         let screen = self.screen();
         let desk = self.desktop();
+        if self.dialog.is_none() {
+            if let Some(comp) = &mut self.completion {
+                match comp.popup.handle_mouse(&m) {
+                    PopupResult::Accept(i) => return self.accept_completion(i),
+                    PopupResult::Close => self.completion = None,
+                    PopupResult::Consumed => return,
+                    PopupResult::Ignored => {}
+                }
+            }
+        }
         if let Some(d) = &mut self.dialog {
             match d.handle_mouse(&m) {
                 DialogResult::Button(b) => {
@@ -1515,6 +1901,19 @@ impl Workbench {
             }
             root = root.child(dn);
         }
+        if let Some(comp) = self.completion.as_ref().filter(|c| !c.popup.items.is_empty()) {
+            let mut list = Node::new("completion", "list", "Completions", comp.popup.rect()).focused(true);
+            for (i, (label, detail)) in comp.popup.items.iter().enumerate() {
+                if let Some(r) = comp.popup.item_rect(i) {
+                    let mut n = Node::new(format!("completion.{i}"), "listitem", label.clone(), r).focused(i == comp.popup.sel);
+                    if !detail.is_empty() {
+                        n = n.value(detail.clone());
+                    }
+                    list = list.child(n);
+                }
+            }
+            root = root.child(list);
+        }
         let srow = self.size.1 - 1;
         let mut sb = Node::new("statusbar", "statusbar", "Status", Rect::new(0, srow, screen.w, 1));
         for (it, r) in self.status.items.iter().zip(self.status.item_rects(srow)) {
@@ -1727,6 +2126,7 @@ impl App for Workbench {
             }
         }
         self.update_highlights();
+        self.update_lsp();
         if let Some(rx) = &self.requests {
             let reqs: Vec<Request> = rx.try_iter().collect();
             for r in reqs {
@@ -1765,8 +2165,11 @@ impl App for Workbench {
         let msg_tick = self.message.as_ref().map(|(_, t)| *t + Duration::from_secs(4));
         let poll = self.requests.as_ref().map(|_| now + Duration::from_millis(50));
         // Terminals are read on ticks: ~60 a second while one is open.
-        let term_tick = (any_term || self.hl_pending > 0).then(|| now + Duration::from_millis(16));
-        [next, msg_tick, poll, term_tick].into_iter().flatten().min()
+        let lsp_waiting = self.lsp.values().any(|c| c.waiting() > 0);
+        let term_tick = (any_term || self.hl_pending > 0 || lsp_waiting).then(|| now + Duration::from_millis(16));
+        // Servers send diagnostics unasked: look a few times a second.
+        let lsp_tick = (!self.lsp.is_empty()).then(|| now + Duration::from_millis(100));
+        [next, msg_tick, poll, term_tick, lsp_tick].into_iter().flatten().min()
     }
 
     fn render(&mut self, surf: &mut Surface) {
@@ -1849,8 +2252,14 @@ impl App for Workbench {
             ))
         } else if let Some((line, _, _)) = &cmdline {
             Some(line.clone())
+        } else if let Some((m, _)) = &self.message {
+            Some(m.clone())
         } else {
-            self.message.as_ref().map(|(m, _)| m.clone())
+            self.windows
+                .last()
+                .filter(|w| w.term.is_none())
+                .and_then(|w| w.ed.diagnostic_at_cursor())
+                .map(|d| format!("{} {}", if d.severity == 1 { "■ Error:" } else if d.severity == 2 { "■ Warning:" } else { "■" }, d.message))
         };
         self.status.draw(&mut c, &theme, Rect::new(0, self.size.1 - 1, self.size.0, 1));
         if let Some((_, Some(col), _)) = &cmdline {
@@ -1859,6 +2268,12 @@ impl App for Workbench {
             }
         }
         self.menubar.draw(&mut c, &theme, screen);
+        if let Some(comp) = &mut self.completion {
+            let at = self.windows.last().filter(|w| w.win.id == comp.win_id).and_then(|w| w.ed.cursor_screen_pos());
+            if let (Some(at), false) = (at, comp.popup.items.is_empty()) {
+                comp.popup.draw(&mut c, at, desk, &theme);
+            }
+        }
         if let Some(d) = &mut self.dialog {
             d.layout(screen);
             d.draw(&mut c, &theme);
@@ -2115,6 +2530,64 @@ mod tests {
         assert_eq!(fg_of("\"hi\""), vga::LIGHT_CYAN);
         assert_eq!(fg_of("// done"), vga::LIGHT_GRAY);
         assert!(wb.status.info.starts_with("Rust"), "{}", wb.status.info);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn wait_until(wb: &mut Workbench, what: &str, mut f: impl FnMut(&mut Workbench) -> bool) {
+        let start = Instant::now();
+        while !f(wb) {
+            wb.tick(Instant::now());
+            assert!(start.elapsed() < Duration::from_secs(5), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn language_server_diagnostics_completion_definition_hover() {
+        let dir = std::env::temp_dir().join(format!("turbine-lsp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("main.rs");
+        std::fs::write(&f, "fn main() {\n    BAD;\n    pr\n}\n").unwrap();
+        let mut wb = Workbench::new(&[f]);
+        wb.set_lsp_spawner(Box::new(|lang, root| {
+            Some(turbine_services::fake::fake_server().map(|rpc| LspClient::with_rpc(rpc, root, lang)))
+        }));
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+
+        // Diagnostics: the BAD line is marked; F8 goes there and says why.
+        wait_until(&mut wb, "diagnostics", |wb| !wb.windows[0].ed.diagnostics.is_empty());
+        assert_eq!(wb.windows[0].ed.diagnostics[0].line, 1);
+        wb.message = None;
+        keys(&mut wb, &["F8"]);
+        assert_eq!(wb.windows[0].ed.cursor_line_col(), (1, 4));
+        assert!(wb.message.as_ref().unwrap().0.contains("BAD is not allowed"));
+
+        // Completion after "pr": a list of matches; Enter puts one in.
+        keys(&mut wb, &["Down", "End", "Ctrl+Space"]);
+        wait_until(&mut wb, "completion list", |wb| wb.completion.as_ref().is_some_and(|c| !c.popup.items.is_empty()));
+        let labels: Vec<String> = wb.completion.as_ref().unwrap().popup.items.iter().map(|i| i.0.clone()).collect();
+        assert!(labels.iter().all(|l| l.starts_with("pr")), "{labels:?}");
+        let snap = run(&mut wb, json!({"cmd": "snapshot"}));
+        assert!(snap.to_string().contains("\"id\":\"completion\""), "agents see the list");
+        run(&mut wb, json!({"cmd": "type", "text": "intl"}));
+        let labels: Vec<String> = wb.completion.as_ref().unwrap().popup.items.iter().map(|i| i.0.clone()).collect();
+        assert_eq!(labels, vec!["println!"]);
+        keys(&mut wb, &["Enter"]);
+        assert!(wb.completion.is_none());
+        assert_eq!(wb.windows[0].ed.doc.line(2), "    println!");
+
+        // F12 on "main" (line 0) jumps to where it's defined.
+        keys(&mut wb, &["Ctrl+Home", "Right", "Right", "Right", "Right"]);
+        wb.windows[0].ed.cursor = wb.windows[0].ed.doc.line_byte_to_char(2, 6);
+        keys(&mut wb, &["F12"]);
+        wait_until(&mut wb, "definition", |wb| wb.windows[0].ed.cursor_line_col() == (2, 4));
+
+        // Ctrl+F1 shows what the server says about the word.
+        keys(&mut wb, &["Ctrl+F1"]);
+        wait_until(&mut wb, "hover", |wb| wb.dialog.as_ref().is_some_and(|d| d.kind == "hover"));
+        let text = wb.dialog.as_ref().unwrap().value("text").unwrap_or_default();
+        assert!(text.contains("fake hover: println"), "{text}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

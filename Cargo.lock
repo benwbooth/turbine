@@ -1253,12 +1253,20 @@ dependencies = [
  "crossterm",
  "serde",
  "serde_json",
+ "turbine-services",
  "turbine-syntax",
  "turbine-term",
  "turbine-text",
  "turbine-tui",
  "turbine-ui",
  "turbine-vi",
+]
+
+[[package]]
+name = "turbine-services"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

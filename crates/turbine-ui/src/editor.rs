@@ -43,6 +43,18 @@ fn layout(line: &str, base_rtl: Option<bool>) -> (Vec<Placed>, usize) {
     (out, col)
 }
 
+/// A problem a language server found, placed in the document.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiagMark {
+    pub line: usize,
+    /// Byte range in the line (end may equal start: then one cell is marked).
+    pub start: usize,
+    pub end: usize,
+    /// 1 error, 2 warning, 3 info, 4 hint.
+    pub severity: u8,
+    pub message: String,
+}
+
 #[derive(Debug)]
 pub struct EditorView {
     pub doc: Document,
@@ -64,6 +76,8 @@ pub struct EditorView {
     /// Syntax highlighting per line: (start byte, end byte, kind index),
     /// later spans over earlier. May lag an edit by a moment.
     pub highlights: Vec<Vec<(u32, u32, u8)>>,
+    /// Problems from the language server.
+    pub diagnostics: Vec<DiagMark>,
     /// Extra selected char ranges (vim's visual block).
     pub block: Vec<(usize, usize)>,
     /// Text area from the last draw, for mouse hit testing.
@@ -86,6 +100,7 @@ impl EditorView {
             ghost: None,
             cursor_shape: None,
             highlights: Vec::new(),
+            diagnostics: Vec::new(),
             block: Vec::new(),
             area: Rect::default(),
             dragging: false,
@@ -121,6 +136,53 @@ impl EditorView {
             Some(p) => p.offset,
             None => 0,
         }
+    }
+
+    /// Where the cursor is on screen (from the last draw), if visible.
+    pub fn cursor_screen_pos(&self) -> Option<Point> {
+        let (line, col) = self.cursor_line_col();
+        let x = self.area.x + self.gutter_width() + col as i32 - self.scroll_x as i32;
+        let y = self.area.y + line as i32 - self.scroll_y as i32;
+        let p = Point::new(x, y);
+        self.area.contains(p).then_some(p)
+    }
+
+    /// The most severe problem at the cursor's line, if any.
+    pub fn diagnostic_at_cursor(&self) -> Option<&DiagMark> {
+        let (line, byte) = self.doc.char_to_line_byte(self.cursor);
+        let on_line = self.diagnostics.iter().filter(|d| d.line == line);
+        let mut best: Option<&DiagMark> = None;
+        for d in on_line {
+            let here = byte >= d.start && byte <= d.end.max(d.start + 1);
+            let better = match best {
+                None => true,
+                Some(b) => (here, std::cmp::Reverse(d.severity)) > (byte >= b.start && byte <= b.end.max(b.start + 1), std::cmp::Reverse(b.severity)),
+            };
+            if better {
+                best = Some(d);
+            }
+        }
+        best
+    }
+
+    /// Move to the next (or previous) problem after the cursor, wrapping.
+    pub fn goto_diagnostic(&mut self, forward: bool) -> Option<String> {
+        if self.diagnostics.is_empty() {
+            return None;
+        }
+        let mut marks: Vec<(usize, usize)> = self.diagnostics.iter().map(|d| (d.line, d.start)).collect();
+        marks.sort();
+        marks.dedup();
+        let here = self.doc.char_to_line_byte(self.cursor);
+        let target = if forward {
+            marks.iter().find(|m| **m > here).or(marks.first())
+        } else {
+            marks.iter().rev().find(|m| **m < here).or(marks.last())
+        }
+        .copied()?;
+        self.cursor = self.doc.line_byte_to_char(target.0, target.1);
+        self.anchor = None;
+        self.diagnostic_at_cursor().map(|d| d.message.clone())
     }
 
     pub fn selection(&self) -> Option<(usize, usize)> {
@@ -438,6 +500,10 @@ impl EditorView {
             if gw > 0 {
                 let n = format!("{:>w$} ", li + 1, w = (gw - 1) as usize);
                 c.print(area.x, y, &n, s.editor_gutter);
+                if let Some(sev) = self.diagnostics.iter().filter(|d| d.line == li).map(|d| d.severity).min() {
+                    let color = if sev == 1 { s.diag_error } else if sev == 2 { s.diag_warning } else { s.editor_gutter.fg };
+                    c.print(area.x + gw - 1, y, "■", s.editor_gutter.fg(color));
+                }
             }
             let text = self.doc.line(li);
             let line_start = self.doc.rope.line_to_char(li);
@@ -472,6 +538,21 @@ impl EditorView {
                         }
                         None => s.editor,
                     }
+                };
+                let st = match self.diagnostics.iter().filter(|d| d.line == li).find(|d| {
+                    p.offset >= d.start && (p.offset < d.end || (d.end <= d.start && p.offset == d.start))
+                }) {
+                    Some(d) if !selected => {
+                        let mut st = st;
+                        st.attrs.underline = true;
+                        match d.severity {
+                            1 => st.fg = s.diag_error,
+                            2 => st.fg = s.diag_warning,
+                            _ => {}
+                        }
+                        st
+                    }
+                    _ => st,
                 };
                 let g = &text[p.offset..p.offset + p.len];
                 if g == "\t" {

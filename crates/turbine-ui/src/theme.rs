@@ -99,6 +99,9 @@ pub struct Scheme {
     pub syntax: [Option<Color>; SYNTAX_KINDS.len()],
     /// Draw keywords bold (for monochrome schemes).
     pub bold_keywords: bool,
+    /// Text colour of errors and warnings (also underlined).
+    pub diag_error: Color,
+    pub diag_warning: Color,
 }
 
 /// Highlight kinds, in index order (the same list as turbine-syntax's).
@@ -177,6 +180,8 @@ impl Scheme {
             terminal: s!(LIGHT_GRAY on BLACK),
             syntax: borland_blue_syntax(),
             bold_keywords: false,
+            diag_error: vga::LIGHT_RED,
+            diag_warning: vga::LIGHT_MAGENTA,
         }
     }
 
@@ -223,6 +228,8 @@ impl Scheme {
                 ])
             },
             bold_keywords: false,
+            diag_error: vga::LIGHT_RED,
+            diag_warning: vga::LIGHT_MAGENTA,
         }
     }
 
@@ -250,6 +257,8 @@ impl Scheme {
                 ("escape", LIGHT_RED),
             ])
         };
+        s.diag_error = vga::RED;
+        s.diag_warning = vga::MAGENTA;
         s
     }
 
@@ -290,6 +299,8 @@ impl Scheme {
             terminal: n,
             syntax: syntax_table(&[("comment", dim)]),
             bold_keywords: true,
+            diag_error: a,
+            diag_warning: a,
         }
     }
 
