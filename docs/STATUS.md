@@ -10,6 +10,8 @@
 | Dialogs: label, input, button, list (with column header), check box, radio button, combo box (drop-down), group box | done |
 | Dialog layout engine: rows, columns, group boxes and stretch; no fixed sizes; each control measures itself in the control style; dialogs move and resize by dragging | done |
 | Control styles describe their controls (button look, field look, where buttons go, gaps, padding): QBasic boxes and `< OK >` under a rule, Turbo Vision bars and shadows, VB-DOS 3-D boxes | done |
+| Cursor-style shell: primary side bar (Explorer, Outline, Search, Source Control, Run and Debug), panel (Problems, Output, terminals), secondary side bar (AI Chat with its question field), editor tabs; parts resize by dragging and toggle with Ctrl+B / Ctrl+J / Ctrl+Alt+B | done |
+| Explorer: tree listed in the background, follows the editor; Outline from tree-sitter symbols; Find in Files in the background; Source Control: git status, stage with Space, commit | done |
 | Desktop app: VGA text mode pixels (9 or 8 dots by 16) stretched 4:3, characters 1.35 times taller than wide | done |
 | File Open / Save As: places + recent folders, files list with size and date columns that fit the width, type-to-filter, Backspace goes up, file type filter, hidden files, encoding and line endings on save, replace-file question | done |
 | Editor: graphemes, selection, clipboard, undo, auto-indent, bidi | done |

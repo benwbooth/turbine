@@ -1,0 +1,351 @@
+//! The workbench's docked parts, as in Cursor (VS Code): the primary side
+//! bar at the left (Explorer, Outline, Search, Source Control, Run and
+//! Debug), the panel under the editors (Problems, Output, Terminal) and the
+//! secondary side bar at the right (AI Chat). The editors (Turbine's
+//! windows) take the room in the middle.
+//!
+//! Each part is a frame in the control style with its tabs in the top edge;
+//! the edge facing the editors drags to resize it, and parts show and hide
+//! (Ctrl+B, Ctrl+J, Ctrl+Alt+B).
+
+use turbine_text::unicode::str_width;
+use turbine_ui::frame::draw_frame;
+use turbine_ui::theme::Theme;
+use turbine_ui::{Canvas, Point, Rect};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Side {
+    Left,
+    Bottom,
+    Right,
+}
+
+/// A view a part can show: built in, or a window docked there (a terminal,
+/// the chat log, the output log), by window id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tab {
+    Explorer,
+    Outline,
+    Search,
+    Scm,
+    Debug,
+    Problems,
+    Pane(u32),
+}
+
+impl Tab {
+    pub fn name(self) -> &'static str {
+        match self {
+            Tab::Explorer => "Explorer",
+            Tab::Outline => "Outline",
+            Tab::Search => "Search",
+            Tab::Scm => "Source Control",
+            Tab::Debug => "Run and Debug",
+            Tab::Problems => "Problems",
+            Tab::Pane(_) => "",
+        }
+    }
+    /// A one-letter label for a narrow part.
+    pub fn short(self) -> Option<&'static str> {
+        Some(match self {
+            Tab::Explorer => "E",
+            Tab::Outline => "O",
+            Tab::Search => "S",
+            Tab::Scm => "G",
+            Tab::Debug => "D",
+            Tab::Problems => "P",
+            Tab::Pane(_) => return None,
+        })
+    }
+    /// The automation id of a built-in view.
+    pub fn key(self) -> String {
+        match self {
+            Tab::Pane(id) => format!("pane{id}"),
+            t => t.name().to_lowercase().replace(' ', "_"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Part {
+    pub visible: bool,
+    /// Width (side bars) or height (the panel) in cells.
+    pub size: i32,
+    pub tabs: Vec<Tab>,
+    pub active: usize,
+}
+
+impl Part {
+    pub fn current(&self) -> Option<Tab> {
+        self.tabs.get(self.active).copied()
+    }
+    pub fn show(&mut self, t: Tab) {
+        if let Some(i) = self.tabs.iter().position(|x| *x == t) {
+            self.active = i;
+            self.visible = true;
+        }
+    }
+}
+
+/// Where everything goes this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Layout {
+    pub left: Option<Rect>,
+    pub bottom: Option<Rect>,
+    pub right: Option<Rect>,
+    /// The editors' area (the windows), and the tab row above it.
+    pub editors: Rect,
+    pub editor_tabs: Option<Rect>,
+}
+
+impl Layout {
+    pub fn part(&self, side: Side) -> Option<Rect> {
+        match side {
+            Side::Left => self.left,
+            Side::Bottom => self.bottom,
+            Side::Right => self.right,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Drag {
+    side: Side,
+    start: Point,
+    size: i32,
+}
+
+#[derive(Clone, Debug)]
+pub struct Dock {
+    pub left: Part,
+    pub bottom: Part,
+    pub right: Part,
+    /// A row of tabs for the open editors above them.
+    pub editor_tabs: bool,
+    drag: Option<Drag>,
+}
+
+impl Default for Dock {
+    fn default() -> Self {
+        Dock {
+            left: Part { visible: true, size: 30, tabs: vec![Tab::Explorer, Tab::Outline, Tab::Search, Tab::Scm, Tab::Debug], active: 0 },
+            bottom: Part { visible: false, size: 12, tabs: vec![Tab::Problems], active: 0 },
+            right: Part { visible: false, size: 46, tabs: Vec::new(), active: 0 },
+            editor_tabs: true,
+            drag: None,
+        }
+    }
+}
+
+impl Dock {
+    pub fn part(&self, s: Side) -> &Part {
+        match s {
+            Side::Left => &self.left,
+            Side::Bottom => &self.bottom,
+            Side::Right => &self.right,
+        }
+    }
+    pub fn part_mut(&mut self, s: Side) -> &mut Part {
+        match s {
+            Side::Left => &mut self.left,
+            Side::Bottom => &mut self.bottom,
+            Side::Right => &mut self.right,
+        }
+    }
+
+    /// Which part has this tab.
+    pub fn side_of(&self, t: Tab) -> Option<Side> {
+        [Side::Left, Side::Bottom, Side::Right].into_iter().find(|s| self.part(*s).tabs.contains(&t))
+    }
+
+    /// Show a tab (its part too).
+    pub fn show(&mut self, t: Tab) {
+        if let Some(s) = self.side_of(t) {
+            self.part_mut(s).show(t);
+        }
+    }
+
+    pub fn add(&mut self, s: Side, t: Tab) {
+        let p = self.part_mut(s);
+        if !p.tabs.contains(&t) {
+            p.tabs.push(t);
+        }
+        p.show(t);
+    }
+
+    pub fn remove(&mut self, t: Tab) {
+        for s in [Side::Left, Side::Bottom, Side::Right] {
+            let p = self.part_mut(s);
+            if let Some(i) = p.tabs.iter().position(|x| *x == t) {
+                p.tabs.remove(i);
+                if p.active >= i && p.active > 0 {
+                    p.active -= 1;
+                }
+                if p.tabs.is_empty() {
+                    p.visible = false;
+                }
+            }
+        }
+    }
+
+    /// Lay the parts out in `area` (between the menu bar and status line).
+    /// Each keeps at least a little room for the editors.
+    pub fn layout(&self, area: Rect) -> Layout {
+        let shown = |p: &Part| p.visible && !p.tabs.is_empty();
+        let min_ed_w = 24.min(area.w);
+        let mut lw = if shown(&self.left) { self.left.size.clamp(12, (area.w - min_ed_w).max(12)) } else { 0 };
+        let mut rw = if shown(&self.right) { self.right.size.clamp(16, (area.w - min_ed_w - lw).max(16)) } else { 0 };
+        if lw + rw > area.w - min_ed_w {
+            // (Too narrow for both at their sizes: share what there is.)
+            let room = (area.w - min_ed_w).max(0);
+            if lw > 0 && rw > 0 {
+                lw = room / 2;
+                rw = room - lw;
+            } else {
+                lw = lw.min(room);
+                rw = rw.min(room);
+            }
+        }
+        let left = (lw > 0).then(|| Rect::new(area.x, area.y, lw, area.h));
+        let right = (rw > 0).then(|| Rect::new(area.right() - rw, area.y, rw, area.h));
+        let mid = Rect::new(area.x + lw, area.y, (area.w - lw - rw).max(0), area.h);
+        let bh = if shown(&self.bottom) { self.bottom.size.clamp(4, (mid.h - 6).max(4)) } else { 0 };
+        let bottom = (bh > 0 && mid.h > bh).then(|| Rect::new(mid.x, mid.bottom() - bh, mid.w, bh));
+        let ed = Rect::new(mid.x, mid.y, mid.w, mid.h - bottom.map_or(0, |b| b.h));
+        let (editor_tabs, editors) = if self.editor_tabs && ed.h > 4 {
+            (Some(Rect::new(ed.x, ed.y, ed.w, 1)), Rect::new(ed.x, ed.y + 1, ed.w, ed.h - 1))
+        } else {
+            (None, ed)
+        };
+        Layout { left, bottom, right, editors, editor_tabs }
+    }
+
+    /// Where a part's view draws: inside its frame.
+    pub fn content(r: Rect) -> Rect {
+        r.inset(1)
+    }
+
+    /// The tabs in a part's top edge: their places and labels. When the
+    /// names don't all fit, the current tab keeps its name and the others
+    /// shrink to a letter (E O S G D, as an activity bar's icons).
+    pub fn tab_rects(&self, side: Side, r: Rect, title: &dyn Fn(Tab) -> String) -> Vec<(Tab, Rect, String)> {
+        let part = self.part(side);
+        let room = r.w - 4;
+        let full: i32 = part.tabs.iter().map(|t| str_width(&title(*t)) as i32 + 3).sum::<i32>() - 1;
+        let label = |t: Tab| {
+            let name = title(t);
+            if full <= room || part.current() == Some(t) {
+                name
+            } else {
+                t.short().map(str::to_string).unwrap_or_else(|| name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default())
+            }
+        };
+        let mut x = r.x + 2;
+        let mut out = Vec::new();
+        for t in &part.tabs {
+            let l = label(*t);
+            let w = str_width(&l) as i32 + 2;
+            if x + w > r.right() - 2 {
+                break;
+            }
+            out.push((*t, Rect::new(x, r.y, w, 1), l));
+            x += w + 1;
+        }
+        out
+    }
+
+    /// The edge of a part that drags to resize it (facing the editors).
+    fn sash(side: Side, r: Rect, p: Point) -> bool {
+        match side {
+            Side::Left => p.x == r.right() - 1 && p.y > r.y && p.y < r.bottom(),
+            Side::Right => p.x == r.x && p.y > r.y && p.y < r.bottom(),
+            Side::Bottom => p.y == r.y && (p.x == r.x || p.x >= r.right() - 2),
+        }
+    }
+
+    /// A press: start resizing when it's on a part's inner edge.
+    pub fn begin_drag(&mut self, l: &Layout, p: Point) -> bool {
+        for side in [Side::Left, Side::Bottom, Side::Right] {
+            if let Some(r) = l.part(side) {
+                if Self::sash(side, r, p) {
+                    self.drag = Some(Drag { side, start: p, size: self.part(side).size });
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    pub fn drag_to(&mut self, p: Point) {
+        let Some(d) = self.drag else { return };
+        let size = match d.side {
+            Side::Left => d.size + (p.x - d.start.x),
+            Side::Right => d.size - (p.x - d.start.x),
+            Side::Bottom => d.size - (p.y - d.start.y),
+        };
+        self.part_mut(d.side).size = size.max(4);
+    }
+
+    pub fn end_drag(&mut self) {
+        self.drag = None;
+    }
+
+    /// The part's frame and its tabs (the current one lit).
+    pub fn draw_frame(&self, c: &mut Canvas, theme: &Theme, side: Side, r: Rect, focused: bool, title: &dyn Fn(Tab) -> String) {
+        let s = &theme.scheme;
+        let st = &theme.style;
+        let (fc, style) = if focused { (st.active_frame, s.frame_active) } else { (st.inactive_frame, s.frame) };
+        c.fill(r, " ", s.editor);
+        draw_frame(c, r, fc, style);
+        if st.title_bar {
+            // VB-DOS: a filled title bar row carries the tabs.
+            let bar = if focused { s.title_active } else { s.title_inactive };
+            c.fill(Rect::new(r.x, r.y, r.w, 1), " ", bar);
+        }
+        let part = self.part(side);
+        for (t, tr, label) in self.tab_rects(side, r, title) {
+            let on = part.current() == Some(t);
+            let stl = if on { s.frame_icons } else if st.title_bar { if focused { s.title_active } else { s.title_inactive } } else { style };
+            c.print(tr.x, tr.y, &format!(" {label} "), stl);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parts_share_the_room_and_leave_some_for_the_editors() {
+        let mut d = Dock::default();
+        d.right.tabs.push(Tab::Pane(7));
+        d.right.visible = true;
+        d.bottom.visible = true;
+        let area = Rect::new(0, 1, 120, 40);
+        let l = d.layout(area);
+        let (left, right, bottom) = (l.left.unwrap(), l.right.unwrap(), l.bottom.unwrap());
+        assert_eq!((left.x, left.w, right.right(), right.w), (0, 30, 120, 46));
+        assert_eq!((bottom.x, bottom.w, bottom.bottom()), (30, 120 - 30 - 46, 41));
+        assert_eq!(l.editor_tabs.unwrap().y, 1);
+        assert_eq!((l.editors.y, l.editors.bottom()), (2, bottom.y));
+        // A narrow screen: the side bars give way.
+        let l = d.layout(Rect::new(0, 1, 60, 20));
+        assert!(l.editors.w >= 24, "{l:?}");
+    }
+
+    #[test]
+    fn dragging_an_edge_resizes_its_part() {
+        let mut d = Dock::default();
+        let area = Rect::new(0, 1, 120, 40);
+        let l = d.layout(area);
+        let edge = Point::new(l.left.unwrap().right() - 1, 10);
+        assert!(d.begin_drag(&l, edge));
+        d.drag_to(Point::new(edge.x + 8, 12));
+        d.end_drag();
+        assert_eq!(d.left.size, 38);
+    }
+}

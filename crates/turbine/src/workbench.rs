@@ -2,7 +2,16 @@
 //! bar, and the automation endpoint agents drive it through.
 
 use crate::agent::{Driver, Output, Step};
+use crate::dock::Side;
+use crate::views::{Explorer, LineInput, Outline, Scm, Search};
 use crate::vim::{self, Keymap};
+use turbine_text::unicode::str_width;
+use turbine_ui::list::ListView;
+use turbine_ui::theme::vga;
+use turbine_ui::Canvas;
+
+mod shell;
+use shell::{Focus, Shell};
 use turbine_term::{MouseOutcome, Spawn, TerminalView};
 use turbine_services::ai::{self, Ai, AiEvent, ChatMessage};
 use turbine_services::dap::{self, DapClient, DapEvent, Frame, Launch, Variable};
@@ -152,6 +161,8 @@ struct EdWin {
     was_dirty: bool,
     /// "output" or "debug" for those windows.
     special: Option<&'static str>,
+    /// Docked in a part (the panel, a side bar) instead of on the desktop.
+    dock: Option<Side>,
 }
 
 impl EdWin {
@@ -233,6 +244,8 @@ pub struct Workbench {
     socket_path: Option<PathBuf>,
     /// Where the chosen colours and style are kept.
     look_path: Option<PathBuf>,
+    /// The docked parts and their views (Explorer, Search, ...).
+    shell: Shell,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -314,7 +327,7 @@ fn menus() -> Vec<Menu> {
                 soon("~F~ind...", "Ctrl+F", "search.find"),
                 soon("~R~eplace...", "Ctrl+H", "search.replace"),
                 soon("~S~earch Again", "", "search.again"),
-                soon("Find in F~i~les...", "Ctrl+Shift+F", "search.files"),
+                it("Find in F~i~les...", "Ctrl+Shift+F", "search.files"),
                 sep(),
                 it("~G~o to Line Number...", "Ctrl+G", "search.goto"),
                 soon("Find ~P~rocedure...", "Ctrl+Shift+O", "go.symbol"),
@@ -328,14 +341,22 @@ fn menus() -> Vec<Menu> {
             vec![
                 soon("~C~ommand Palette...", "Ctrl+Shift+P", "view.palette"),
                 sep(),
-                soon("~E~xplorer", "Ctrl+Shift+E", "view.files"),
-                soon("~S~ource Control", "Ctrl+Shift+G", "view.scm"),
-                soon("~R~un and Debug", "Ctrl+Shift+D", "view.debug"),
+                it("~E~xplorer", "Ctrl+Shift+E", "view.files"),
+                it("O~u~tline", "Ctrl+Shift+O", "view.outline"),
+                it("Searc~h~", "Ctrl+Shift+F", "view.search"),
+                it("~S~ource Control", "Ctrl+Shift+G", "view.scm"),
+                it("~R~un and Debug", "Ctrl+Shift+D", "view.debug"),
                 soon("E~x~tensions", "Ctrl+Shift+X", "view.extensions"),
                 sep(),
-                soon("~P~roblems", "Ctrl+Shift+M", "view.problems"),
-                soon("~O~utput", "", "view.output"),
+                it("~P~roblems", "Ctrl+Shift+M", "view.problems"),
+                it("~O~utput", "Ctrl+Shift+U", "view.output"),
                 it("~T~erminal", "Ctrl+`", "view.terminal"),
+                it("AI ~C~hat", "Ctrl+L", "ai.chat"),
+                sep(),
+                it("Primary Side ~B~ar", "Ctrl+B", "view.sidebar"),
+                it("Pa~n~el", "Ctrl+J", "view.panel"),
+                it("Secondar~y~ Side Bar", "Ctrl+Alt+B", "view.secondary"),
+                it("Editor Ta~b~s", "", "view.editor_tabs"),
                 sep(),
                 it("~L~ine Numbers", "", "view.line_numbers"),
                 it("Right to Le~f~t", "", "view.rtl"),
@@ -512,9 +533,13 @@ impl Workbench {
             pending_task: None,
             socket_path: None,
             look_path: None,
+            shell: Shell::new(shell::project_of(files)),
         };
         for f in files {
-            wb.open_path(f);
+            // (A folder is the project: the Explorer shows it.)
+            if !f.is_dir() {
+                wb.open_path(f);
+            }
         }
         if wb.windows.is_empty() {
             wb.new_window(Document::new());
@@ -642,8 +667,9 @@ impl Workbench {
         &mut self.driver
     }
 
+    /// Where the editor windows go (between the docked parts).
     fn desktop(&self) -> Rect {
-        Rect::new(0, 1, self.size.0, (self.size.1 - 2).max(1))
+        self.layout().editors
     }
 
     fn screen(&self) -> Rect {
@@ -659,8 +685,14 @@ impl Workbench {
     }
 
     fn renumber(&mut self) {
-        for (i, w) in self.windows.iter_mut().enumerate() {
-            w.win.number = Some(i as u32 + 1);
+        let mut n = 0;
+        for w in self.windows.iter_mut() {
+            if w.dock.is_some() {
+                w.win.number = None;
+            } else {
+                n += 1;
+                w.win.number = Some(n);
+            }
         }
     }
 
@@ -671,13 +703,13 @@ impl Workbench {
         let rect = Rect::new(d.x + off, d.y + off / 2, (d.w - off).max(20), (d.h - off / 2).max(6));
         let title = doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| doc.title());
         let mut win = Window::new(self.next_id, &title, rect);
-        if self.windows.is_empty() {
-            win.zoomed = false;
-        }
+        // (Editors fill their area, one per tab, as in Cursor; Window >
+        // Tile and Cascade still lay them out DOS style.)
+        win.toggle_zoom(d);
         self.next_id += 1;
         let mut ed = EditorView::new(doc);
         ed.line_numbers = self.theme.style.line_numbers;
-        let mut ew = EdWin { win, ed, vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None };
+        let mut ew = EdWin { win, ed, vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: None };
         if self.keymap == Keymap::Vim {
             ew.vim = Some(vim::attach(&mut ew.ed));
         }
@@ -722,6 +754,7 @@ impl Workbench {
             lsp_sent: None,
             was_dirty: false,
             special: Some(kind),
+            dock: Some(Side::Bottom),
         };
         w.win.number = None;
         // Below the active window, so the code stays in front.
@@ -942,6 +975,7 @@ impl Workbench {
                     lsp_sent: None,
                     was_dirty: false,
                     special: Some("help"),
+                    dock: None,
                 });
                 self.renumber();
                 self.windows.len() - 1
@@ -1077,6 +1111,7 @@ impl Workbench {
                     lsp_sent: None,
                     was_dirty: false,
                     special: Some("chat"),
+                    dock: Some(Side::Right),
                 });
                 // (Behind the active window: the log never takes focus.)
                 let n = self.windows.len();
@@ -1352,29 +1387,14 @@ impl Workbench {
 
     /// Output and Debug along the bottom, code windows above them.
     fn debug_layout(&mut self) {
-        self.special_window("output");
+        // The debugger's output and state in the panel, the Run and Debug
+        // view in the side bar.
+        let o = self.special_window("output");
+        let id = self.windows[o].win.id;
         self.special_window("debug");
-        let d = self.desktop();
-        let panel_h = (d.h / 3).max(6).min(d.h - 6);
-        let top = d.bottom() - panel_h;
-        for w in &mut self.windows {
-            match w.special {
-                Some("output") => {
-                    w.win.zoomed = false;
-                    w.win.rect = Rect::new(d.x, top, d.w / 2, panel_h);
-                }
-                Some(_) => {
-                    w.win.zoomed = false;
-                    w.win.rect = Rect::new(d.x + d.w / 2, top, d.w - d.w / 2, panel_h);
-                }
-                None if w.win.rect.bottom() > top && w.term.is_none() => {
-                    w.win.zoomed = false;
-                    w.win.rect.y = w.win.rect.y.min(top - 6).max(d.y);
-                    w.win.rect.h = (top - w.win.rect.y).max(6);
-                }
-                None => {}
-            }
-        }
+        self.layout_dock();
+        self.shell.dock.show(crate::dock::Tab::Pane(id));
+        self.shell.dock.show(crate::dock::Tab::Debug);
     }
 
     fn clear_exec_line(&mut self) {
@@ -1783,7 +1803,7 @@ impl Workbench {
         if let Some(e) = view.error() {
             self.say(format!("Terminal: {e}"));
         }
-        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None });
+        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new(), lang: None, lang_for: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: Some(Side::Bottom) });
         self.renumber();
     }
 
@@ -1823,6 +1843,10 @@ impl Workbench {
                     "view.line_numbers" => it.checked = Some(ln),
                     "view.rtl" => it.checked = Some(rtl),
                     "ai.tab" => it.checked = Some(tab),
+                    "view.sidebar" => it.checked = Some(self.shell.dock.left.visible),
+                    "view.panel" => it.checked = Some(self.shell.dock.bottom.visible),
+                    "view.secondary" => it.checked = Some(self.shell.dock.right.visible),
+                    "view.editor_tabs" => it.checked = Some(self.shell.dock.editor_tabs),
                     _ => {}
                 }
             }
@@ -1832,10 +1856,20 @@ impl Workbench {
     // ----- commands ---------------------------------------------------------
 
     pub fn run_command(&mut self, cmd: &str) {
+        if self.shell_command(cmd) {
+            self.sync_menu_checks();
+            return;
+        }
         let desk = self.desktop();
         match cmd {
             "file.new" => self.new_window(Document::new()),
-            "view.terminal" | "terminal.new" => self.new_terminal(Vec::new()),
+            "terminal.new" => {
+                self.new_terminal(Vec::new());
+                self.layout_dock();
+                if let Some(id) = self.windows.last().map(|w| w.win.id) {
+                    self.shell.dock.show(crate::dock::Tab::Pane(id));
+                }
+            }
             "file.open" => self.open_dialog(std::env::current_dir().unwrap_or_default()),
             "file.save" => self.save(false),
             "file.save_as" => self.save(true),
@@ -1962,9 +1996,13 @@ impl Workbench {
                 }
             }
             "window.prev" => {
-                if self.windows.len() > 1 {
-                    let w = self.windows.pop().unwrap();
+                if let Some(i) = self.editor_index() {
+                    let w = self.windows.remove(i);
                     self.windows.insert(0, w);
+                    if let Some(j) = self.editor_index() {
+                        let w = self.windows.remove(j);
+                        self.windows.push(w);
+                    }
                     self.renumber();
                 }
             }
@@ -2028,9 +2066,13 @@ impl Workbench {
                 self.dialog = Some(d);
             }
             "window.next" => {
-                if self.windows.len() > 1 {
-                    let w = self.windows.remove(0);
-                    self.windows.push(w);
+                // (Editors only: docked windows have their tabs.)
+                if let Some(i) = self.windows.iter().position(|w| w.dock.is_none()) {
+                    if self.windows.iter().filter(|w| w.dock.is_none()).count() > 1 || self.windows.last().is_some_and(|w| w.dock.is_some()) {
+                        let w = self.windows.remove(i);
+                        self.windows.push(w);
+                        self.renumber();
+                    }
                 }
             }
             "window.zoom" => {
@@ -2557,6 +2599,10 @@ impl Workbench {
             self.dialog_result(r);
             return;
         }
+        // Layout keys, and keys for a side bar or panel view.
+        if !self.menubar.is_open() && self.shell_key(&k) {
+            return;
+        }
         // A terminal gets every key except the few Turbine keeps: F10 (menus),
         // Alt+F3 (close) and Alt+0..9 (windows). Shells need Alt+letters.
         let reserved = k.is(Key::F(10), Mods::NONE)
@@ -2939,6 +2985,9 @@ impl Workbench {
             }
             return;
         }
+        if self.shell_mouse(&m) {
+            return;
+        }
         if let Some(i) = self.dragging {
             match m.kind {
                 MouseKind::Drag(Button::Left) => self.windows[i].win.drag_to(m.pos, desk),
@@ -3004,7 +3053,14 @@ impl Workbench {
                 let double = self.last_click.is_some_and(|(p, t)| p == m.pos && t.elapsed() < Duration::from_millis(400));
                 self.last_click = Some((m.pos, Instant::now()));
                 let w = &mut self.windows[i];
-                match w.win.hit(m.pos) {
+                // (A docked window's frame belongs to its part: no moving,
+                // resizing, closing or zooming it from there.)
+                let hit = match w.win.hit(m.pos) {
+                    h @ (Hit::Inside | Hit::VScroll) => h,
+                    _ if w.dock.is_some() => Hit::None,
+                    h => h,
+                };
+                match hit {
                     Hit::Close => self.run_command("window.close"),
                     Hit::Zoom => w.win.toggle_zoom(desk),
                     Hit::Title if double => w.win.toggle_zoom(desk),
@@ -3124,6 +3180,7 @@ impl Workbench {
             wn = wn.child(ed);
             root = root.child(wn);
         }
+        root = self.shell_nodes(root);
         if let Some(d) = &self.dialog {
             root = root.child(d.automation_node());
         }
@@ -3378,8 +3435,10 @@ impl App for Workbench {
     }
 
     fn tick(&mut self, now: Instant) -> Option<Instant> {
-        // (Agents find controls by where they are: lay dialogs out now, not
-        // only when the screen is drawn.)
+        // (Agents find controls by where they are: lay dialogs and parts out
+        // now, not only when the screen is drawn.)
+        self.layout_dock();
+        self.update_views();
         self.layout_dialogs();
         let mut any_term = false;
         for w in &mut self.windows {
@@ -3469,7 +3528,10 @@ impl App for Workbench {
         let n = self.windows.len();
         let has_modal = self.dialog.is_some() || self.menubar.is_open();
         for (i, w) in self.windows.iter_mut().enumerate() {
-            let active = i + 1 == n;
+            if w.dock.is_some() {
+                continue;
+            }
+            let active = i + 1 == n && self.shell.focus == Focus::Editors;
             let mut wc = c.sub(desk);
             if theme.style.shadows {
                 wc.shadow(w.win.rect, theme.scheme.shadow);
@@ -3496,6 +3558,8 @@ impl App for Workbench {
                 }
             }
         }
+        self.layout_dock();
+        self.draw_shell(&mut c, &theme);
         // Status bar.
         let info = self
             .windows
@@ -3933,6 +3997,102 @@ mod tests {
         }
     }
 
+    /// A project folder with a few files, and a workbench on it.
+    fn project(tag: &str) -> (PathBuf, Workbench) {
+        let dir = std::env::temp_dir().join(format!("turbine-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {\n    let needle = 1;\n}\n").unwrap();
+        std::fs::write(dir.join("notes.md"), "# Notes\n").unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut wb = Workbench::new(&[dir.clone()]);
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(120, 36));
+        (dir, wb)
+    }
+
+    fn title(wb: &Workbench) -> String {
+        wb.windows.iter().rev().find(|w| w.dock.is_none()).map(|w| w.ed.doc.title()).unwrap_or_default()
+    }
+
+    #[test]
+    fn explorer_opens_files_from_the_keyboard_and_the_agent() {
+        let (dir, mut wb) = project("explorer");
+        wait_until(&mut wb, "the explorer listing", |wb| wb.shell.explorer.list.rows.len() >= 3);
+        keys(&mut wb, &["Ctrl+Shift+E"]);
+        assert_eq!(wb.shell.focus, Focus::View(crate::dock::Tab::Explorer));
+        // src/ opens, then main.rs (type-ahead, Enter).
+        keys(&mut wb, &["s", "Enter"]);
+        wait_until(&mut wb, "src listed", |wb| wb.shell.explorer.list.rows.iter().any(|r| r.text == "main.rs"));
+        keys(&mut wb, &["Down", "Enter"]);
+        assert_eq!(title(&wb), "main.rs");
+        assert_eq!(wb.shell.focus, Focus::Editors);
+        // The agent clicks notes.md in the tree (a double-click opens).
+        let r = run(&mut wb, json!({"cmd": "click", "target": "listitem:notes.md"}));
+        assert_eq!(r["ok"], true, "{r}");
+        run(&mut wb, json!({"cmd": "click", "target": "listitem:notes.md"}));
+        assert_eq!(title(&wb), "notes.md");
+        // Two editors: two tabs; clicking the first brings it back.
+        run(&mut wb, json!({"cmd": "click", "target": "tab:main.rs"}));
+        assert_eq!(title(&wb), "main.rs");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn panel_terminal_and_chat_dock_and_toggle() {
+        let (dir, mut wb) = project("panel");
+        assert!(!wb.shell.dock.bottom.visible);
+        keys(&mut wb, &["Ctrl+`"]);
+        assert!(wb.shell.dock.bottom.visible);
+        let t = wb.windows.last().unwrap();
+        assert!(t.term.is_some() && t.dock == Some(Side::Bottom), "a docked terminal in front");
+        let panel = wb.layout().bottom.unwrap();
+        assert!(panel.contains_rect(wb.windows.last().unwrap().win.rect), "the terminal fills the panel");
+        // Ctrl+J hides the panel; the editor gets the keys back.
+        keys(&mut wb, &["Ctrl+J"]);
+        assert!(!wb.shell.dock.bottom.visible);
+        // Ctrl+L: the chat at the right, typing into its field.
+        keys(&mut wb, &["Ctrl+L"]);
+        assert!(wb.shell.dock.right.visible);
+        assert_eq!(wb.shell.focus, Focus::Chat);
+        run(&mut wb, json!({"cmd": "type", "text": "hi"}));
+        assert_eq!(wb.shell.chat_input.text, "hi");
+        let tree = wb.tree();
+        assert_eq!(tree.find_target("chat.input").and_then(|n| n.value.clone()).as_deref(), Some("hi"));
+        keys(&mut wb, &["Esc"]);
+        assert_eq!(wb.shell.focus, Focus::Editors);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn problems_list_diagnostics_and_jump_to_them() {
+        let (dir, mut wb) = project("problems");
+        wb.open_path(&dir.join("src/main.rs"));
+        wb.windows.last_mut().unwrap().ed.diagnostics =
+            vec![DiagMark { line: 1, start: 8, end: 14, severity: 1, message: "unused variable".into() }];
+        keys(&mut wb, &["Ctrl+Shift+M"]);
+        assert!(wb.shell.dock.bottom.visible);
+        assert_eq!(wb.shell.problem_count, (1, 0));
+        let rows: Vec<String> = wb.shell.problems.rows.iter().map(|r| r.text.clone()).collect();
+        assert_eq!(rows, ["main.rs", "unused variable"]);
+        keys(&mut wb, &["Down", "Enter"]);
+        assert_eq!(wb.shell.focus, Focus::Editors);
+        assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col(), (1, 8));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn search_finds_and_opens_a_line() {
+        let (dir, mut wb) = project("search");
+        keys(&mut wb, &["Ctrl+Shift+F"]);
+        run(&mut wb, json!({"cmd": "type", "text": "needle"}));
+        keys(&mut wb, &["Enter"]);
+        wait_until(&mut wb, "search results", |wb| !wb.shell.search.busy() && wb.shell.search.hits.len() == 2);
+        keys(&mut wb, &["Down", "Down", "Enter"]);
+        assert_eq!(title(&wb), "main.rs");
+        assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn language_server_diagnostics_completion_definition_hover() {
         let dir = std::env::temp_dir().join(format!("turbine-lsp-{}", std::process::id()));
@@ -4212,6 +4372,9 @@ mod tests {
     #[test]
     fn qbasic_style_looks_like_qbasic() {
         let mut wb = bench();
+        // (The window alone, as the original showed it: no side bar or tabs.)
+        wb.run_command("view.sidebar");
+        wb.run_command("view.editor_tabs");
         wb.dispatch(Event::Resize(80, 25));
         run(&mut wb, json!({"cmd": "menu", "path": "Options/Control Style..."}));
         run(&mut wb, json!({"cmd": "click", "target": "listitem:QBasic / MS-DOS Edit"}));
@@ -4234,6 +4397,9 @@ mod tests {
     #[test]
     fn vbdos_style_has_title_bars() {
         let mut wb = bench();
+        // (The window alone, as the original showed it: no side bar or tabs.)
+        wb.run_command("view.sidebar");
+        wb.run_command("view.editor_tabs");
         wb.dispatch(Event::Resize(80, 25));
         wb.apply_style(turbine_ui::theme::ControlStyle::vbdos());
         assert_eq!(wb.theme.scheme.name, "VB-DOS");
