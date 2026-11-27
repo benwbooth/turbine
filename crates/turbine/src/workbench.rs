@@ -4898,7 +4898,7 @@ mod tests {
     #[test]
     fn explorer_opens_files_from_the_keyboard_and_the_agent() {
         let (dir, mut wb) = project("explorer");
-        wait_until(&mut wb, "the explorer listing", |wb| wb.shell.explorer.list.rows.len() >= 3);
+        wait_until(&mut wb, "the explorer listing", |wb| wb.shell.explorer.list.rows.len() >= 4);
         keys(&mut wb, &["Ctrl+Shift+E"]);
         assert_eq!(wb.shell.focus, Focus::View(crate::dock::Tab::Explorer));
         // src/ opens, then main.rs (type-ahead, Enter).
@@ -5073,7 +5073,7 @@ mod tests {
         let trash = dir.join(".test-trash");
         // SAFETY: tests that read TURBINE_TRASH all set it to their own folder first.
         unsafe { std::env::set_var("TURBINE_TRASH", &trash) };
-        wait_until(&mut wb, "the listing", |wb| wb.shell.explorer.list.rows.len() >= 3);
+        wait_until(&mut wb, "the listing", |wb| wb.shell.explorer.list.rows.len() >= 4);
         keys(&mut wb, &["Ctrl+Shift+E"]);
         // The header's New File button (the project row), a name, OK: it
         // exists and opens.

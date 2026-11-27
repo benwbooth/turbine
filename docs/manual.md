@@ -201,7 +201,15 @@ A tasks file looks like VS Code's:
 
 ## Tools
 
-Edit > Show Clipboard shows what's on it. Edit > Calculator works out
+The Tools menu (also the ≡ menu at the left of the menu bar) holds the
+programs that come with Turbine.
+
+Tools > File Manager (**Ctrl+Alt+F**) is XTree Gold's screen: the folder
+tree on the left, the files of the highlighted folder beside it, and the
+disk's numbers at the right. Its keys are on the bottom line, as XTree
+showed them.
+
+Tools > Show Clipboard shows what's on it. Tools > Calculator works out
 an expression (`+ - * / % ^`, hex `0x1F` and binary `0b101`, `sqrt`,
 `sin`, `ln`, `pi` ...) and shows whole numbers in hex and binary too.
 File > New Window starts another Turbine.

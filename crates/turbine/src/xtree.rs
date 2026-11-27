@@ -1,4 +1,4 @@
-//! A file manager as XTree Gold shows one (Tools > File Manager): the path
+//! A file manager as XTree Gold shows one (Tools > File Manager, Ctrl+Alt+F): the path
 //! and the time across the top, the directory tree with the files of the
 //! directory under it, the FILE / DISK / DIRECTORY statistics at the right,
 //! and the commands of the window in use across the bottom, a letter each

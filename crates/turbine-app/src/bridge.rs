@@ -315,6 +315,15 @@ fn app_menus_json() -> String {
             .iter()
             .enumerate()
             .map(|(mi, m)| {
+                // The ≡ system menu is a hamburger beside the desktop bar's
+                // own Turbine menu: there it's Tools (About is in Help).
+                let tools;
+                let m = if m.title == "≡" {
+                    tools = turbine_ui::menu::Menu::new("~T~ools", m.items.iter().filter(|it| !it.is_separator() && !matches!(it.command.as_str(), "help.about" | "app.repaint")).cloned().collect());
+                    &tools
+                } else {
+                    m
+                };
                 serde_json::json!({
                     // Qt marks the mnemonic with &, Turbine with ~...~.
                     "title": qt_mnemonic(&m.title),
