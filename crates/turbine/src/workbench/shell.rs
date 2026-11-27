@@ -64,6 +64,8 @@ pub(super) struct Shell {
     /// The tabs that didn't fit: "▼ n" (its place, how many), and its list.
     pub tab_more: Option<(Rect, usize)>,
     pub tab_menu: Option<(turbine_ui::popup::ListPopup, Vec<u32>, Point)>,
+    /// The panel's height before Maximize (None: not maximized).
+    pub panel_restore: Option<i32>,
     /// The cursor: "Block", "Underline" or "Bar", and whether it blinks.
     pub cursor_style: String,
     pub cursor_blink: bool,
@@ -113,6 +115,7 @@ impl Shell {
             tab_click: None,
             tab_more: None,
             tab_menu: None,
+            panel_restore: None,
             cursor_style: "Block".into(),
             cursor_blink: true,
             mirrored: HashMap::new(),
@@ -183,6 +186,79 @@ impl Workbench {
 
     /// Match the parts' tabs to the docked windows, put those windows in
     /// their parts, and keep the editors inside their area.
+    /// The panel's buttons at the right of its top edge, as VS Code has
+    /// them: New Terminal (on a terminal), Maximize (or Restore), Close.
+    pub(super) fn panel_buttons(&self) -> Vec<(Rect, &'static str, &'static str, String)> {
+        let Some(r) = self.layout().bottom else { return Vec::new() };
+        let icons = self.theme.style.icons;
+        let on_term = matches!(self.shell.dock.bottom.current(), Some(Tab::Pane(id)) if self.windows.iter().any(|w| w.win.id == id && w.term.is_some()));
+        let max = self.shell.panel_restore.is_some();
+        let mut items: Vec<(&'static str, &'static str, &str)> = Vec::new();
+        if on_term {
+            items.push(("new_terminal", "New Terminal", if icons { "\u{ea60}" } else { "+" }));
+        }
+        items.push(if max { ("maximize", "Restore Panel Size", if icons { "\u{eab4}" } else { "↓" }) } else { ("maximize", "Maximize Panel Size", if icons { "\u{eab7}" } else { "↑" }) });
+        items.push(("close", "Close Panel", if icons { "\u{ea76}" } else { "■" }));
+        // (Right to left from the corner, a space apart, as [■] sits in a
+        // DOS window's frame.)
+        let mut x = r.right() - 2;
+        let mut out = Vec::new();
+        for (action, name, glyph) in items.into_iter().rev() {
+            let w = str_width(glyph) as i32 + 2;
+            x -= w;
+            if x <= r.x + 2 {
+                break;
+            }
+            out.push((Rect::new(x, r.y, w, 1), action, name, format!("[{glyph}]")));
+        }
+        out
+    }
+
+    pub(super) fn panel_button(&mut self, action: &str) {
+        match action {
+            "new_terminal" => self.show_tab(Tab::Terminal),
+            "maximize" => match self.shell.panel_restore.take() {
+                Some(h) => self.shell.dock.bottom.size = h,
+                None => {
+                    self.shell.panel_restore = Some(self.shell.dock.bottom.size);
+                    self.shell.dock.bottom.size = 400;
+                }
+            },
+            _ => {
+                self.shell.dock.bottom.visible = false;
+                self.shell.focus = Focus::Editors;
+            }
+        }
+        self.layout_dock();
+    }
+
+    /// The panel's tabs in VS Code's order: Problems, Output, Debug
+    /// Console, Terminal (each its window once open, terminals after one
+    /// another), then whatever else is docked there.
+    fn panel_order(&mut self) {
+        let in_panel = |w: &&EdWin| w.dock == Some(Side::Bottom);
+        let pane_of = |kind: &str| self.windows.iter().filter(in_panel).find(|w| w.special == Some(if kind == "output" { "output" } else { "immediate" })).map(|w| Tab::Pane(w.win.id));
+        let output = pane_of("output").unwrap_or(Tab::Output);
+        let console = pane_of("immediate").unwrap_or(Tab::DebugConsole);
+        let mut terms: Vec<u32> = self.windows.iter().filter(in_panel).filter(|w| w.term.is_some()).map(|w| w.win.id).collect();
+        terms.sort();
+        let p = &mut self.shell.dock.bottom;
+        // (Only parts that hold the panel's tabs: one moved elsewhere stays.)
+        let mut want = vec![Tab::Problems, output, console];
+        if terms.is_empty() {
+            want.push(Tab::Terminal);
+        } else {
+            want.extend(terms.iter().map(|&id| Tab::Pane(id)));
+        }
+        let rest: Vec<Tab> = p.tabs.iter().copied().filter(|t| !want.contains(t) && !matches!(t, Tab::Output | Tab::DebugConsole | Tab::Terminal)).collect();
+        want.extend(rest);
+        if want != p.tabs {
+            let cur = p.current();
+            p.tabs = want;
+            p.active = cur.and_then(|c| p.tabs.iter().position(|x| *x == c)).unwrap_or(0);
+        }
+    }
+
     pub(super) fn layout_dock(&mut self) {
         // Tabs for new docked windows; none for closed ones.
         let ids: HashSet<u32> = self.windows.iter().map(|w| w.win.id).collect();
@@ -200,6 +276,7 @@ impl Workbench {
                 }
             }
         }
+        self.panel_order();
         if let Focus::View(t) = self.shell.focus {
             if self.shell.dock.side_of(t).is_none_or(|s| !self.shell.dock.part(s).visible) {
                 self.shell.focus = Focus::Editors;
@@ -417,7 +494,18 @@ impl Workbench {
     /// A tab's title (the counts on Problems, a docked window's title).
     fn tab_title(&self, t: Tab) -> String {
         let name = match t {
-            Tab::Pane(id) => self.windows.iter().find(|w| w.win.id == id).map(|w| w.win.title.clone()).unwrap_or_default(),
+            // (The panel's own windows go by their tab's name, as in VS Code;
+            // a second terminal is "Terminal 2".)
+            Tab::Pane(id) => match self.windows.iter().find(|w| w.win.id == id) {
+                Some(w) if w.dock == Some(Side::Bottom) && w.special == Some("output") => "Output".into(),
+                Some(w) if w.dock == Some(Side::Bottom) && w.special == Some("immediate") => "Debug Console".into(),
+                Some(w) if w.dock == Some(Side::Bottom) && w.term.is_some() => {
+                    let n = self.windows.iter().filter(|x| x.term.is_some() && x.dock == Some(Side::Bottom) && x.win.id <= id).count();
+                    if n <= 1 { "Terminal".into() } else { format!("Terminal {n}") }
+                }
+                Some(w) => w.win.title.clone(),
+                None => String::new(),
+            },
             Tab::Problems if self.shell.problem_count != (0, 0) => {
                 format!("Problems {}", self.shell.problem_count.0 + self.shell.problem_count.1)
             }
@@ -434,8 +522,12 @@ impl Workbench {
             Tab::Debug => "\u{eb91}",
             Tab::Extensions => "\u{eae6}",
             Tab::Problems => "\u{ea6c}",
+            Tab::Output => "\u{eb9d}",
+            Tab::DebugConsole => "\u{eb8e}",
+            Tab::Terminal => "\u{ea85}",
             Tab::Pane(id) => match self.windows.iter().find(|w| w.win.id == id) {
                 Some(w) if w.term.is_some() => "\u{ea85}",
+                Some(w) if w.special == Some("immediate") => "\u{eb8e}",
                 Some(w) if w.special == Some("chat") => "\u{eac7}",
                 Some(w) if w.special == Some("debug") => "\u{eaaf}",
                 _ => "\u{eb9d}",
@@ -773,6 +865,21 @@ impl Workbench {
 
     /// Show a tab and give it focus.
     pub(super) fn show_tab(&mut self, t: Tab) {
+        // The panel's own tabs open their windows (which take their place).
+        match t {
+            Tab::Output => return self.run_command("view.output"),
+            Tab::DebugConsole => return self.open_immediate(),
+            Tab::Terminal => {
+                self.new_terminal(Vec::new());
+                self.layout_dock();
+                if let Some(id) = self.windows.last().map(|w| w.win.id) {
+                    self.shell.dock.show(Tab::Pane(id));
+                    self.activate_pane(id);
+                }
+                return;
+            }
+            _ => {}
+        }
         self.shell.dock.show(t);
         match t {
             Tab::Pane(id) => self.activate_pane(id),
@@ -1273,7 +1380,7 @@ impl Workbench {
                 }
                 _ => {}
             },
-            Tab::Pane(_) => {}
+            Tab::Pane(_) | Tab::Output | Tab::DebugConsole | Tab::Terminal => {}
         }
     }
 
@@ -1346,7 +1453,15 @@ impl Workbench {
             }
         }
         let press = matches!(m.kind, MouseKind::Down(Button::Left));
-        if press && self.shell.dock.begin_drag(&l, m.pos) {
+        // (The panel's top edge drags it taller, but not on a tab or button.)
+        let on_panel_control = l.bottom.is_some_and(|r| m.pos.y == r.y && r.contains(m.pos)) && {
+            let r = l.bottom.unwrap();
+            let titles: Vec<(Tab, String)> = self.shell.dock.bottom.tabs.iter().map(|t| (*t, self.tab_title(*t))).collect();
+            let title = |t: Tab| titles.iter().find(|(x, _)| *x == t).map(|(_, s)| s.clone()).unwrap_or_default();
+            self.shell.dock.tab_rects(Side::Bottom, r, &title).iter().any(|(_, tr, _)| tr.contains(m.pos)) || self.panel_buttons().iter().any(|b| b.0.contains(m.pos))
+        };
+        if press && !on_panel_control && self.shell.dock.begin_drag(&l, m.pos) {
+            self.shell.panel_restore = None;
             return true;
         }
         // Breadcrumbs: a folder shows in the Explorer, the file or a symbol
@@ -1396,8 +1511,16 @@ impl Workbench {
             if !r.contains(m.pos) {
                 continue;
             }
-            // The top edge: tabs.
+            // The top edge: tabs (and the panel's buttons).
             if m.pos.y == r.y {
+                if side == Side::Bottom {
+                    if let Some(a) = self.panel_buttons().into_iter().find(|b| b.0.contains(m.pos)).map(|b| b.1) {
+                        if press {
+                            self.panel_button(a);
+                        }
+                        return true;
+                    }
+                }
                 if press {
                     let titles: Vec<(Tab, String)> = self.shell.dock.part(side).tabs.iter().map(|t| (*t, self.tab_title(*t))).collect();
                     let title = |t: Tab| titles.iter().find(|(x, _)| *x == t).map(|(_, s)| s.clone()).unwrap_or_default();
@@ -1458,7 +1581,7 @@ impl Workbench {
             Tab::Problems => &mut self.shell.problems,
             Tab::Debug => &mut self.shell.debug_view,
             Tab::Extensions => &mut self.shell.extensions.list,
-            Tab::Pane(_) => return None,
+            Tab::Pane(_) | Tab::Output | Tab::DebugConsole | Tab::Terminal => return None,
         })
     }
 
@@ -1605,6 +1728,12 @@ impl Workbench {
             let titles: Vec<(Tab, String)> = self.shell.dock.part(side).tabs.iter().map(|t| (*t, self.tab_title(*t))).collect();
             let title = |t: Tab| titles.iter().find(|(x, _)| *x == t).map(|(_, s)| s.clone()).unwrap_or_default();
             self.shell.dock.draw_frame(c, theme, side, r, focused, &title);
+            if side == Side::Bottom {
+                let fs = if focused && !theme.style.title_bar { Style { fg: s.frame_active.fg, ..s.panel_frame } } else { s.panel_frame };
+                for (br, _, _, label) in self.panel_buttons() {
+                    c.print(br.x, br.y, &label, fs);
+                }
+            }
             let inner = Dock::content(r);
             let view_focus = |t: Tab| focused && !modal && self.shell.focus == Focus::View(t);
             match self.shell.dock.part(side).current() {
@@ -1721,6 +1850,11 @@ impl Workbench {
             let title = |t: Tab| titles.iter().find(|(x, _)| *x == t).map(|(_, s)| s.clone()).unwrap_or_default();
             for (t, tr, _) in self.shell.dock.tab_rects(side, r, &title) {
                 pn = pn.child(Node::new(format!("tab.{}", t.key()), "tab", title(t), tr).focused(self.shell.dock.part(side).current() == Some(t)));
+            }
+            if side == Side::Bottom {
+                for (br, action, name, _) in self.panel_buttons() {
+                    pn = pn.child(Node::new(format!("panel.{action}"), "button", name, br));
+                }
             }
             let inner = Dock::content(r);
             match self.shell.dock.part(side).current() {

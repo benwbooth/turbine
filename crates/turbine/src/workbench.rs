@@ -5058,6 +5058,39 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_has_vs_codes_tabs_and_resizes() {
+        let (dir, mut wb) = project("paneltabs");
+        keys(&mut wb, &["Ctrl+J"]);
+        assert!(wb.shell.dock.bottom.visible);
+        let names = |wb: &Workbench| wb.tree().find_target("part.bottom").map(|p| p.children.iter().filter(|c| c.role == "tab").map(|c| c.name.split_once(' ').map_or(c.name.clone(), |(_, n)| n.to_string())).collect::<Vec<_>>()).unwrap_or_default();
+        let plain = |v: Vec<String>| v.into_iter().map(|n| n.trim_start_matches(|c: char| !c.is_ascii_alphabetic()).to_string()).collect::<Vec<_>>();
+        assert_eq!(plain(names(&wb)), ["Problems", "Output", "Debug Console", "Terminal"]);
+        // Terminal: one starts in its place; + starts a second beside it.
+        run(&mut wb, json!({"cmd": "click", "target": "tab.terminal"}));
+        assert!(wb.windows.last().unwrap().term.is_some());
+        let r = run(&mut wb, json!({"cmd": "click", "target": "panel.new_terminal"}));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(plain(names(&wb)), ["Problems", "Output", "Debug Console", "Terminal", "Terminal 2"]);
+        // Maximize, then restore.
+        let h = wb.layout().bottom.unwrap().h;
+        run(&mut wb, json!({"cmd": "click", "target": "panel.maximize"}));
+        assert!(wb.layout().bottom.unwrap().h > h);
+        run(&mut wb, json!({"cmd": "click", "target": "panel.maximize"}));
+        assert_eq!(wb.layout().bottom.unwrap().h, h);
+        // The top edge (not on a tab) drags it taller.
+        let b = wb.layout().bottom.unwrap();
+        let x = b.x + 1;
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(x, b.y), mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Drag(Button::Left), pos: Point::new(x, b.y - 4), mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: Point::new(x, b.y - 4), mods: Mods::NONE }));
+        assert_eq!(wb.layout().bottom.unwrap().h, b.h + 4);
+        // Close.
+        run(&mut wb, json!({"cmd": "click", "target": "panel.close"}));
+        assert!(!wb.shell.dock.bottom.visible);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn scrolling_sideways() {
         let (dir, mut wb) = project("hscroll");
         std::fs::write(dir.join("wide.txt"), format!("{}\n", "x".repeat(400))).unwrap();

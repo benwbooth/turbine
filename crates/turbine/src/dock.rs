@@ -31,6 +31,11 @@ pub enum Tab {
     Debug,
     Extensions,
     Problems,
+    /// The panel's own tabs, as VS Code's: each opens its window (which
+    /// then takes the tab's place) when it's picked.
+    Output,
+    DebugConsole,
+    Terminal,
     Pane(u32),
 }
 
@@ -44,6 +49,9 @@ impl Tab {
             Tab::Debug => "Run and Debug",
             Tab::Extensions => "Extensions",
             Tab::Problems => "Problems",
+            Tab::Output => "Output",
+            Tab::DebugConsole => "Debug Console",
+            Tab::Terminal => "Terminal",
             Tab::Pane(_) => "",
         }
     }
@@ -57,6 +65,9 @@ impl Tab {
             Tab::Debug => "D",
             Tab::Extensions => "X",
             Tab::Problems => "P",
+            Tab::Output => "L",
+            Tab::DebugConsole => "C",
+            Tab::Terminal => "T",
             Tab::Pane(_) => return None,
         })
     }
@@ -144,7 +155,7 @@ impl Default for Dock {
     fn default() -> Self {
         Dock {
             left: Part { visible: true, size: 30, tabs: vec![Tab::Explorer, Tab::Outline, Tab::Search, Tab::Scm, Tab::Debug, Tab::Extensions], active: 0 },
-            bottom: Part { visible: false, size: 12, tabs: vec![Tab::Problems], active: 0 },
+            bottom: Part { visible: false, size: 12, tabs: vec![Tab::Problems, Tab::Output, Tab::DebugConsole, Tab::Terminal], active: 0 },
             right: Part { visible: false, size: 46, tabs: Vec::new(), active: 0 },
             editor_tabs: true,
             breadcrumbs: true,
@@ -259,6 +270,8 @@ impl Dock {
     /// an activity bar), or a letter without icons.
     pub fn tab_rects(&self, side: Side, r: Rect, title: &dyn Fn(Tab) -> String) -> Vec<(Tab, Rect, String)> {
         let part = self.part(side);
+        // (The panel keeps the right of its edge for its buttons.)
+        let r = if side == Side::Bottom && r.w > 40 { Rect::new(r.x, r.y, r.w - 14, r.h) } else { r };
         let caps = |_: Tab| 2;
         let room = r.w - 4;
         let width = |labels: &[(Tab, String)]| labels.iter().map(|(t, l)| str_width(l) as i32 + caps(*t)).sum::<i32>() + labels.len().saturating_sub(1) as i32;
@@ -295,7 +308,9 @@ impl Dock {
         match side {
             Side::Left => p.x == r.right() - 1 && p.y > r.y && p.y < r.bottom(),
             Side::Right => p.x == r.x && p.y > r.y && p.y < r.bottom(),
-            Side::Bottom => p.y == r.y && (p.x == r.x || p.x >= r.right() - 2),
+            // (The panel's whole top edge; its tabs and buttons are
+            // picked out before this is asked.)
+            Side::Bottom => p.y == r.y,
         }
     }
 
