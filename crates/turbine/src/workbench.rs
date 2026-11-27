@@ -3748,6 +3748,14 @@ impl Workbench {
             self.dialog_result(r);
             return;
         }
+        if !self.menubar.is_open() && m.pos.y == 0 {
+            if let Some(cmd) = self.layout_toggles().into_iter().find(|t| t.0.contains(m.pos)).map(|t| t.1) {
+                if matches!(m.kind, MouseKind::Down(Button::Left)) {
+                    self.run_command(cmd);
+                }
+                return;
+            }
+        }
         match self.menubar.handle_mouse(&m, screen) {
             MenuResult::Command(c) => return self.run_command(&c),
             MenuResult::Consumed => return,
@@ -3935,6 +3943,9 @@ impl Workbench {
                 }
             }
             bar = bar.child(mn);
+        }
+        for (r, cmd, name, _, on) in self.layout_toggles() {
+            bar = bar.child(Node::new(format!("layout.{cmd}"), "button", name, r).value(if on { "on" } else { "off" }));
         }
         root = root.child(bar);
         let top = self.windows.len().saturating_sub(1);
@@ -4500,6 +4511,12 @@ impl App for Workbench {
             }
         }
         self.menubar.draw(&mut c, &theme, screen);
+        // (The layout toggles: [▌] lit when its part shows, dim when not.)
+        for (r, _, _, glyph, on) in self.layout_toggles() {
+            let base = theme.scheme.menu;
+            let st = if on { Style { fg: theme.scheme.menu_hotkey.fg, ..base } } else { Style { fg: theme.scheme.shadow.fg, ..base } };
+            c.print(r.x, r.y, &format!("[{glyph}]"), st);
+        }
         if let Some(comp) = &mut self.completion {
             let at = self.windows.last().filter(|w| w.win.id == comp.win_id).and_then(|w| w.ed.cursor_screen_pos());
             if let (Some(at), false) = (at, comp.popup.items.is_empty()) {
@@ -5087,6 +5104,13 @@ mod tests {
         // Close.
         run(&mut wb, json!({"cmd": "click", "target": "panel.close"}));
         assert!(!wb.shell.dock.bottom.visible);
+        // The menu bar's layout toggles show and hide the parts.
+        let left = wb.shell.dock.left.visible;
+        let r = run(&mut wb, json!({"cmd": "click", "target": "layout.view.sidebar"}));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(wb.shell.dock.left.visible, !left);
+        run(&mut wb, json!({"cmd": "click", "target": "layout.view.panel"}));
+        assert!(wb.shell.dock.bottom.visible);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

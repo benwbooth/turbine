@@ -186,6 +186,32 @@ impl Workbench {
 
     /// Match the parts' tabs to the docked windows, put those windows in
     /// their parts, and keep the editors inside their area.
+    /// VS Code's layout toggles, at the right of the menu bar before Help:
+    /// the side bar, the panel, the secondary side bar (lit when shown).
+    pub(super) fn layout_toggles(&self) -> Vec<(Rect, &'static str, &'static str, &'static str, bool)> {
+        let titles = self.menubar.title_rects();
+        let (Some(help), Some(before)) = (titles.last().copied(), titles.iter().rev().skip(1).find(|r| r.w > 0).copied()) else { return Vec::new() };
+        let items = [
+            ("view.sidebar", "Toggle Primary Side Bar (Ctrl+B)", "▌", self.shell.dock.left.visible),
+            ("view.panel", "Toggle Panel (Ctrl+J)", "▄", self.shell.dock.bottom.visible),
+            ("view.secondary", "Toggle Secondary Side Bar (Ctrl+Alt+B)", "▐", self.shell.dock.right.visible),
+        ];
+        let w = items.len() as i32 * 3;
+        // (At the bar's right end when Help sits with the rest, as
+        // Borland's does; else just before a right-hand Help, as QBasic's.)
+        let end = self.screen().w - 1 - w;
+        let x0 = if help.w > 0 && help.right() + 1 < end {
+            end
+        } else {
+            let x0 = help.x - 1 - w;
+            if help.w == 0 || x0 <= before.right() + 1 {
+                return Vec::new();
+            }
+            x0
+        };
+        items.iter().enumerate().map(|(i, &(cmd, name, glyph, on))| (Rect::new(x0 + i as i32 * 3, 0, 3, 1), cmd, name, glyph, on)).collect()
+    }
+
     /// The panel's buttons at the right of its top edge, as VS Code has
     /// them: New Terminal (on a terminal), Maximize (or Restore), Close.
     pub(super) fn panel_buttons(&self) -> Vec<(Rect, &'static str, &'static str, String)> {
