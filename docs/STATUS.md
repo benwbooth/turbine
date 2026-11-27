@@ -21,7 +21,9 @@
 | Vim: two views of one buffer (:sp with no file), vimrc, more :set options, `"+` via system clipboard | planned |
 | Keymaps: CUA (DOS) and Vim, Options > Keymap or `--keymap` | done |
 | Emacs / VS Code keymaps | planned |
-| tree-sitter highlighting (Helix grammars on demand) | planned |
+| tree-sitter highlighting on a worker thread: 18 built-in grammars + Helix's ~250 on demand (Tessera's loader, grammars trial-loaded in a child) | done |
+| Syntax colours per scheme (Borland style: white keywords, grey comments, cyan strings, green numbers/preprocessor) | done |
+| Language detection by name, extension, shebang | done |
 | LSP client | planned |
 | DAP client | planned |
 | Embedded terminal (turbine-term: libghostty-vt on a PTY; works in TUI mode too) | done |

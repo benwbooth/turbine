@@ -94,6 +94,48 @@ pub struct Scheme {
     pub agent_pointer: Style,
     /// The built-in terminal's default colours.
     pub terminal: Style,
+    /// Text colour per highlight kind, indexed like `SYNTAX_KINDS`
+    /// (None: the editor's own colour).
+    pub syntax: [Option<Color>; SYNTAX_KINDS.len()],
+    /// Draw keywords bold (for monochrome schemes).
+    pub bold_keywords: bool,
+}
+
+/// Highlight kinds, in index order (the same list as turbine-syntax's).
+pub const SYNTAX_KINDS: [&str; 19] = [
+    "keyword", "string", "comment", "number", "constant", "function", "operator", "property", "variable", "embedded",
+    "type", "constructor", "punctuation", "escape", "attribute", "tag", "label", "namespace", "special",
+];
+
+/// Build a syntax colour table from (kind, colour) pairs.
+pub fn syntax_table(pairs: &[(&str, Color)]) -> [Option<Color>; 19] {
+    let mut t = [None; 19];
+    for (k, c) in pairs {
+        if let Some(i) = SYNTAX_KINDS.iter().position(|x| x == k) {
+            t[i] = Some(*c);
+        }
+    }
+    t
+}
+
+/// Borland C++'s editor colours on blue.
+fn borland_blue_syntax() -> [Option<Color>; 19] {
+    use vga::*;
+    syntax_table(&[
+        ("keyword", WHITE),
+        ("comment", LIGHT_GRAY),
+        ("string", LIGHT_CYAN),
+        ("number", LIGHT_GREEN),
+        ("constant", LIGHT_GREEN),
+        ("attribute", LIGHT_GREEN),
+        ("label", LIGHT_GREEN),
+        ("type", LIGHT_MAGENTA),
+        ("constructor", LIGHT_MAGENTA),
+        ("namespace", LIGHT_MAGENTA),
+        ("escape", LIGHT_RED),
+        ("special", LIGHT_RED),
+        ("tag", WHITE),
+    ])
 }
 
 macro_rules! s {
@@ -133,6 +175,8 @@ impl Scheme {
             shadow: s!(DARK_GRAY on BLACK),
             agent_pointer: s!(BLACK on YELLOW),
             terminal: s!(LIGHT_GRAY on BLACK),
+            syntax: borland_blue_syntax(),
+            bold_keywords: false,
         }
     }
 
@@ -166,6 +210,19 @@ impl Scheme {
             shadow: s!(DARK_GRAY on BLACK),
             agent_pointer: s!(BLACK on YELLOW),
             terminal: s!(LIGHT_GRAY on BLACK),
+            syntax: {
+                use vga::*;
+                syntax_table(&[
+                    ("keyword", WHITE),
+                    ("comment", CYAN),
+                    ("string", LIGHT_CYAN),
+                    ("number", LIGHT_GREEN),
+                    ("constant", LIGHT_GREEN),
+                    ("attribute", LIGHT_GREEN),
+                    ("type", WHITE),
+                ])
+            },
+            bold_keywords: false,
         }
     }
 
@@ -180,6 +237,19 @@ impl Scheme {
         s.editor_selection = s!(WHITE on BLUE);
         s.editor_gutter = s!(BLUE on CYAN);
         s.editor_ghost = s!(DARK_GRAY on CYAN);
+        s.syntax = {
+            use vga::*;
+            syntax_table(&[
+                ("keyword", WHITE),
+                ("comment", BLUE),
+                ("string", RED),
+                ("number", MAGENTA),
+                ("constant", MAGENTA),
+                ("attribute", GREEN),
+                ("type", BLUE),
+                ("escape", LIGHT_RED),
+            ])
+        };
         s
     }
 
@@ -218,6 +288,8 @@ impl Scheme {
             shadow: Style::new(dim, k),
             agent_pointer: r,
             terminal: n,
+            syntax: syntax_table(&[("comment", dim)]),
+            bold_keywords: true,
         }
     }
 

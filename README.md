@@ -66,6 +66,9 @@ comes back once the action has finished on screen.
   `Ctrl-W` work on Turbine's windows. The engine comes from tessh's editor.
 - Editing: graphemes, wide characters, selection, clipboard, undo/redo,
   auto-indent, overwrite mode
+- Syntax highlighting with tree-sitter in Borland's colours: 18 grammars
+  built in, and any of Helix's ~250 fetched the first time a file needs it.
+  Parsing runs off the UI thread.
 - Unicode: grapheme clusters, East Asian wide characters (two cells each),
   combining marks, emoji, and bidirectional text with an RTL mode
 - Encodings detected on open and kept on save: UTF-8/16 (with or without
@@ -85,7 +88,7 @@ comes back once the action has finished on screen.
   pastes. Copies reach your system clipboard (OSC 52), even over SSH.
 - The automation socket, plus `--headless --script` for tests and screenshots
 
-The plan covers much more: LSP, DAP, tree-sitter,
+The plan covers much more: LSP, DAP,
 WASI extensions, Emacs and VS Code keymaps, AI completion and an
 assistant, hearth AI hub integration, a global menu, desktop and web front
 ends (a cxx-qt Qt app and a Leptos web app, no JavaScript), and retro

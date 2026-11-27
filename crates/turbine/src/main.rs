@@ -85,6 +85,8 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn main() {
+    // As a child trying a downloaded grammar: try it and exit.
+    turbine_syntax::grammars::check_from_args();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

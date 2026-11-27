@@ -61,6 +61,9 @@ pub struct EditorView {
     pub ghost: Option<String>,
     /// Overrides the cursor shape (vim's normal mode: a block).
     pub cursor_shape: Option<CursorShape>,
+    /// Syntax highlighting per line: (start byte, end byte, kind index),
+    /// later spans over earlier. May lag an edit by a moment.
+    pub highlights: Vec<Vec<(u32, u32, u8)>>,
     /// Extra selected char ranges (vim's visual block).
     pub block: Vec<(usize, usize)>,
     /// Text area from the last draw, for mouse hit testing.
@@ -82,6 +85,7 @@ impl EditorView {
             base_rtl: None,
             ghost: None,
             cursor_shape: None,
+            highlights: Vec::new(),
             block: Vec::new(),
             area: Rect::default(),
             dragging: false,
@@ -447,7 +451,28 @@ impl EditorView {
                 let ch = line_start + p.char_off;
                 let selected = sel.is_some_and(|(a, b)| ch >= a && ch < b)
                     || self.block.iter().any(|&(a, b)| ch >= a && ch < b);
-                let st = if selected { s.editor_selection } else { s.editor };
+                let st = if selected {
+                    s.editor_selection
+                } else {
+                    let kind = self
+                        .highlights
+                        .get(li)
+                        .and_then(|spans| spans.iter().rev().find(|(a, b, _)| (*a as usize) <= p.offset && p.offset < *b as usize))
+                        .map(|&(_, _, k)| k as usize);
+                    match kind {
+                        Some(k) => {
+                            let mut st = s.editor;
+                            if let Some(Some(c)) = s.syntax.get(k) {
+                                st.fg = *c;
+                            }
+                            if k == 0 && s.bold_keywords {
+                                st.attrs.bold = true;
+                            }
+                            st
+                        }
+                        None => s.editor,
+                    }
+                };
                 let g = &text[p.offset..p.offset + p.len];
                 if g == "\t" {
                     tc.fill(Rect::new(x, y, p.width as i32, 1), " ", st);

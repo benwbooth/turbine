@@ -35,6 +35,10 @@ struct EdWin {
     term: Option<TerminalView>,
     /// The terminal's screen as text, refreshed when it changes (for agents).
     term_text: String,
+    /// Syntax: the language, what it was detected for, the version sent.
+    lang: Option<String>,
+    lang_for: Option<Option<PathBuf>>,
+    hl_sent: Option<u64>,
 }
 
 impl EdWin {
@@ -67,6 +71,9 @@ pub struct Workbench {
     from_agent: bool,
     /// Copied text for the system clipboard (the front end takes it).
     clipboard_out: Option<String>,
+    highlighter: turbine_syntax::Highlighter,
+    /// Highlight requests not answered yet.
+    hl_pending: usize,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -308,6 +315,8 @@ impl Workbench {
             keymap: Keymap::Cua,
             from_agent: false,
             clipboard_out: None,
+            highlighter: turbine_syntax::Highlighter::new(),
+            hl_pending: 0,
         };
         for f in files {
             wb.open_path(f);
@@ -377,12 +386,49 @@ impl Workbench {
             win.zoomed = false;
         }
         self.next_id += 1;
-        let mut ew = EdWin { win, ed: EditorView::new(doc), vim: None, term: None, term_text: String::new() };
+        let mut ew = EdWin { win, ed: EditorView::new(doc), vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, hl_sent: None };
         if self.keymap == Keymap::Vim {
             ew.vim = Some(vim::attach(&mut ew.ed));
         }
         self.windows.push(ew);
         self.renumber();
+    }
+
+    /// Detect languages, send changed documents to the highlighter, and
+    /// take its answers.
+    fn update_highlights(&mut self) {
+        for w in &mut self.windows {
+            if w.term.is_some() {
+                continue;
+            }
+            let path = w.ed.doc.path.clone();
+            // Untitled documents are checked again as they're typed (a #! line).
+            let stale = w.lang_for.as_ref() != Some(&path) || (path.is_none() && w.hl_sent != Some(w.ed.doc.version));
+            if stale {
+                let lang = turbine_syntax::detect(path.as_deref(), &w.ed.doc.line(0));
+                if lang != w.lang {
+                    w.lang = lang;
+                    w.ed.highlights.clear();
+                    w.hl_sent = None;
+                }
+                w.lang_for = Some(path);
+            }
+            if let Some(lang) = &w.lang {
+                if w.hl_sent != Some(w.ed.doc.version) {
+                    self.highlighter.request(w.win.id as u64, w.ed.doc.version, lang, w.ed.doc.rope.to_string());
+                    w.hl_sent = Some(w.ed.doc.version);
+                    self.hl_pending += 1;
+                }
+            } else if w.lang_for.is_some() {
+                w.hl_sent = Some(w.ed.doc.version);
+            }
+        }
+        for r in self.highlighter.results() {
+            self.hl_pending = self.hl_pending.saturating_sub(1);
+            if let Some(w) = self.windows.iter_mut().find(|w| w.win.id as u64 == r.id) {
+                w.ed.highlights = r.lines.unwrap_or_default();
+            }
+        }
     }
 
     /// Put text on Turbine's clipboard and the system's.
@@ -407,7 +453,7 @@ impl Workbench {
         if let Some(e) = view.error() {
             self.say(format!("Terminal: {e}"));
         }
-        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new() });
+        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new(), lang: None, lang_for: None, hl_sent: None });
         self.renumber();
     }
 
@@ -1680,6 +1726,7 @@ impl App for Workbench {
                 }
             }
         }
+        self.update_highlights();
         if let Some(rx) = &self.requests {
             let reqs: Vec<Request> = rx.try_iter().collect();
             for r in reqs {
@@ -1718,7 +1765,7 @@ impl App for Workbench {
         let msg_tick = self.message.as_ref().map(|(_, t)| *t + Duration::from_secs(4));
         let poll = self.requests.as_ref().map(|_| now + Duration::from_millis(50));
         // Terminals are read on ticks: ~60 a second while one is open.
-        let term_tick = any_term.then(|| now + Duration::from_millis(16));
+        let term_tick = (any_term || self.hl_pending > 0).then(|| now + Duration::from_millis(16));
         [next, msg_tick, poll, term_tick].into_iter().flatten().min()
     }
 
@@ -1766,8 +1813,13 @@ impl App for Workbench {
                     };
                 }
                 let (l, col) = w.ed.cursor_line_col();
+                let lang = w
+                    .lang
+                    .as_deref()
+                    .map(|l| turbine_syntax::BUILTIN.iter().find(|(n, _)| *n == l).map(|(_, label)| label.to_string()).unwrap_or_else(|| l.to_string()))
+                    .unwrap_or_else(|| "Text".into());
                 format!(
-                    "{}:{}  {} {}  {}",
+                    "{lang}  {}:{}  {} {}  {}",
                     l + 1,
                     col + 1,
                     w.ed.doc.encoding.name(),
@@ -2029,6 +2081,41 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(wb.clipboard.is_empty(), "a reported click doesn't select");
+    }
+
+    #[test]
+    fn rust_file_is_highlighted_in_borland_colours() {
+        let dir = std::env::temp_dir().join(format!("turbine-hl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("main.rs");
+        std::fs::write(&f, "fn main() { let s = \"hi\"; } // done\n").unwrap();
+        let mut wb = Workbench::new(&[f]);
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+        let start = Instant::now();
+        while wb.windows[0].ed.highlights.is_empty() {
+            wb.tick(Instant::now());
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut surf = Surface::new(100, 30);
+        wb.render(&mut surf);
+        let fg_of = |needle: &str| {
+            for y in 0..surf.h {
+                let row: String = (0..surf.w).map(|x| surf.get(x, y).unwrap().text.clone()).collect();
+                if let Some(i) = row.find(needle) {
+                    let x = row[..i].chars().count() as i32;
+                    return surf.get(x, y).unwrap().style.fg;
+                }
+            }
+            panic!("{needle} not on screen");
+        };
+        use turbine_ui::theme::vga;
+        assert_eq!(fg_of("fn main"), vga::WHITE);
+        assert_eq!(fg_of("\"hi\""), vga::LIGHT_CYAN);
+        assert_eq!(fg_of("// done"), vga::LIGHT_GRAY);
+        assert!(wb.status.info.starts_with("Rust"), "{}", wb.status.info);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
