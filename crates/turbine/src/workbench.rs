@@ -1091,6 +1091,8 @@ impl Workbench {
         ed.line_numbers = self.shell.line_numbers.unwrap_or(self.theme.style.line_numbers);
         ed.wrap = self.shell.word_wrap;
         ed.show_whitespace = self.shell.show_whitespace;
+        ed.rainbow_brackets = self.shell.rainbow_brackets;
+        ed.match_brackets = self.shell.match_brackets;
         let mut ew = EdWin { win, ed, vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, lang_fixed: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: None, mirror: None };
         if self.keymap == Keymap::Vim {
             ew.vim = Some(vim::attach(&mut ew.ed));

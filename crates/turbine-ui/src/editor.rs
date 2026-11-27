@@ -57,6 +57,7 @@ pub struct DiagMark {
 
 /// The minimap's width in cells (eight chars of text each, as braille
 /// dots), and the lines in each of its rows.
+mod brackets;
 mod multi;
 mod wrap;
 mod structure;
@@ -106,6 +107,11 @@ pub struct EditorView {
     pub wrap: bool,
     /// Spaces, tabs and line ends drawn faintly (· → ¶).
     pub show_whitespace: bool,
+    /// Brackets coloured by depth (VS Code's bracket pair colourization).
+    pub rainbow_brackets: bool,
+    /// The bracket at the cursor and its partner marked.
+    pub match_brackets: bool,
+    brackets: brackets::BracketCache,
     /// Each line's change since the last commit, in the gutter: 1 added,
     /// 2 changed, 3 lines deleted after it.
     pub git_marks: Vec<u8>,
@@ -187,6 +193,9 @@ impl EditorView {
             block: Vec::new(),
             cursors: Vec::new(),
             column_mode: false,
+            rainbow_brackets: true,
+            match_brackets: true,
+            brackets: Default::default(),
             wrap: false,
             help_look: false,
             found: Vec::new(),
@@ -935,6 +944,10 @@ impl EditorView {
         let shown = self.visible_lines(self.scroll_y, area.h.max(0) as usize);
         let wrap_w = self.wrap_width();
         let mut row: i32 = 0;
+        // (The pair at the cursor, marked; it's not for a help page.)
+        let pair = if self.help_look { None } else { self.bracket_pair() };
+        let light_page = (base.bg.0 as u32 * 3 + base.bg.1 as u32 * 6 + base.bg.2 as u32) / 10 > 110;
+        let pair_bg = if light_page { crate::theme::vga::LIGHT_GRAY } else { crate::theme::vga::DARK_GRAY };
         for &li in shown.iter() {
             let nrows = if wrap_w > 0 { self.line_rows(li, wrap_w) } else { 1 };
             for sub in 0..nrows {
@@ -968,6 +981,7 @@ impl EditorView {
                 let text = self.doc.line(li);
                 let line_start = self.doc.rope.line_to_char(li);
                 let (placed, total) = self.layout_line(li, &text);
+                let line_brackets = if self.help_look || self.line_bg.get(li).is_some_and(|b| *b != 0) { Vec::new() } else { self.line_brackets(li, &text) };
                 // Borland's bars: the execution line, else a breakpoint line.
                 let bar = if self.exec_line == Some(li) {
                     Some(s.exec_bar)
@@ -1052,6 +1066,18 @@ impl EditorView {
                     let st = match bar {
                         Some(b) if diff_line && !selected && found.is_none() && st.bg == base.bg => Style { bg: b.bg, fg: if st.fg == base.fg { b.fg } else { st.fg }, ..st },
                         _ => st,
+                    };
+                    // (Brackets by depth; the cursor's pair marked.)
+                    let st = match line_brackets.iter().find(|(b, _)| *b == p.offset) {
+                        Some((_, col)) if !selected && found.is_none() && bar.is_none() => {
+                            Style { fg: crate::list::readable(col.unwrap_or(crate::theme::vga::LIGHT_RED), st.bg), ..st }
+                        }
+                        _ => st,
+                    };
+                    let st = if !selected && pair.is_some_and(|(a, b)| ch == a || ch == b) {
+                        Style { bg: pair_bg, attrs: crate::theme::Attrs { bold: true, ..st.attrs }, ..st }
+                    } else {
+                        st
                     };
                     let st = match self.diagnostics.iter().filter(|d| d.line == li).find(|d| {
                         p.offset >= d.start && (p.offset < d.end || (d.end <= d.start && p.offset == d.start))

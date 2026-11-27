@@ -82,6 +82,9 @@ pub(super) struct Shell {
     pub cursor_blink: bool,
     /// Spaces, tabs and line ends shown faintly.
     pub show_whitespace: bool,
+    /// Brackets coloured by depth, and the cursor's pair marked (Settings).
+    pub rainbow_brackets: bool,
+    pub match_brackets: bool,
     /// The app draws its own title bar (the menu bar row: title, buttons).
     pub own_title_bar: bool,
     /// Each mirror group's document as last synced: (version, dirty, path).
@@ -138,6 +141,8 @@ impl Shell {
             cursor_style: "Block".into(),
             cursor_blink: true,
             show_whitespace: false,
+            rainbow_brackets: true,
+            match_brackets: true,
             own_title_bar: false,
             mirrored: HashMap::new(),
             crumbs: Vec::new(),
