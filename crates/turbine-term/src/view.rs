@@ -56,8 +56,15 @@ impl TerminalView {
     }
 
     pub fn handle_key(&mut self, ev: &KeyEvent) -> bool {
-        if ev.kind == KeyKind::Release {
-            return false;
+        // (Releases and repeats: for programs that asked kitty for them.)
+        if ev.kind != KeyKind::Press {
+            if let Ok(t) = &mut self.term {
+                if t.exited().is_none() {
+                    let action = if ev.kind == KeyKind::Release { libghostty_vt::key::Action::Release } else { libghostty_vt::key::Action::Repeat };
+                    t.key_as(&key_input(ev), action);
+                }
+            }
+            return true;
         }
         let Ok(t) = &mut self.term else { return false };
         if t.exited().is_some() {

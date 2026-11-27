@@ -3223,6 +3223,13 @@ impl Workbench {
 
     fn key(&mut self, k: KeyEvent) {
         if k.kind == KeyKind::Release {
+            // (Let go: only a terminal in front wants to know, for programs
+            // that asked kitty's keyboard protocol for it.)
+            if self.dialog.is_none() && !self.menubar.is_open() {
+                if let Some(t) = self.windows.last_mut().and_then(|w| w.term.as_mut()) {
+                    t.handle_key(&k);
+                }
+            }
             return;
         }
         // The quick fix menu, then the completion list take their keys
@@ -4792,6 +4799,42 @@ mod tests {
         wb.dispatch(Event::Resize(40, 25));
         keys(&mut wb, &["Alt+H"]);
         assert!(wb.menubar.open.is_some(), "Help opens from the keyboard even when it doesn't fit");
+    }
+
+    #[test]
+    fn terminal_programs_get_the_mouse_and_kitty_keys() {
+        let (dir, mut wb) = project("termio");
+        keys(&mut wb, &["Ctrl+`"]);
+        let tid = wb.windows.last().unwrap().win.id;
+        let screen = |wb: &Workbench| wb.windows.iter().find(|w| w.win.id == tid).map(|w| w.term_text.clone()).unwrap_or_default();
+        let pump = |wb: &mut Workbench, what: &str, f: &dyn Fn(&str) -> bool| {
+            let t = Instant::now();
+            loop {
+                wb.tick(Instant::now());
+                let s = screen(wb);
+                if f(&s) {
+                    break;
+                }
+                assert!(t.elapsed() < Duration::from_secs(8), "{what}: {s}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        pump(&mut wb, "a prompt", &|s| !s.trim().is_empty());
+        // A program asking for SGR mouse reports and kitty's keys.
+        for c in "printf '\\033[?1000h\\033[?1006h\\033[>1u'; echo READY; cat -v\n".chars() {
+            wb.event(Event::Key(KeyEvent::new(if c == '\n' { Key::Enter } else { Key::Char(c) }, Mods::NONE)));
+        }
+        pump(&mut wb, "ready", &|s| s.lines().any(|l| l.trim() == "READY"));
+        let inner = wb.windows.iter().find(|w| w.win.id == tid).unwrap().win.inner();
+        let at = Point::new(inner.x + 3, inner.y + 2);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: at, mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: at, mods: Mods::NONE }));
+        pump(&mut wb, "the click reported", &|s| s.contains("^[[<0;4;3M"));
+        // Kitty: Esc is CSI 27 u (disambiguated).
+        wb.event(Event::Key(KeyEvent::new(Key::Esc, Mods::NONE)));
+        wb.event(Event::Key(KeyEvent::new(Key::Enter, Mods::NONE)));
+        pump(&mut wb, "kitty's Esc", &|s| s.contains("^[[27u"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

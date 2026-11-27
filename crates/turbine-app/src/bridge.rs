@@ -58,6 +58,9 @@ pub mod ffi {
         /// A key from Qt (key code, modifiers, text). True when used.
         #[namespace = "turbine"]
         fn app_key(key: i32, mods: u32, text: &str) -> bool;
+        /// A key repeated (kind 1) or let go (kind 2).
+        #[namespace = "turbine"]
+        fn app_key_kind(kind: i32, key: i32, mods: u32, text: &str) -> bool;
         /// kind: 0 press, 1 release, 2 drag, 3 move, 4 wheel up, 5 wheel down,
         /// 6 wheel left, 7 wheel right;
         /// button: 1 left, 2 right, 3 middle.
@@ -205,6 +208,16 @@ fn qt_key(key: i32, mods: u32, text: &str) -> Option<KeyEvent> {
 
 fn app_key(key: i32, mods: u32, text: &str) -> bool {
     let Some(ev) = qt_key(key, mods, text) else { return false };
+    with(|st| {
+        st.wb.event(Event::Key(ev));
+        true
+    })
+    .unwrap_or(false)
+}
+
+fn app_key_kind(kind: i32, key: i32, mods: u32, text: &str) -> bool {
+    let Some(mut ev) = qt_key(key, mods, text) else { return false };
+    ev.kind = if kind == 2 { KeyKind::Release } else { KeyKind::Repeat };
     with(|st| {
         st.wb.event(Event::Key(ev));
         true

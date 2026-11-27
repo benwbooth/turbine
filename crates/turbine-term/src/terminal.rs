@@ -539,12 +539,18 @@ impl Terminal {
     /// Encode a key the way the program asked (legacy, xterm modifyOtherKeys
     /// or the kitty keyboard protocol) and send it.
     pub fn key(&mut self, k: &KeyInput) {
+        self.key_as(k, key::Action::Press);
+    }
+
+    /// A key pressed, repeated or let go (the kitty protocol reports all
+    /// three when the program asks; other encodings only presses).
+    pub fn key_as(&mut self, k: &KeyInput, action: key::Action) {
         let mut consumed = key::Mods::empty();
         if k.text.is_some() && k.mods.contains(key::Mods::SHIFT) {
             consumed |= key::Mods::SHIFT;
         }
         self.key_ev
-            .set_action(key::Action::Press)
+            .set_action(action)
             .set_key(k.key)
             .set_mods(k.mods)
             .set_consumed_mods(consumed)
@@ -554,10 +560,14 @@ impl Terminal {
         }
         let mut out = Vec::new();
         let _ = self.key_enc.set_options_from_terminal(&self.term).set_alt_esc_prefix(true).encode_to_vec(&self.key_ev, &mut out);
-        if out.is_empty() {
+        if out.is_empty() && action != key::Action::Release {
             if let Some(t) = &k.text {
                 out.extend_from_slice(t.as_bytes());
             }
+        }
+        if !out.is_empty() && action == key::Action::Release {
+            self.write(&out);
+            return;
         }
         if !out.is_empty() {
             self.term.scroll_viewport(ScrollViewport::Bottom);

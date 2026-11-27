@@ -254,7 +254,8 @@ void CellView::tick()
             // Texture pixels per dot: enough that the stretch only ever
             // shrinks (sharp, even dots), so 2 at 100-200% scales.
             const qreal dpr = window() ? window()->effectiveDevicePixelRatio() : 1;
-            m_k = std::clamp(int(std::ceil(dpr * m_ch / 16 - 0.05)), 1, 4);
+            // (At least 2, so the averaging shrink has dots to average.)
+            m_k = std::clamp(int(std::ceil(dpr * m_ch / 16 - 0.05)) + 1, 2, 4);
             m_dots = m_frame->dots == 8 ? 8 : 9;
             // (The whole item, the strip past the last cell included, so every
             // cell stretches by the same amount.)
@@ -315,12 +316,23 @@ void CellView::keyPressEvent(QKeyEvent* e)
     if ((mods & Qt::ControlModifier) || (e->key() == Qt::Key_Insert && (mods & Qt::ShiftModifier)))
         turbine::app_set_clipboard(rust::Str(QGuiApplication::clipboard()->text().toStdString()));
     const std::string text = e->text().toStdString();
-    if (turbine::app_key(e->key(), uint32_t(mods), rust::Str(text))) {
+    const bool used = e->isAutoRepeat() ? turbine::app_key_kind(1, e->key(), uint32_t(mods), rust::Str(text))
+                                        : turbine::app_key(e->key(), uint32_t(mods), rust::Str(text));
+    if (used) {
         e->accept();
         afterInput();
     } else {
         e->ignore();
     }
+}
+
+// Let go: terminal programs using kitty's keyboard protocol may want it.
+void CellView::keyReleaseEvent(QKeyEvent* e)
+{
+    if (e->isAutoRepeat()) return;
+    turbine::app_key_kind(2, e->key(), uint32_t(e->modifiers()), rust::Str(e->text().toStdString()));
+    e->accept();
+    afterInput();
 }
 
 static int buttonOf(Qt::MouseButton b)
@@ -620,6 +632,11 @@ void CellView::paintVga(QPainter* p)
                 } else {
                     p->setPen(fg);
                     p->drawText(QPoint(x * gw, y * gh + ascent), run);
+                    // Icons (Nerd Font's, from the Private Use Area) come
+                    // from a thin outline font: drawn again a dot over, so
+                    // their strokes are as heavy as the VGA font's.
+                    if ((ch >= 0xE000 && ch <= 0xF8FF) || (run.size() == 2 && run.at(0).isHighSurrogate()))
+                        p->drawText(QPoint(x * gw + std::max(1, m_k / 2), y * gh + ascent), run);
                 }
             }
             if (c.flags & 4) p->fillRect(QRect(x * gw, y * gh + 15 * m_k, (x1 - x) * gw, m_k), fg);
@@ -640,8 +657,19 @@ void CellView::paintVga(QPainter* p)
         }
     }
     ip.end();
-    screen->setRenderHint(QPainter::SmoothPixmapTransform, true);
-    screen->drawImage(QRectF(0, 0, m_vgaSize.width() / qreal(m_dots * m_k) * m_cw, m_vgaSize.height() / 16.0 / m_k * m_ch), m_vgaImage);
+    // Shrunk to the screen's own pixels with an averaging filter (not a
+    // bilinear stretch): every dot gets the same share of the pixels it
+    // covers, so letters stay even at any zoom.
+    const QRectF target(0, 0, m_vgaSize.width() / qreal(m_dots * m_k) * m_cw, m_vgaSize.height() / 16.0 / m_k * m_ch);
+    const qreal dpr = window() ? window()->effectiveDevicePixelRatio() : 1;
+    const QSize px(int(std::lround(target.width() * dpr)), int(std::lround(target.height() * dpr)));
+    if (px == m_vgaImage.size() || px.isEmpty()) {
+        screen->drawImage(target, m_vgaImage);
+    } else {
+        QImage shrunk = m_vgaImage.scaled(px, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        shrunk.setDevicePixelRatio(dpr);
+        screen->drawImage(target.topLeft(), shrunk);
+    }
     drawPictures(screen);
 }
 
