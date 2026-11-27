@@ -303,6 +303,9 @@ pub struct Workbench {
     /// What the front end's window should do (its own title bar's buttons):
     /// 1 minimize, 2 maximize or restore, 3 close, 4 start a move.
     window_op: i32,
+    /// A status item's drop-up: its list, where, and each choice's action
+    /// ("lang:rust", "enc:3", "eol:CRLF").
+    status_menu: Option<(ListPopup, Point, Vec<String>)>,
     /// The whole window in cells (one row more than Turbine's own with its
     /// own title bar).
     outer: (i32, i32),
@@ -676,6 +679,7 @@ impl Workbench {
             docviews: HashMap::new(),
             ed_menu: None,
             window_op: 0,
+            status_menu: None,
             outer: (80, 25),
             last_input: None,
         };
@@ -769,6 +773,85 @@ impl Workbench {
         popup.place(p, self.screen());
         self.ed_menu = Some((popup, p, items.iter().map(|i| i.2).collect()));
         true
+    }
+
+    /// A status item's drop-up (file type, encoding, line ends): true when
+    /// the command is one of those.
+    fn status_menu_open(&mut self, cmd: &str, at: Point) -> bool {
+        let Some(w) = self.windows.last().filter(|w| w.term.is_none()) else { return false };
+        let (items, acts, sel): (Vec<(String, String)>, Vec<String>, usize) = match cmd {
+            "edit.language" => {
+                let mut names: Vec<String> = turbine_syntax::BUILTIN.iter().map(|b| b.0.to_string()).collect();
+                for n in turbine_syntax::grammars::known() {
+                    if !names.contains(&n) {
+                        names.push(n);
+                    }
+                }
+                names.sort_by_key(|n| turbine_syntax::label(n).to_lowercase());
+                let cur = w.lang.clone().unwrap_or_default();
+                let mut items = vec![("Auto Detect".to_string(), String::new())];
+                let mut acts = vec!["lang:".to_string()];
+                for n in &names {
+                    items.push((turbine_syntax::label(n), n.clone()));
+                    acts.push(format!("lang:{n}"));
+                }
+                let sel = names.iter().position(|n| *n == cur).map_or(0, |i| i + 1);
+                (items, acts, sel)
+            }
+            "file.reopen_encoding" => {
+                let list = crate::file_dialog::encodings();
+                let cur = w.ed.doc.encoding.name();
+                let mut items = vec![("Detect it".to_string(), "reopen".to_string())];
+                let mut acts = vec!["enc:detect".to_string()];
+                let mut sel = 0;
+                for (i, (name, _, _)) in list.iter().enumerate() {
+                    if name.starts_with(cur) && sel == 0 {
+                        sel = i + 1;
+                    }
+                    items.push((name.clone(), "reopen".into()));
+                    acts.push(format!("enc:{i}"));
+                }
+                (items, acts, sel)
+            }
+            "file.line_ending" => {
+                let crlf = w.ed.doc.line_ending == turbine_text::encoding::LineEnding::CrLf;
+                (vec![("LF".into(), "Unix, macOS".into()), ("CRLF".into(), "Windows, DOS".into())], vec!["eol:LF".into(), "eol:CRLF".into()], usize::from(crlf))
+            }
+            _ => return false,
+        };
+        let mut popup = ListPopup::new(items);
+        popup.max_rows = 16;
+        popup.sel = sel;
+        popup.place(at, self.screen());
+        self.status_menu = Some((popup, at, acts));
+        true
+    }
+
+    fn status_choice(&mut self, a: &str) {
+        let Some(w) = self.windows.iter_mut().rev().find(|w| w.term.is_none() && w.special.is_none()) else { return };
+        if let Some(lang) = a.strip_prefix("lang:") {
+            w.lang_fixed = (!lang.is_empty()).then(|| lang.to_string());
+            w.lang_for = None;
+        } else if let Some(e) = a.strip_prefix("enc:") {
+            let list = crate::file_dialog::encodings();
+            let enc = e.parse::<usize>().ok().and_then(|i| list.get(i)).and_then(|(_, l, _)| turbine_text::encoding::TextEncoding::for_label(l));
+            let r = w.ed.doc.reopen_as(enc);
+            w.ed.cursor = w.ed.cursor.min(w.ed.doc.rope.len_chars());
+            w.hl_sent = None;
+            let name = w.ed.doc.encoding.name();
+            self.say(match r {
+                Ok(()) => format!("Reopened as {name}"),
+                Err(e) => format!("Can't reopen: {e}"),
+            });
+        } else if let Some(e) = a.strip_prefix("eol:") {
+            use turbine_text::encoding::LineEnding;
+            let want = if e == "CRLF" { LineEnding::CrLf } else { LineEnding::Lf };
+            if w.ed.doc.line_ending != want {
+                w.ed.doc.line_ending = want;
+                w.ed.doc.dirty = true;
+                self.say(format!("Line ends: {e} (saved as such)"));
+            }
+        }
     }
 
     /// The Borland line:column cells before the sideways bar in a window's bottom edge.
@@ -2405,6 +2488,16 @@ impl Workbench {
             }
             "help.contents" => self.show_help("Turbine", MANUAL),
             "help.back" => self.page_back(),
+            "file.line_ending" => {
+                // LF and CRLF, swapped (written so the next save).
+                if let Some(w) = self.windows.last_mut().filter(|w| w.term.is_none()) {
+                    use turbine_text::encoding::LineEnding;
+                    w.ed.doc.line_ending = if w.ed.doc.line_ending == LineEnding::Lf { LineEnding::CrLf } else { LineEnding::Lf };
+                    w.ed.doc.dirty = true;
+                    let n = w.ed.doc.line_ending.name();
+                    self.say(format!("Line ends: {n} (saved as such)"));
+                }
+            }
             "edit.language" => {
                 let mut names: Vec<String> = turbine_syntax::BUILTIN.iter().map(|b| b.0.to_string()).collect();
                 for n in turbine_syntax::grammars::known() {
@@ -3348,6 +3441,18 @@ impl Workbench {
         if self.dialog.is_none() && self.lsp_menu_key(&k) {
             return;
         }
+        if let Some((popup, _, acts)) = &mut self.status_menu {
+            match popup.handle_key(&k) {
+                PopupResult::Accept(i) => {
+                    let a = acts[i].clone();
+                    self.status_menu = None;
+                    self.status_choice(&a);
+                }
+                PopupResult::Close => self.status_menu = None,
+                _ => {}
+            }
+            return;
+        }
         if let Some((popup, _, cmds)) = &mut self.ed_menu {
             match popup.handle_key(&k) {
                 PopupResult::Accept(i) => {
@@ -3857,6 +3962,19 @@ impl Workbench {
         if self.dialog.is_none() && self.lspx.menu.is_some() && self.lsp_menu_mouse(&m) {
             return;
         }
+        if let Some((popup, _, acts)) = &mut self.status_menu {
+            match popup.handle_mouse(&m) {
+                PopupResult::Accept(i) => {
+                    let a = acts[i].clone();
+                    self.status_menu = None;
+                    self.status_choice(&a);
+                }
+                PopupResult::Close => self.status_menu = None,
+                PopupResult::Ignored if matches!(m.kind, MouseKind::Down(_)) => self.status_menu = None,
+                _ => {}
+            }
+            return;
+        }
         // The editor's right-click menu.
         if let Some((popup, _, cmds)) = &mut self.ed_menu {
             match popup.handle_mouse(&m) {
@@ -3999,6 +4117,10 @@ impl Workbench {
         if m.pos.y == self.size.1 - 1 {
             if let MouseKind::Down(Button::Left) = m.kind {
                 if let Some(c) = self.status.hit(m.pos, self.size.1 - 1) {
+                    // (The file's items open a list right above them.)
+                    if self.status_menu_open(&c, m.pos) {
+                        return;
+                    }
                     self.run_command(&c);
                 }
             }
@@ -4173,8 +4295,14 @@ impl Workbench {
         }
         let srow = self.size.1 - 1;
         let mut sb = Node::new("statusbar", "statusbar", "Status", Rect::new(0, srow, screen.w, 1));
-        for (it, r) in self.status.items.iter().zip(self.status.item_rects(srow)) {
-            sb = sb.child(Node::new(format!("status.{}", it.command), "button", format!("{} {}", it.key, it.label), r));
+        if self.status.left.is_empty() && self.status.right.is_empty() {
+            for (it, r) in self.status.items.iter().zip(self.status.item_rects(srow)) {
+                sb = sb.child(Node::new(format!("status.{}", it.command), "button", format!("{} {}", it.key, it.label), r));
+            }
+        }
+        for (r, cmd, tip, text) in self.status.segment_rects(Rect::new(0, srow, screen.w, 1)) {
+            let id = if cmd.is_empty() { format!("status.{text}") } else { format!("status.{cmd}") };
+            sb = sb.child(Node::new(id, "button", text, r).tip(tip));
         }
         root.child(sb)
     }
@@ -4442,7 +4570,11 @@ impl Workbench {
         }
         let Some(r) = self.title_row() else { return Vec::new() };
         let x = r.right() - 9;
-        vec![(Rect::new(x, 0, 3, 1), 1, "Minimize", "[_]"), (Rect::new(x + 3, 0, 3, 1), 2, "Maximize or Restore", "[□]"), (Rect::new(x + 6, 0, 3, 1), 3, "Close", "[×]")]
+        // (In the style's own marks: QBasic's arrows, Borland's triangles
+        // and close box.)
+        let qbasic = self.theme.style.name.contains("QBasic") || self.theme.style.name.contains("QuickBASIC");
+        let (min, max, close) = if qbasic { ("[↓]", "[↑]", "[×]") } else { ("[▼]", "[▲]", "[■]") };
+        vec![(Rect::new(x, 0, 3, 1), 1, "Minimize", min), (Rect::new(x + 3, 0, 3, 1), 2, "Maximize or Restore", max), (Rect::new(x + 6, 0, 3, 1), 3, "Close", close)]
     }
 
     /// The mouse on the title row: its buttons; elsewhere a drag moves the
@@ -4793,6 +4925,35 @@ impl Workbench {
             Some((mode, _)) => format!("{mode}  {info}"),
             None => info,
         };
+        // VS Code's status items, each a click away (the key hints make
+        // room for them).
+        self.status.width_hint = self.size.0;
+        self.status.left.clear();
+        self.status.right.clear();
+        if let Some(w) = self.windows.last().filter(|w| w.term.is_none()) {
+            let icons = self.theme.style.icons;
+            let branch = self.shell.scm.branch.clone();
+            if !branch.is_empty() {
+                self.status.left.push((format!("{} {branch}", if icons { "\u{e725}" } else { "⎇" }), "view.scm".into(), format!("Branch {branch}: Source Control")));
+            }
+            let (e, wn) = self.shell.problem_count;
+            self.status.left.push((format!("■ {e} ▲ {wn}"), "view.problems".into(), "Errors and warnings: the Problems panel".into()));
+            if let Some((mode, _)) = &vim_line {
+                self.status.right.push((mode.clone(), String::new(), "Vim's mode".into()));
+            }
+            let (l, col) = w.ed.cursor_line_col();
+            self.status.right.push((format!("Ln {}, Col {}", l + 1, col + 1), "search.goto".into(), "Go to Line (Ctrl+G)".into()));
+            if let Some((a, b)) = w.ed.selection() {
+                self.status.right.push((format!("({} selected)", b - a), String::new(), "Characters selected".into()));
+            }
+            self.status.right.push((w.ed.doc.encoding.name().to_string(), "file.reopen_encoding".into(), "Reopen with Encoding".into()));
+            self.status.right.push((w.ed.doc.line_ending.name().to_string(), "file.line_ending".into(), "Change the line ends (LF or CRLF)".into()));
+            let lang = w.lang.as_deref().map(turbine_syntax::label).unwrap_or_else(|| "Plain Text".into());
+            self.status.right.push((lang, "edit.language".into(), "Change Language Mode".into()));
+            if w.vim.is_none() {
+                self.status.right.push((if w.ed.overwrite { "OVR" } else { "INS" }.into(), String::new(), "Typing inserts (Insert switches to typing over)".into()));
+            }
+        }
         let cmdline = vim_line.and_then(|(_, c)| c);
         self.status.message = if self.driver.busy() {
             Some(format!(
@@ -4860,6 +5021,10 @@ impl Workbench {
         }
         self.draw_lsp_more(&mut c, &theme);
         if let Some((popup, at, _)) = &mut self.ed_menu {
+            let at = *at;
+            popup.draw(&mut c, at, screen, &theme);
+        }
+        if let Some((popup, at, _)) = &mut self.status_menu {
             let at = *at;
             popup.draw(&mut c, at, screen, &theme);
         }
@@ -5820,7 +5985,7 @@ mod tests {
         wb.render(&mut surf);
         let t = surf.to_text();
         let rows: Vec<&str> = t.lines().collect();
-        assert!(rows[0].ends_with("[_][□][×]") && rows[0].contains("Turbine"), "{}", rows[0]);
+        assert!(rows[0].ends_with("[▼][▲][■]") && rows[0].contains("Turbine"), "{}", rows[0]);
         assert!(rows[1].contains("File") && rows[1].contains("Edit"), "the menu bar under it: {}", rows[1]);
         // A click on the menu bar's row in the window reaches the menus.
         wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(3, 1), mods: Mods::NONE }));
@@ -5837,6 +6002,28 @@ mod tests {
         let code = rich.iter().find(|l| l.iter().any(|(t, _)| t.contains("fn"))).unwrap();
         let ty = code.iter().find(|(t, _)| t == "u32").unwrap().1;
         assert_ne!(ty.fg, wb.theme.scheme.tooltip.fg, "{code:?}");
+    }
+
+    #[test]
+    fn the_status_line_has_vs_codes_items() {
+        let (dir, mut wb) = project("statusline");
+        wb.goto_file(&dir.join("src/main.rs"), Some(1), 4);
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let t = surf.to_text();
+        let last = t.lines().last().unwrap().to_string();
+        assert!(last.contains("Ln 2, Col 5") && last.contains("UTF-8"), "{last}");
+        wait_until(&mut wb, "the language", |wb| wb.windows.last().unwrap().lang.as_deref() == Some("rust"));
+        wb.render(&mut surf);
+        assert!(surf.to_text().lines().last().unwrap().contains("Rust"));
+        // The line ends: a click opens a list above it; CRLF picked.
+        let r = run(&mut wb, json!({"cmd": "click", "target": "status.file.line_ending"}));
+        assert_eq!(r["ok"], true, "{r}");
+        let (p, _, acts) = wb.status_menu.as_ref().expect("the drop-up");
+        assert!(p.rect().bottom() <= 35 && acts.len() == 2);
+        keys(&mut wb, &["Down", "Enter"]);
+        assert_eq!(wb.windows.last().unwrap().ed.doc.line_ending, turbine_text::encoding::LineEnding::CrLf);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -7236,7 +7423,8 @@ mod tests {
         assert!(lines[0].trim_end().ends_with("Help"), "Help at the right: {:?}", lines[0]);
         assert!(lines[1].starts_with("┌") && lines[1].contains(" Untitled ") && lines[1].contains("┤↑├"), "{:?}", lines[1]);
         assert!(lines[2].starts_with("│") && !lines[2].contains(" 1 "), "no line numbers: {:?}", lines[2]);
-        assert!(lines[24].contains("<F1=Help>") && lines[24].contains("│ 00001:001"), "{:?}", lines[24]);
+        // (VS Code's items in the status line, QBasic's │ between them.)
+        assert!(lines[24].contains("│ Ln 1, Col 1") && lines[24].contains("│ UTF-8"), "{:?}", lines[24]);
         assert!(text.contains('↓') && text.contains('→'), "arrow scroll bars");
         // The title is in reverse video (blue on grey).
         let x = lines[1].find(" Untitled ").map(|b| lines[1][..b].chars().count()).unwrap() as i32 + 1;
@@ -7259,8 +7447,8 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[1].contains("[1] Untitled") && lines[1].contains('▼') && lines[1].contains('▲'), "{:?}", lines[1]);
         assert_eq!(surf.get(3, 1).unwrap().style.bg, turbine_ui::theme::vga::MAGENTA);
-        // VB-DOS's editing status line: <key=what> hints, then │ 00001:001.
-        assert!(lines[24].starts_with(" <F1=Help>") && lines[24].contains("│ 00001:001"), "{:?}", lines[24]);
+        // The status line: VS Code's items.
+        assert!(lines[24].contains("Ln 1, Col 1") && lines[24].contains("Plain Text"), "{:?}", lines[24]);
         // The control box at the left of the title bar; no black edge column.
         assert_eq!(lines[1].chars().next(), Some('■'));
         assert_eq!(surf.get(0, 5).unwrap().style.bg, turbine_ui::theme::vga::BLUE);

@@ -455,7 +455,10 @@ impl Workbench {
         eds.sort_by_key(|e| e.0);
         let items = eds.iter().map(|(_, n)| (n.clone(), String::new())).collect();
         let mut popup = turbine_ui::popup::ListPopup::new(items);
-        let at = Point::new((r.x - 24).max(0), r.y + 1);
+        // (Right under the ▼ button, their right edges in line.)
+        popup.place(Point::new(r.x, r.y), self.screen());
+        let w = popup.rect().w;
+        let at = Point::new((r.right() - w + 1).max(0), r.y);
         popup.place(at, self.screen());
         self.shell.tab_menu = Some((popup, eds.into_iter().map(|e| e.0).collect(), at));
     }

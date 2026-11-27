@@ -355,7 +355,21 @@ void CellView::applyWindowOp()
     QQuickWindow* w = window();
     if (!w) return;
     const bool own = turbine::app_own_title_bar();
-    if (own != w->flags().testFlag(Qt::FramelessWindowHint)) w->setFlag(Qt::FramelessWindowHint, own);
+    if (own != w->flags().testFlag(Qt::FramelessWindowHint)) {
+        // (The desktop's frame only goes or comes back when the window is
+        // shown again: decorations are settled when it's mapped.)
+        const bool shown = w->isVisible();
+        const auto vis = w->visibility();
+        const QRect geo = w->geometry();
+        if (shown) w->hide();
+        w->setFlag(Qt::FramelessWindowHint, own);
+        if (shown) {
+            w->setGeometry(geo);
+            if (vis == QWindow::Maximized) w->showMaximized();
+            else if (vis == QWindow::FullScreen) w->showFullScreen();
+            else w->show();
+        }
+    }
     switch (turbine::app_window_op()) {
     case 1: w->showMinimized(); break;
     case 2: if (w->visibility() == QWindow::Maximized) w->showNormal(); else w->showMaximized(); break;

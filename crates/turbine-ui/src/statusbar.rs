@@ -29,6 +29,12 @@ pub struct StatusBar {
     pub dos: bool,
     /// VB-DOS form: `F1=Help │ F2=Save │ …`.
     pub rules: bool,
+    /// The bar's width (for hits).
+    pub width_hint: i32,
+    /// VS Code's status items instead of the key hints: (text, command,
+    /// tooltip) at the left (branch, problems) and right (position, file).
+    pub left: Vec<(String, String, String)>,
+    pub right: Vec<(String, String, String)>,
 }
 
 impl StatusBar {
@@ -45,7 +51,31 @@ impl StatusBar {
             .collect()
     }
 
+    /// Where VS Code's items are: (place, command, tooltip, text).
+    pub fn segment_rects(&self, r: Rect) -> Vec<(Rect, String, String, String)> {
+        let mut out = Vec::new();
+        if self.message.is_none() {
+            let mut x = r.x + 1;
+            for (t, c, tip) in &self.left {
+                let w = str_width(t) as i32 + 2;
+                out.push((Rect::new(x, r.y, w, 1), c.clone(), tip.clone(), t.clone()));
+                x += w + 1;
+            }
+        }
+        let mut x = r.right() - 1;
+        for (t, c, tip) in self.right.iter().rev() {
+            let w = str_width(t) as i32 + 2;
+            x -= w;
+            out.push((Rect::new(x, r.y, w, 1), c.clone(), tip.clone(), t.clone()));
+            x -= 1;
+        }
+        out
+    }
+
     pub fn hit(&self, p: Point, y: i32) -> Option<String> {
+        if !self.left.is_empty() || !self.right.is_empty() {
+            return self.segment_rects(Rect::new(0, y, 10_000.min(self.width_hint), 1)).into_iter().find(|s| s.0.contains(p) && !s.1.is_empty()).map(|s| s.1);
+        }
         if self.message.is_some() {
             return None;
         }
@@ -55,6 +85,24 @@ impl StatusBar {
     pub fn draw(&self, c: &mut Canvas, theme: &Theme, r: Rect) {
         let s = &theme.scheme;
         c.fill(r, " ", s.status);
+        // VS Code's items: a message (or the branch and problems) at the
+        // left, the file's at the right, a │ between them in DOS styles.
+        if !self.left.is_empty() || !self.right.is_empty() {
+            if let Some(m) = &self.message {
+                let right_w: i32 = self.right.iter().map(|x| str_width(&x.0) as i32 + 3).sum();
+                c.sub(Rect::new(r.x, r.y, (r.w - right_w - 1).max(0), 1)).print(r.x + 1, r.y, m, s.status);
+            }
+            let segs = self.segment_rects(r);
+            let n_left = if self.message.is_none() { self.left.len() } else { 0 };
+            for (i, (sr, _, _, t)) in segs.iter().enumerate() {
+                c.print(sr.x + 1, sr.y, t, s.status);
+                // (A │ before each item at the right, as QBasic draws its one.)
+                if self.dos && i >= n_left {
+                    c.print(sr.x - 1, sr.y, "│", s.status.fg(crate::theme::vga::BLACK));
+                }
+            }
+            return;
+        }
         let w = str_width(&self.info) as i32 + if self.dos { 2 } else { 0 };
         let left = Rect::new(r.x, r.y, (r.w - w - 2).max(0), 1);
         let mut lc = c.sub(left);
