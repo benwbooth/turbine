@@ -12,6 +12,22 @@ pub fn server_for(lang: &str) -> Option<Vec<String>> {
     candidates(lang).iter().find(|c| on_path(c[0])).map(|c| c.iter().map(|s| s.to_string()).collect())
 }
 
+/// Which server to run in a project: the first one on its PATH (direnv's,
+/// else the process's); none installed, its nixpkgs package through
+/// `nix shell` when there's nix (nothing installed for it). The bool:
+/// it comes from nixpkgs (its first start downloads it).
+pub fn server_in(lang: &str, env: &HashMap<String, String>) -> Option<(Vec<String>, bool)> {
+    if let Some(c) = candidates(lang).iter().find(|c| crate::env::find_program(c[0], env).is_some()) {
+        return Some((c.iter().map(|s| s.to_string()).collect(), false));
+    }
+    if crate::env::has_nix() {
+        let (_, pkg, _) = install_table(lang)?;
+        let argv: Vec<String> = candidates(lang).first()?.iter().map(|s| s.to_string()).collect();
+        return Some((crate::env::nix_shell(pkg, &argv), true));
+    }
+    None
+}
+
 /// The language servers Turbine knows for a language (their programs).
 pub fn server_names(lang: &str) -> Vec<&'static str> {
     candidates(lang).iter().map(|c| c[0]).collect()
@@ -102,8 +118,20 @@ fn candidates(lang: &str) -> &'static [&'static [&'static str]] {
 /// How to install a language's server: (server, shell command). With Nix
 /// on the PATH it's a `nix profile install`, else the server's own way.
 pub fn install_command(lang: &str) -> Option<(&'static str, String)> {
-    // (server, nixpkgs attribute, the other way)
-    let (server, nixpkg, other): (&str, &str, &str) = match lang {
+    let (server, nixpkg, other) = install_table(lang)?;
+    let has_nix = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("nix").is_file()));
+    if has_nix {
+        Some((server, format!("nix profile install nixpkgs#{nixpkg}")))
+    } else if !other.is_empty() {
+        Some((server, other.to_string()))
+    } else {
+        None
+    }
+}
+
+/// (server, nixpkgs attribute, the other way to install it).
+fn install_table(lang: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    Some(match lang {
         "bash" => ("bash-language-server", "bash-language-server", "npm install -g bash-language-server"),
         "python" => ("basedpyright", "basedpyright", "pip install --user basedpyright"),
         "javascript" | "typescript" | "tsx" => ("typescript-language-server", "typescript-language-server", "npm install -g typescript-language-server typescript"),
@@ -157,15 +185,7 @@ pub fn install_command(lang: &str) -> Option<(&'static str, String)> {
         "ada" => ("ada_language_server", "ada-language-server", ""),
         "just" => ("just-lsp", "just-lsp", "cargo install just-lsp"),
         _ => return None,
-    };
-    let has_nix = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("nix").is_file()));
-    if has_nix {
-        Some((server, format!("nix profile install nixpkgs#{nixpkg}")))
-    } else if !other.is_empty() {
-        Some((server, other.to_string()))
-    } else {
-        None
-    }
+    })
 }
 
 /// The LSP language id for one of Turbine's language names.
@@ -403,6 +423,11 @@ pub struct LspClient {
 impl LspClient {
     pub fn start(argv: &[String], root: &Path, lang: &str) -> std::io::Result<LspClient> {
         Ok(Self::with_rpc(RpcProcess::spawn(argv, Some(root))?, root, lang))
+    }
+
+    /// Started in the project's environment (direnv's variables).
+    pub fn start_env(argv: &[String], root: &Path, lang: &str, env: &HashMap<String, String>) -> std::io::Result<LspClient> {
+        Ok(Self::with_rpc(RpcProcess::spawn_env(argv, Some(root), env)?, root, lang))
     }
 
     /// A client over an already connected server.

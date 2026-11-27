@@ -462,7 +462,13 @@ impl Running {
 /// lines.
 pub fn spawn(command: &str, cwd: &Path) -> Running {
     let (tx, rx) = channel();
+    // (In the project's environment: direnv's, when it has an .envrc.)
+    let env = match crate::env::project_env(cwd) {
+        crate::env::Env::Ready(e) => e,
+        crate::env::Env::Loading => Default::default(),
+    };
     let child = Command::new("sh")
+        .envs(&env)
         .arg("-c")
         .arg(command)
         .current_dir(cwd)

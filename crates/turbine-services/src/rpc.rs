@@ -71,7 +71,13 @@ pub fn write_message(w: &mut impl Write, v: &Value) -> std::io::Result<()> {
 
 impl RpcProcess {
     pub fn spawn(argv: &[String], cwd: Option<&Path>) -> std::io::Result<RpcProcess> {
+        Self::spawn_env(argv, cwd, &std::collections::HashMap::new())
+    }
+
+    /// With the project's environment (direnv's) over the process's own.
+    pub fn spawn_env(argv: &[String], cwd: Option<&Path>, env: &std::collections::HashMap<String, String>) -> std::io::Result<RpcProcess> {
         let mut cmd = Command::new(&argv[0]);
+        cmd.envs(env);
         cmd.args(&argv[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(d) = cwd {
             cmd.current_dir(d);

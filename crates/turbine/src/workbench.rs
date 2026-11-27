@@ -137,7 +137,16 @@ fn default_lsp_spawner() -> LspSpawner {
             }
             Ok(v) if matches!(v.trim(), "none" | "off" | "0") => return None,
             Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),
-            _ => lsp::server_for(lang)?,
+            // In the project's environment (direnv's), from its PATH, else
+            // from nixpkgs with `nix shell` (nothing to install).
+            _ => {
+                let env = match turbine_services::env::project_env(root) {
+                    turbine_services::env::Env::Ready(e) => e,
+                    turbine_services::env::Env::Loading => Default::default(),
+                };
+                let (argv, _from_nix) = lsp::server_in(lang, &env)?;
+                return Some(LspClient::start_env(&argv, root, lang, &env));
+            }
         };
         Some(LspClient::start(&argv, root, lang))
     })
@@ -303,6 +312,8 @@ pub struct Workbench {
     /// What the front end's window should do (its own title bar's buttons):
     /// 1 minimize, 2 maximize or restore, 3 close, 4 start a move.
     window_op: i32,
+    /// Projects whose environment note was shown (loading, blocked).
+    env_note: HashSet<PathBuf>,
     /// A status item's drop-up: its list, where, and each choice's action
     /// ("lang:rust", "enc:3", "eol:CRLF").
     status_menu: Option<(ListPopup, Point, Vec<String>)>,
@@ -679,6 +690,7 @@ impl Workbench {
             docviews: HashMap::new(),
             ed_menu: None,
             window_op: 0,
+            env_note: HashSet::new(),
             status_menu: None,
             outer: (80, 25),
             last_input: None,
@@ -1884,6 +1896,19 @@ impl Workbench {
             let (Some(path), Some(lang)) = (w.ed.doc.path.clone(), w.lang.clone()) else { continue };
             let key: LspKey = (lang.clone(), lsp::project_root(&path));
             if !self.lsp.contains_key(&key) && !self.lsp_missing.contains(&lang) {
+                // (The project's direnv environment first: still loading,
+                // the server waits for it.)
+                if matches!(turbine_services::env::project_env(&key.1), turbine_services::env::Env::Loading) {
+                    if self.env_note.insert(key.1.clone()) {
+                        started.push(format!("Loading {}'s environment (direnv)…", key.1.display()));
+                    }
+                    continue;
+                }
+                if let Some(e) = turbine_services::env::project_env_error(&key.1) {
+                    if self.env_note.insert(key.1.join(".blocked")) {
+                        started.push(e);
+                    }
+                }
                 match (self.lsp_spawn)(&lang, &key.1) {
                     None => {
                         self.lsp_missing.insert(lang.clone());
@@ -1893,7 +1918,8 @@ impl Workbench {
                         started.push(format!("Language server for {lang} didn't start: {e}"));
                     }
                     Some(Ok(c)) => {
-                        started.push(format!("Started {} for {}", c.name(), key.1.display()));
+                        let from_nix = if c.name() == "nix" { " from nixpkgs (the first time downloads it)" } else { "" };
+                        started.push(format!("Started {}{from_nix} for {}", c.name(), key.1.display()));
                         self.lsp.insert(key.clone(), c);
                     }
                 }
@@ -2311,7 +2337,13 @@ impl Workbench {
         win.min_h = 4;
         self.next_id += 1;
         let env = self.socket_path.iter().map(|p| ("TURBINE_SOCKET".to_string(), p.display().to_string())).collect();
-        let view = TerminalView::new(Spawn { argv, env, ..Default::default() });
+        // (In the project's folder and its direnv environment, when ready.)
+        let root = self.shell.explorer.root.clone();
+        let mut env: Vec<(String, String)> = env;
+        if let turbine_services::env::Env::Ready(e) = turbine_services::env::project_env(&root) {
+            env.extend(e);
+        }
+        let view = TerminalView::new(Spawn { argv, env, cwd: Some(root) });
         if let Some(e) = view.error() {
             self.say(format!("Terminal: {e}"));
         }
