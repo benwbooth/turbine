@@ -16,3 +16,4 @@ pub mod tools;
 pub mod views;
 pub mod vim;
 pub mod workbench;
+pub mod xtree;

@@ -100,6 +100,56 @@ impl Workbench {
         }
     }
 
+    /// Tools > File Manager: XTree's screen in a window of its own, at the
+    /// project (or the front file's folder).
+    pub(super) fn open_file_manager(&mut self) {
+        if let Some(id) = self.xtrees.keys().next().copied() {
+            if let Some(i) = self.windows.iter().position(|w| w.win.id == id) {
+                let w = self.windows.remove(i);
+                self.windows.push(w);
+                self.renumber();
+                return;
+            }
+        }
+        let root = self.shell.explorer.root.clone();
+        self.show_plain("File Manager", "");
+        let w = self.windows.last_mut().unwrap();
+        w.win.title = "File Manager".into();
+        w.special = Some("xtree");
+        w.ed.help_look = false;
+        let id = w.win.id;
+        self.xtrees.insert(id, crate::xtree::XTree::new(&root));
+    }
+
+    /// What the file manager asked for.
+    pub(super) fn xtree_out(&mut self, id: u32, out: crate::xtree::Out) {
+        use crate::xtree::Out;
+        match out {
+            Out::None => {}
+            Out::Close => {
+                self.xtrees.remove(&id);
+                if let Some(i) = self.windows.iter().position(|w| w.win.id == id) {
+                    self.windows.remove(i);
+                    self.renumber();
+                }
+            }
+            Out::Edit(p) | Out::View(p) => self.goto_file(&p, None, 0),
+            Out::Open(p) => {
+                if let Err(e) = crate::filekind::open_outside(&p) {
+                    self.say(format!("Can't open {}: {e}", p.display()));
+                }
+            }
+            Out::Execute(p) => {
+                let (dir, cmd) = if p.is_dir() { (p.clone(), String::new()) } else { (p.parent().map(Path::to_path_buf).unwrap_or_default(), format!("{}\n", turbine_services::build::sh_quote(&p.display().to_string()))) };
+                self.new_terminal(Vec::new());
+                if let Some(t) = self.windows.last_mut().and_then(|w| w.term.as_mut()) {
+                    t.paste(&format!("cd {}\n{cmd}", turbine_services::build::sh_quote(&dir.display().to_string())));
+                }
+            }
+            Out::Say(m) => self.say(m),
+        }
+    }
+
     pub(super) fn extras_command(&mut self, cmd: &str) -> bool {
         match cmd {
             "file.recent" => {

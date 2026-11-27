@@ -238,6 +238,8 @@ pub struct Workbench {
     preview: preview::PreviewState,
     git: git::GitState,
     extras: extras::Extras,
+    /// File managers (XTree's look), by window.
+    xtrees: HashMap<u32, crate::xtree::XTree>,
     lsp_spawn: LspSpawner,
     lsp_requests: HashMap<(LspKey, i64), (LspReq, u32)>,
     completion: Option<Completion>,
@@ -301,6 +303,7 @@ fn menus() -> Vec<Menu> {
                 it("~R~epaint Desktop", "", "app.repaint"),
                 it("Show ~C~lipboard", "", "edit.show_clipboard"),
                 it("~C~alculator", "", "tools.calculator"),
+                it("~F~ile Manager", "Ctrl+Alt+F", "tools.file_manager"),
             ],
         ),
         Menu::new(
@@ -600,6 +603,7 @@ impl Workbench {
             preview: Default::default(),
             git: Default::default(),
             extras: Default::default(),
+            xtrees: HashMap::new(),
             lsp_spawn: default_lsp_spawner(),
             lsp_requests: HashMap::new(),
             completion: None,
@@ -2332,6 +2336,7 @@ impl Workbench {
             }
             c if c.starts_with("git.") => self.git_command(c),
             c if self.extras_command(c) => {}
+            "tools.file_manager" => self.open_file_manager(),
             "run.watch" => self.add_watch_dialog(),
             "edit.comment" | "selection.expand" | "selection.shrink" | "selection.copy_up" | "selection.copy_down" | "selection.move_up" | "selection.move_down" | "go.bracket"
             | "go.next_def" | "go.prev_def" | "view.fold" | "view.unfold" | "view.fold_all" | "view.unfold_all" | "selection.cursor_above" | "selection.cursor_below"
@@ -3231,6 +3236,14 @@ impl Workbench {
         let reserved = k.is(Key::F(10), Mods::NONE)
             || k.is(Key::F(3), Mods::ALT)
             || (k.mods.alt && !k.mods.ctrl && matches!(k.key, Key::Char('0'..='9')));
+        // A file manager takes every key but the menus' and windows'.
+        if !self.menubar.is_open() && !reserved && !k.mods.alt {
+            if let Some(id) = self.windows.last().map(|w| w.win.id).filter(|id| self.xtrees.contains_key(id)) {
+                let out = self.xtrees.get_mut(&id).unwrap().key(&k);
+                self.xtree_out(id, out);
+                return;
+            }
+        }
         if !self.menubar.is_open() && !reserved && self.windows.last().is_some_and(EdWin::is_terminal) {
             let from_agent = self.from_agent;
             let w = self.windows.last_mut().unwrap();
@@ -3289,6 +3302,8 @@ impl Workbench {
             Some("edit.quick_fix")
         } else if k.is_alt('z') {
             Some("view.wrap")
+        } else if k.mods.ctrl && k.mods.alt && !k.mods.shift && matches!(k.key, Key::Char('f' | 'F')) {
+            Some("tools.file_manager")
         } else if k.is(Key::Left, Mods::ALT) && self.windows.last().is_some_and(|w| w.term.is_none()) {
             Some("go.back")
         } else if k.is(Key::Right, Mods::ALT) && self.windows.last().is_some_and(|w| w.term.is_none()) {
@@ -3663,6 +3678,19 @@ impl Workbench {
             MenuResult::Command(c) => return self.run_command(&c),
             MenuResult::Consumed => return,
             MenuResult::Ignored => {}
+        }
+        // A file manager under the pointer.
+        if let Some(id) = self.windows.iter().rev().find(|w| self.xtrees.contains_key(&w.win.id) && w.win.rect.contains(m.pos)).map(|w| w.win.id) {
+            if matches!(m.kind, MouseKind::Down(_)) && self.windows.last().is_some_and(|w| w.win.id != id) {
+                if let Some(i) = self.windows.iter().position(|w| w.win.id == id) {
+                    let w = self.windows.remove(i);
+                    self.windows.push(w);
+                    self.renumber();
+                }
+            }
+            let out = self.xtrees.get_mut(&id).unwrap().mouse(&m);
+            self.xtree_out(id, out);
+            return;
         }
         if let Some(i) = self.scroll_drag {
             match m.kind {
@@ -4152,6 +4180,12 @@ impl App for Workbench {
         self.preview_tick(now);
         self.git_tick();
         self.preview_tab_tick();
+        // (Closed file managers' state goes; the rest take their answers.)
+        let ids: HashSet<u32> = self.windows.iter().map(|w| w.win.id).collect();
+        self.xtrees.retain(|id, _| ids.contains(id));
+        for x in self.xtrees.values_mut() {
+            x.poll();
+        }
         self.update_debug();
         self.update_guides();
         self.update_ai(now);
@@ -4260,6 +4294,11 @@ impl App for Workbench {
                 w.win.draw_frame(&mut wc, &theme, active);
             }
             let inner = w.win.inner();
+            // A file manager: XTree's screen over the whole window.
+            if let Some(x) = self.xtrees.get_mut(&w.win.id) {
+                x.draw(&mut wc, w.win.rect, active && !has_modal);
+                continue;
+            }
             if let Some(t) = &mut w.term {
                 t.draw(&mut wc, inner, &theme, active && !has_modal);
                 // (The scrollback's bar, once there is any.)
