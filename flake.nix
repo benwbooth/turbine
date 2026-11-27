@@ -93,6 +93,44 @@
               mainProgram = "turbine";
             };
           };
+          # The desktop app (Qt Quick, cxx-qt): native fonts, the global menu.
+          turbine-app =
+            let qtEnv = qtEnvFor pkgs; in
+            pkgs.rustPlatform.buildRustPackage {
+              pname = "turbine-app";
+              version = "0.1.0";
+              src = pkgs.lib.cleanSource ./.;
+              inherit cargoDeps;
+              nativeBuildInputs = [ pkgs.rsync pkgs.zig_0_15 pkgs.pkg-config pkgs.qt6.wrapQtAppsHook qtEnv ];
+              buildInputs = (qtFor pkgs) ++ [ pkgs.libGL qtEnv ];
+              # (Qt's setup hook sets QMAKE to qtbase's alone: the merged tree's.)
+              preBuild = "export QMAKE=${qtEnv}/bin/qmake";
+              buildPhase = persistentCargo "turbine-app" "--release -p turbine-app";
+              installPhase = ''
+                runHook preInstall
+                install -Dm755 target/release/turbine-app $out/bin/turbine-app
+                mkdir -p $out/share/applications
+                cat > $out/share/applications/turbine.desktop <<DESKTOP
+                [Desktop Entry]
+                Type=Application
+                Name=Turbine
+                GenericName=Code Editor
+                Comment=A retro DOS-style, AI-first code editor and IDE
+                Exec=turbine-app %F
+                Icon=accessories-text-editor
+                Categories=Development;IDE;TextEditor;
+                MimeType=text/plain;
+                StartupWMClass=turbine
+                DESKTOP
+                runHook postInstall
+              '';
+              doCheck = false;
+              meta = {
+                description = "Turbine's desktop app (Qt Quick)";
+                license = pkgs.lib.licenses.mit;
+                mainProgram = "turbine-app";
+              };
+            };
           default = turbine;
         });
 

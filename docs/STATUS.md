@@ -53,7 +53,8 @@
 | Help windows (read-only, Markdown highlighting): F1 guide for the file's language, Shift+F1 index, Download All Guides | done |
 | QBasic-style rendered help with links (<Contents> <Index> <Back>), search across guides | planned |
 | File viewers (hex, images, tables, archives, PDF) | planned |
-| Desktop app: cxx-qt Qt Quick, QPainter cell rows, native menus (global menu via Qt's dbusmenu) | planned |
+| Desktop app (turbine-app): cxx-qt Qt Quick; QPainter paints the cell grid in the desktop's monospace font (TURBINE_FONT), box/block characters as shapes; keys, mouse, wheel, clipboard; menus in the global menu bar (GlobalMenuBar from Tessera); Nix package with a .desktop file | done (offscreen-tested; not yet tried on the real desktop) |
+| App: row textures instead of a full repaint, a pixel VGA font option, smooth scrolling, images in cells, window state restore | planned |
 | Web front end: Leptos (wasm, no hand-written JS) and `turbine serve` (Leptos server) | planned |
 | Windows 9x (rust9x) TUI build; DOS / Win 3.1 thin clients | planned |
 | Settings file + Settings dialog | planned |

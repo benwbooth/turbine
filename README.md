@@ -122,9 +122,8 @@ comes back once the action has finished on screen.
 - The automation socket, plus `--headless --script` for tests and screenshots
 
 The plan covers much more:
-WASI extensions, Emacs and VS Code keymaps, inline AI edits, a global menu, desktop and web front
-ends (a cxx-qt Qt app and a Leptos web app, no JavaScript), and retro
-platforms. See [docs/DESIGN.md](docs/DESIGN.md) and
+WASI extensions, Emacs and VS Code keymaps, inline AI edits, a web front
+end (a Leptos web app, no JavaScript), and retro platforms. See [docs/DESIGN.md](docs/DESIGN.md) and
 [docs/STATUS.md](docs/STATUS.md).
 
 ## Build
@@ -140,6 +139,13 @@ Without Nix, put Zig 0.15 and git on your PATH and use plain `cargo`.
 
 ```bash
 nix run github:benwbooth/turbine
+```
+
+The desktop app (Qt Quick: your own monospace font, or `TURBINE_FONT="Name
+12"`; its menus also appear in the desktop's global menu bar):
+
+```bash
+nix run github:benwbooth/turbine#turbine-app
 ```
 
 ## License
