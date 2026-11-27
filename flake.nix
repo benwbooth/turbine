@@ -65,6 +65,20 @@
               rsync -rc --no-times --no-perms --chmod=a+rwX --delete ./ "$workDir/src/"
               export NIX_ENFORCE_PURITY=0
               cd "$workDir/src"
+              # cxx-qt copies its QML exports with fs::copy, which also
+              # chmods the destination: that fails on a file left by another
+              # nixbld user. The exports are regenerated every build anyway.
+              rm -rf "$workDir/target/cxxqt"
+              # Build scripts that copy files out of the store (fs::copy keeps
+              # the mode, and chmods): any build-script run whose out/ holds a
+              # file this user can't write goes, fingerprint
+              # included, so cargo reruns it.
+              for d in "$workDir"/target/release/build/*; do
+                [ -d "$d/out" ] || continue
+                if [ -n "$(find "$d/out" -type f ! -writable -print -quit 2>/dev/null)" ]; then
+                  rm -rf "$d" "$workDir/target/release/.fingerprint/$(basename "$d")"
+                fi
+              done
               CARGO_HOME="$NIX_BUILD_TOP/.cargo" CARGO_TARGET_DIR="$workDir/target" \
                 cargo build ${cargoArgs} --offline --locked -j "$NIX_BUILD_CORES"
               find "$workDir/target" -mindepth 1 -user "$(id -u)" ! -perm -o+w -exec chmod a+rwX {} + 2>/dev/null || true
