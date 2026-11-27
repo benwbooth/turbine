@@ -4,7 +4,7 @@ use crate::event::{Button, Key, KeyEvent, KeyKind, MouseEvent, MouseKind};
 use crate::frame::{draw_hscroll, draw_vscroll};
 use crate::geom::{Point, Rect};
 use crate::surface::{Canvas, CursorShape};
-use crate::theme::Theme;
+use crate::theme::{Style, Theme};
 use turbine_text::Document;
 use turbine_text::unicode::{grapheme_boundaries, grapheme_width, visual_line};
 
@@ -89,6 +89,10 @@ pub struct EditorView {
     /// Lines (0-based) with breakpoints, and where the debugger stopped.
     pub breakpoints: Vec<usize>,
     pub exec_line: Option<usize>,
+    /// Lines with a background of their own (a diff's): 1 added, 2
+    /// removed, 3 a hunk's header; and per line the byte ranges changed.
+    pub line_bg: Vec<u8>,
+    pub words: Vec<Vec<(u32, u32)>>,
     /// Extra selected char ranges (vim's visual block).
     pub block: Vec<(usize, usize)>,
     /// Inlay hints from the language server, per line: (byte, text), shown
@@ -148,6 +152,8 @@ impl EditorView {
             diagnostics: Vec::new(),
             breakpoints: Vec::new(),
             exec_line: None,
+            line_bg: Vec::new(),
+            words: Vec::new(),
             block: Vec::new(),
             found: Vec::new(),
             found_current: None,
@@ -740,8 +746,14 @@ impl EditorView {
             } else if self.breakpoints.contains(&li) {
                 Some(s.breakpoint)
             } else {
-                None
+                match self.line_bg.get(li) {
+                    Some(1) => Some(s.diff_add),
+                    Some(2) => Some(s.diff_del),
+                    Some(3) => Some(s.diff_hunk),
+                    _ => None,
+                }
             };
+            let diff_line = bar.is_some() && self.exec_line != Some(li) && !self.breakpoints.contains(&li);
             if let Some(b) = bar {
                 c.fill(Rect::new(text_x, y, area.w - gw, 1), " ", b);
             }
@@ -765,8 +777,11 @@ impl EditorView {
                     s.editor_selection
                 } else if let Some(cur) = found {
                     if cur { s.find_current } else { s.find_match }
-                } else if let Some(b) = bar {
+                } else if let Some(b) = bar.filter(|_| !diff_line) {
                     b
+                } else if diff_line && self.words.get(li).is_some_and(|w| w.iter().any(|(a, b)| (*a as usize) <= p.offset && p.offset < *b as usize)) {
+                    // (A diff's changed words stand out.)
+                    if self.line_bg.get(li) == Some(&2) { s.diff_del_word } else { s.diff_add_word }
                 } else {
                     // (The language server's meaning first, then tree-sitter's.)
                     let find = |spans: Option<&Vec<(u32, u32, u8)>>| {
@@ -787,6 +802,11 @@ impl EditorView {
                         }
                         None => s.editor,
                     }
+                };
+                // (A diff's line: its colour behind the syntax colours.)
+                let st = match bar {
+                    Some(b) if diff_line && !selected && found.is_none() && st.bg == s.editor.bg => Style { bg: b.bg, fg: if st.fg == s.editor.fg { b.fg } else { st.fg }, ..st },
+                    _ => st,
                 };
                 let st = match self.diagnostics.iter().filter(|d| d.line == li).find(|d| {
                     p.offset >= d.start && (p.offset < d.end || (d.end <= d.start && p.offset == d.start))

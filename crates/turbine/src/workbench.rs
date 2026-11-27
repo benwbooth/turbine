@@ -16,6 +16,7 @@ mod explorer_ops;
 mod extensions;
 pub use extensions::extension_dirs;
 mod find;
+mod git;
 mod inline_ai;
 mod lsp_more;
 mod preview;
@@ -234,6 +235,7 @@ pub struct Workbench {
     dbx: debug_more::DebugExtra,
     build: build::BuildState,
     preview: preview::PreviewState,
+    git: git::GitState,
     lsp_spawn: LspSpawner,
     lsp_requests: HashMap<(LspKey, i64), (LspReq, u32)>,
     completion: Option<Completion>,
@@ -469,6 +471,25 @@ fn menus() -> Vec<Menu> {
             ],
         ),
         Menu::new(
+            "G~i~t",
+            vec![
+                it("Open ~C~hanges", "", "git.diff_file"),
+                it("~A~ll Changes", "", "git.diff_all"),
+                it("~S~taged Changes", "", "git.diff_staged"),
+                sep(),
+                it("~H~istory", "", "git.log"),
+                it("~F~ile History", "", "git.log_file"),
+                it("~W~ho Changed This Line", "", "git.blame"),
+                sep(),
+                it("Switch ~B~ranch...", "", "git.checkout"),
+                it("~P~ull", "", "git.pull"),
+                it("P~u~sh", "", "git.push"),
+                it("F~e~tch", "", "git.fetch"),
+                it("S~t~ash", "", "git.stash"),
+                it("P~o~p Stash", "", "git.stash_pop"),
+            ],
+        ),
+        Menu::new(
             "~A~I",
             vec![
                 it("~C~hat...", "Ctrl+L", "ai.chat"),
@@ -575,6 +596,7 @@ impl Workbench {
             dbx: Default::default(),
             build: Default::default(),
             preview: Default::default(),
+            git: Default::default(),
             lsp_spawn: default_lsp_spawner(),
             lsp_requests: HashMap::new(),
             completion: None,
@@ -1104,6 +1126,8 @@ impl Workbench {
         let w = self.windows.last_mut().unwrap();
         w.ed.doc = Document::from_str(md);
         w.ed.highlights.clear();
+        w.ed.line_bg.clear();
+        w.ed.words.clear();
         w.ed.cursor = 0;
         w.ed.scroll_y = 0;
         w.hl_sent = None;
@@ -2290,6 +2314,7 @@ impl Workbench {
             "go.definition" => self.lsp_request(LspReq::Definition),
             "build.make" | "build.all" | "build.compile" | "build.stop" | "terminal.task" | "terminal.build" | "run.without_debug" => self.build_command(cmd),
             "view.preview" => self.open_preview(),
+            c if c.starts_with("git.") => self.git_command(c),
             "run.watch" => self.add_watch_dialog(),
             "edit.comment" | "selection.expand" | "selection.shrink" | "selection.copy_up" | "selection.copy_down" | "selection.move_up" | "selection.move_down" | "go.bracket"
             | "go.next_def" | "go.prev_def" | "view.fold" | "view.unfold" | "view.fold_all" | "view.unfold_all" => {
@@ -2882,6 +2907,11 @@ impl Workbench {
             }
             return;
         }
+        if let Some(root) = kind.strip_prefix("checkout:") {
+            let root = root.to_string();
+            self.checkout_chosen(&d, &root);
+            return;
+        }
         if kind == "watch" {
             let e = d.value("expr").unwrap_or_default();
             self.add_watch(&e);
@@ -3314,6 +3344,10 @@ impl Workbench {
         }
         // Enter on a rendered page's link follows it.
         if k.key == Key::Enter && k.mods == Mods::NONE && self.windows.last().is_some_and(|w| matches!(w.special, Some("help" | "preview"))) && self.follow_link() {
+            return;
+        }
+        // A diff's or a history's keys (s, n, p, Enter).
+        if self.windows.last().is_some_and(|w| matches!(w.special, Some("help" | "preview"))) && self.page_key(&k) {
             return;
         }
         // Help, Debug and Output windows are read-only: only moving around.
@@ -4070,6 +4104,7 @@ impl App for Workbench {
         self.lsp_more_tick(now);
         self.build_tick();
         self.preview_tick(now);
+        self.git_tick();
         self.update_debug();
         self.update_guides();
         self.update_ai(now);
@@ -5513,6 +5548,51 @@ mod tests {
         keys(&mut wb, &["Ctrl+End"]);
         run(&mut wb, json!({"cmd": "type", "text": "- two\n"}));
         wait_until(&mut wb, "followed", |wb| text(wb).contains("• two"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_changes_history_and_patches_like_delta() {
+        let dir = std::env::temp_dir().join(format!("turbine-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = |c: &str| assert!(std::process::Command::new("sh").arg("-c").arg(c).current_dir(&dir).status().unwrap().success(), "{c}");
+        sh("git init -q && git config user.email t@t && git config user.name T");
+        std::fs::write(dir.join("m.py"), "def f():\n    return 1\n\nprint(f())\n").unwrap();
+        sh("git add . && git commit -qm 'First commit'");
+        std::fs::write(dir.join("m.py"), "def f():\n    return 2\n\nprint(f())\n").unwrap();
+        let mut wb = Workbench::new(&[dir.join("m.py")]);
+        wb.set_lsp_spawner(Box::new(|_, _| None));
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(120, 30));
+        wb.run_command("git.diff_file");
+        let page = |wb: &Workbench| wb.windows.last().unwrap().ed.doc.rope.to_string();
+        wait_until(&mut wb, "the diff", |wb| page(wb).contains("-    return 1"));
+        let w = wb.windows.last().unwrap();
+        let del = (0..w.ed.doc.len_lines()).find(|&l| w.ed.doc.line(l).ends_with("-    return 1")).unwrap();
+        assert_eq!((w.ed.line_bg[del], w.ed.line_bg[del + 1]), (2, 1));
+        // n goes to the change; Enter to the file at that line.
+        keys(&mut wb, &["Ctrl+Home", "n"]);
+        assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, del);
+        keys(&mut wb, &["Down", "Enter"]);
+        assert!(wb.windows.last().unwrap().ed.doc.path.as_ref().unwrap().ends_with("m.py"));
+        assert_eq!(wb.windows.last().unwrap().ed.cursor_line_col().0, 1);
+        // s: side by side.
+        wb.run_command("git.diff_all");
+        wait_until(&mut wb, "all changes", |wb| page(wb).contains("return 2"));
+        keys(&mut wb, &["s"]);
+        wait_until(&mut wb, "side by side", |wb| page(wb).lines().any(|l| l.contains("return 1") && l.contains("return 2")));
+        // History, then the commit.
+        wb.run_command("git.log");
+        wait_until(&mut wb, "history", |wb| page(wb).contains("First commit"));
+        keys(&mut wb, &["Ctrl+Home", "Enter"]);
+        wait_until(&mut wb, "the commit", |wb| page(wb).contains("+    return 1") && page(wb).starts_with("commit "));
+        // A patch file, rendered with Ctrl+Shift+V.
+        sh("git diff > change.patch");
+        wb.open_path(&dir.join("change.patch"));
+        wait_until(&mut wb, "diff language", |wb| wb.windows.last().unwrap().lang.as_deref() == Some("diff"));
+        keys(&mut wb, &["Ctrl+Shift+V"]);
+        wait_until(&mut wb, "the patch", |wb| wb.windows.last().unwrap().special == Some("preview") && wb.windows.last().unwrap().ed.line_bg.contains(&2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

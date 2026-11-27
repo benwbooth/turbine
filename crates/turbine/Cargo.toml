@@ -20,3 +20,4 @@ turbine-syntax.workspace = true
 turbine-ext.workspace = true
 turbine-services.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false }
+similar = "2"

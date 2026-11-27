@@ -24,6 +24,11 @@ pub struct Rendered {
     pub headings: Vec<(usize, u8, String)>,
     /// Anchors ("#some-heading" targets): (slug, line).
     pub anchors: Vec<(String, usize)>,
+    /// A diff's: each line's background (1 added, 2 removed, 3 hunk), the
+    /// words changed in it, and the place in its file each line stands for.
+    pub line_bg: Vec<u8>,
+    pub words: Vec<Vec<(u32, u32)>>,
+    pub places: Vec<Option<(std::path::PathBuf, usize)>>,
 }
 
 fn kind(name: &str) -> u8 {

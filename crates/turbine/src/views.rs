@@ -594,7 +594,7 @@ enum ScmMsg {
     Done(Result<String, String>),
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<String, String> {
+pub fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = std::process::Command::new("git").arg("-C").arg(root).args(args).output().map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())

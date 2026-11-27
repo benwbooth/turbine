@@ -1169,10 +1169,16 @@ impl Workbench {
                             let i = s.list.selected;
                             s.toggle_stage(&root, i);
                         }
+                        // o: the file itself (Enter shows its changes).
+                        Key::Char('o') => {
+                            if let Some(Some((_, p))) = s.entries.get(s.list.selected).cloned() {
+                                self.goto_file(&root.join(p), None, 0);
+                            }
+                        }
                         _ => {
                             if let ListOut::Activated(i) = s.list.key(k) {
-                                if let Some(Some((_, p))) = s.entries.get(i).cloned() {
-                                    self.goto_file(&root.join(p), None, 0);
+                                if let Some(Some((staged, p))) = s.entries.get(i).cloned() {
+                                    self.scm_diff(staged, &p);
                                 }
                             }
                         }
