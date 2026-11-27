@@ -138,9 +138,10 @@ impl Workbench {
                 }
             }
             "title_bar" => {
+                // (The window's layout again: a title row, or none.)
                 self.shell.own_title_bar = on;
-                let (w, h) = self.size;
-                self.dispatch(Event::Resize(w, h));
+                let (w, h) = self.outer;
+                <Self as turbine_ui::App>::event(self, Event::Resize(w, h));
             }
             "show_whitespace" => {
                 self.shell.show_whitespace = on;

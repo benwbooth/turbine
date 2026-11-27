@@ -303,6 +303,9 @@ pub struct Workbench {
     /// What the front end's window should do (its own title bar's buttons):
     /// 1 minimize, 2 maximize or restore, 3 close, 4 start a move.
     window_op: i32,
+    /// The whole window in cells (one row more than Turbine's own with its
+    /// own title bar).
+    outer: (i32, i32),
     /// The last key, click or move: for a moment after it, ticks come at
     /// screen rate, so what it started (a listing, colours, a preview)
     /// shows the moment it's ready.
@@ -673,6 +676,7 @@ impl Workbench {
             docviews: HashMap::new(),
             ed_menu: None,
             window_op: 0,
+            outer: (80, 25),
             last_input: None,
         };
         for f in files {
@@ -3291,8 +3295,7 @@ impl Workbench {
             Event::Resize(w, h) => {
                 let old = self.desktop();
                 self.size = (w, h);
-                // (Its own title bar's buttons take the row's right end.)
-                self.menubar.width = if self.shell.own_title_bar { w - 9 } else { w };
+                self.menubar.width = w;
                 let d = self.desktop();
                 // Windows keep their place and share of the desktop as it
                 // grows or shrinks (zoomed ones fill it).
@@ -3902,20 +3905,6 @@ impl Workbench {
             self.dialog_result(r);
             return;
         }
-        if self.shell.own_title_bar && !self.menubar.is_open() && m.pos.y == 0 && matches!(m.kind, MouseKind::Down(Button::Left)) {
-            if let Some(op) = self.title_buttons().into_iter().find(|b| b.0.contains(m.pos)).map(|b| b.1) {
-                self.window_op = op;
-                return;
-            }
-            // The free part of the bar: drag to move, double-click to maximize.
-            let on_menu = self.menubar.title_rects().iter().any(|r| r.w > 0 && r.contains(m.pos)) || self.layout_toggles().iter().any(|t| t.0.contains(m.pos));
-            if !on_menu {
-                let double = self.last_click.is_some_and(|(p, t)| p.y == 0 && (p.x - m.pos.x).abs() < 2 && t.elapsed() < Duration::from_millis(400));
-                self.last_click = Some((m.pos, Instant::now()));
-                self.window_op = if double { 2 } else { 4 };
-                return;
-            }
-        }
         if !self.menubar.is_open() && m.pos.y == 0 {
             if let Some(cmd) = self.layout_toggles().into_iter().find(|t| t.0.contains(m.pos)).map(|t| t.1) {
                 if matches!(m.kind, MouseKind::Down(Button::Left)) {
@@ -4115,9 +4104,6 @@ impl Workbench {
                 }
             }
             bar = bar.child(mn);
-        }
-        for (r, op, name, _) in self.title_buttons() {
-            bar = bar.child(Node::new(format!("window_button.{op}"), "button", name, r));
         }
         for (r, cmd, name, _, on) in self.layout_toggles() {
             bar = bar.child(Node::new(format!("layout.{cmd}"), "button", name, r).value(if on { "on" } else { "off" }));
@@ -4405,8 +4391,89 @@ impl Workbench {
     }
 }
 
-impl App for Workbench {
-    fn event(&mut self, ev: Event) {
+/// The window's layout: with its own title bar, a title row and under it
+/// the client area Turbine lays itself out in (its own coordinates start
+/// at the client area's corner); else the client area is all of it.
+impl Workbench {
+    /// The client area's place in the window (where Turbine's row 0 is).
+    pub fn client_area(&self) -> Rect {
+        let (w, h) = self.outer;
+        let top = i32::from(self.shell.own_title_bar);
+        Rect::new(0, top, w, (h - top).max(4))
+    }
+
+    /// The title row's place, when it has one.
+    pub fn title_row(&self) -> Option<Rect> {
+        self.shell.own_title_bar.then(|| Rect::new(0, 0, self.outer.0, 1))
+    }
+
+    /// An event in the window's terms: the title row's, or the client
+    /// area's (moved into its own coordinates).
+    fn frame_event(&mut self, ev: Event) {
+        let ev = match ev {
+            Event::Resize(w, h) => {
+                self.outer = (w, h);
+                let c = self.client_area();
+                Event::Resize(c.w, c.h)
+            }
+            Event::Mouse(m) if self.shell.own_title_bar => {
+                if self.title_row().is_some_and(|r| r.contains(m.pos)) {
+                    return self.title_mouse(m);
+                }
+                let c = self.client_area();
+                Event::Mouse(MouseEvent { pos: Point::new(m.pos.x - c.x, m.pos.y - c.y), ..m })
+            }
+            ev => ev,
+        };
+        self.event_inner(ev);
+    }
+}
+
+impl Workbench {
+    /// The title row's buttons: (place on the window, action, name, label).
+    pub(super) fn title_buttons(&self) -> Vec<(Rect, i32, &'static str, &'static str)> {
+        if !self.shell.own_title_bar {
+            return Vec::new();
+        }
+        let Some(r) = self.title_row() else { return Vec::new() };
+        let x = r.right() - 9;
+        vec![(Rect::new(x, 0, 3, 1), 1, "Minimize", "[_]"), (Rect::new(x + 3, 0, 3, 1), 2, "Maximize or Restore", "[□]"), (Rect::new(x + 6, 0, 3, 1), 3, "Close", "[×]")]
+    }
+
+    /// The mouse on the title row: its buttons; elsewhere a drag moves the
+    /// window and a double-click maximizes it.
+    fn title_mouse(&mut self, m: MouseEvent) {
+        if !matches!(m.kind, MouseKind::Down(Button::Left)) {
+            return;
+        }
+        if let Some(op) = self.title_buttons().into_iter().find(|b| b.0.contains(m.pos)).map(|b| b.1) {
+            self.window_op = op;
+            return;
+        }
+        let double = self.last_click.is_some_and(|(p, t)| p.y == -1 && (p.x - m.pos.x).abs() < 2 && t.elapsed() < Duration::from_millis(400));
+        self.last_click = Some((Point::new(m.pos.x, -1), Instant::now()));
+        self.window_op = if double { 2 } else { 4 };
+    }
+
+    /// Draw the title row: the title in the middle, the buttons at the right.
+    fn draw_title_row(&self, surf: &mut Surface) {
+        let mut c = surf.canvas();
+        let w = self.outer.0;
+        let st = self.theme.scheme.title_active;
+        c.fill(Rect::new(0, 0, w, 1), " ", st);
+        let t = self.title();
+        let t = if t.is_empty() { "Turbine".to_string() } else { format!("{t} - Turbine") };
+        let room = (w - 22).max(0) as usize;
+        let shown: String = if str_width(&t) > room { t.chars().take(room.saturating_sub(1)).chain(std::iter::once('…')).collect() } else { t };
+        c.print((w - str_width(&shown) as i32) / 2, 0, &shown, st);
+        for (r, _, _, label) in self.title_buttons() {
+            c.print(r.x, 0, label, self.theme.scheme.frame_icons);
+        }
+    }
+}
+
+impl Workbench {
+    fn event_inner(&mut self, ev: Event) {
         self.last_input = Some(Instant::now());
         // (The mouse leaving the window: only the tooltip cares.)
         if matches!(&ev, Event::Mouse(m) if m.pos.x < 0 || m.pos.y < 0) {
@@ -4418,6 +4485,13 @@ impl App for Workbench {
             return; // keys go to the agent controls while it drives
         }
         self.dispatch(ev);
+    }
+
+}
+
+impl App for Workbench {
+    fn event(&mut self, ev: Event) {
+        self.frame_event(ev);
     }
 
     fn tick(&mut self, now: Instant) -> Option<Instant> {
@@ -4517,6 +4591,42 @@ impl App for Workbench {
     }
 
     fn render(&mut self, surf: &mut Surface) {
+        // The window's layout: the client area drawn where it goes, the
+        // title row above it.
+        // (No title row: Turbine is the whole window, as it always was.)
+        if !self.shell.own_title_bar {
+            return self.render_client(surf);
+        }
+        self.outer = (surf.w, surf.h);
+        let c = self.client_area();
+        if (c.w, c.h) != self.size {
+            self.dispatch(Event::Resize(c.w, c.h));
+        }
+        let mut client = Surface::new(c.w, c.h);
+        client.cursor_blink = surf.cursor_blink;
+        self.render_client(&mut client);
+        for y in 0..c.h.min(surf.h - c.y) {
+            for x in 0..c.w.min(surf.w - c.x) {
+                surf.cells[((y + c.y) * surf.w + x + c.x) as usize] = client.cells[(y * c.w + x) as usize].clone();
+            }
+        }
+        surf.cursor = client.cursor.map(|(p, sh)| (Point::new(p.x + c.x, p.y + c.y), sh));
+        surf.cursor_blink = client.cursor_blink;
+        surf.images = client.images.into_iter().map(|(r, p)| (Rect::new(r.x + c.x, r.y + c.y, r.w, r.h), p)).collect();
+        self.draw_title_row(surf);
+    }
+
+    fn should_quit(&self) -> bool {
+        self.quit
+    }
+
+    fn take_clipboard(&mut self) -> Option<String> {
+        self.clipboard_out.take()
+    }
+}
+
+impl Workbench {
+    fn render_client(&mut self, surf: &mut Surface) {
         // The cursor setting: editors insert with it; fields and dialogs use
         // it too (vim's normal mode keeps its block).
         let shape = match self.shell.cursor_style.as_str() {
@@ -4727,25 +4837,6 @@ impl App for Workbench {
             }
         }
         self.menubar.draw(&mut c, &theme, screen);
-        // Its own title bar: the title in the menu bar's free middle, and
-        // the window's buttons at its right end.
-        if self.shell.own_title_bar {
-            let base = theme.scheme.menu;
-            for (r, _, _, label) in self.title_buttons() {
-                c.print(r.x, r.y, label, base);
-            }
-            let titles = self.menubar.title_rects();
-            let left = titles.iter().filter(|r| r.w > 0 && r.x < self.size.0 / 2).map(|r| r.right()).max().unwrap_or(0) + 2;
-            let right = self.layout_toggles().first().map(|t| t.0.x).or(titles.iter().filter(|r| r.w > 0 && r.x >= self.size.0 / 2).map(|r| r.x).min()).unwrap_or(self.size.0 - 9) - 2;
-            let t = self.title();
-            let t = if t.is_empty() { "Turbine".to_string() } else { format!("{t} - Turbine") };
-            let room = (right - left).max(0) as usize;
-            if room > 8 {
-                let shown: String = if str_width(&t) > room { format!("…{}", t.chars().rev().take(room - 1).collect::<Vec<_>>().into_iter().rev().collect::<String>()) } else { t };
-                let x = left + (room as i32 - str_width(&shown) as i32) / 2;
-                c.print(x, 0, &shown, Style { fg: theme.scheme.menu_hotkey.fg, ..base });
-            }
-        }
         // (The layout toggles: [▌] lit when its part shows, dim when not.)
         for (r, _, _, glyph, on) in self.layout_toggles() {
             let base = theme.scheme.menu;
@@ -4801,14 +4892,6 @@ impl App for Workbench {
                 surf.cursor = Some((p, shape));
             }
         }
-    }
-
-    fn should_quit(&self) -> bool {
-        self.quit
-    }
-
-    fn take_clipboard(&mut self) -> Option<String> {
-        self.clipboard_out.take()
     }
 }
 
@@ -5697,8 +5780,11 @@ mod tests {
     #[test]
     fn its_own_title_bar_asks_the_window() {
         let mut wb = bench();
-        wb.dispatch(Event::Resize(120, 30));
+        wb.event(Event::Resize(120, 30));
         wb.setting_set("title_bar", "on");
+        // (The client area one row down, the menu bar its first row.)
+        assert_eq!(wb.client_area(), Rect::new(0, 1, 120, 29));
+        assert_eq!(wb.size, (120, 29));
         assert!(wb.own_title_bar());
         let b = wb.title_buttons();
         assert_eq!(b.len(), 3);
@@ -5712,7 +5798,13 @@ mod tests {
         assert_eq!(wb.take_window_op(), 4);
         let mut surf = Surface::new(120, 30);
         wb.render(&mut surf);
-        assert!(surf.to_text().lines().next().unwrap().ends_with("[_][□][×]"));
+        let t = surf.to_text();
+        let rows: Vec<&str> = t.lines().collect();
+        assert!(rows[0].ends_with("[_][□][×]") && rows[0].contains("Turbine"), "{}", rows[0]);
+        assert!(rows[1].contains("File") && rows[1].contains("Edit"), "the menu bar under it: {}", rows[1]);
+        // A click on the menu bar's row in the window reaches the menus.
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(3, 1), mods: Mods::NONE }));
+        assert!(wb.menubar.is_open());
     }
 
     #[test]

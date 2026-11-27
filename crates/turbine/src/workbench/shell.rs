@@ -198,20 +198,6 @@ impl Workbench {
     /// their parts, and keep the editors inside their area.
     /// VS Code's layout toggles, at the right of the menu bar before Help:
     /// the side bar, the panel, the secondary side bar (lit when shown).
-    /// Its own title bar's buttons at the row's right end: (place, window
-    /// action, name, label).
-    pub(super) fn title_buttons(&self) -> Vec<(Rect, i32, &'static str, &'static str)> {
-        if !self.shell.own_title_bar {
-            return Vec::new();
-        }
-        let x = self.screen().w - 9;
-        vec![
-            (Rect::new(x, 0, 3, 1), 1, "Minimize", "[_]"),
-            (Rect::new(x + 3, 0, 3, 1), 2, "Maximize or Restore", "[□]"),
-            (Rect::new(x + 6, 0, 3, 1), 3, "Close", "[×]"),
-        ]
-    }
-
     pub(super) fn layout_toggles(&self) -> Vec<(Rect, &'static str, &'static str, &'static str, bool)> {
         let titles = self.menubar.title_rects();
         let (Some(help), Some(before)) = (titles.last().copied(), titles.iter().rev().skip(1).find(|r| r.w > 0).copied()) else { return Vec::new() };
@@ -223,7 +209,7 @@ impl Workbench {
         let w = items.len() as i32 * 3;
         // (At the bar's right end when Help sits with the rest, as
         // Borland's does; else just before a right-hand Help, as QBasic's.)
-        let end = self.screen().w - 1 - w - if self.shell.own_title_bar { 9 } else { 0 };
+        let end = self.screen().w - 1 - w;
         let x0 = if help.w > 0 && help.right() + 1 < end {
             end
         } else {
