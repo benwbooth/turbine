@@ -78,7 +78,14 @@ impl Session {
         if self.version != Some(version) {
             let s = text();
             if s != self.t.text {
-                self.t.set(&s);
+                // (The first text a session sees isn't an edit: undo never
+                // goes back past it to nothing.)
+                if self.version.is_none() {
+                    self.t.set_fresh(&s);
+                    self.vi.start_from(&self.t);
+                } else {
+                    self.t.set(&s);
+                }
             }
             self.version = Some(version);
         }

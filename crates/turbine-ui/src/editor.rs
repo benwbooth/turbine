@@ -141,6 +141,9 @@ pub struct EditorView {
     /// Clicks in a row at one place: (where, when, how many) — two select
     /// a word, three the line, four the paragraph.
     clicks: Option<(usize, std::time::Instant, u8)>,
+    /// Dragging after a multi-click: the unit (2 word, 3 line, 4 paragraph)
+    /// and the first one's range, so the selection grows by whole units.
+    unit_drag: Option<(u8, usize, usize)>,
     /// A minimap at the right (Cursor's), when there's room; where it was
     /// drawn, and a drag on it.
     pub minimap: bool,
@@ -193,6 +196,7 @@ impl EditorView {
             area: Rect::default(),
             dragging: false,
             clicks: None,
+            unit_drag: None,
             minimap: false,
             minimap_rect: None,
             minimap_drag: false,
@@ -733,14 +737,30 @@ impl EditorView {
                     let (a, b) = self.click_unit(ch, n);
                     self.anchor = Some(a);
                     self.cursor = b;
-                    self.dragging = false;
+                    self.dragging = true;
+                    self.unit_drag = Some((n, a, b));
                     return true;
                 }
+                self.unit_drag = None;
                 self.move_to(ch, ev.mods.shift);
                 if !ev.mods.shift {
                     self.anchor = Some(ch);
                 }
                 self.dragging = true;
+                true
+            }
+            MouseKind::Drag(Button::Left) if self.dragging && self.unit_drag.is_some() => {
+                // (By whole words, lines or paragraphs from the first.)
+                let (n, a0, b0) = self.unit_drag.unwrap();
+                let ch = self.pos_to_char(ev.pos);
+                let (a1, b1) = self.click_unit(ch, n);
+                if a1 < a0 {
+                    self.anchor = Some(b0);
+                    self.cursor = a1;
+                } else {
+                    self.anchor = Some(a0);
+                    self.cursor = b1.max(b0);
+                }
                 true
             }
             MouseKind::Drag(Button::Left) if self.dragging => {

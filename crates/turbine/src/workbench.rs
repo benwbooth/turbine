@@ -4862,6 +4862,18 @@ mod tests {
     }
 
     #[test]
+    fn vim_undo_stops_at_the_file_as_opened() {
+        let (dir, mut wb) = project("vimundo");
+        wb.set_keymap(Keymap::Vim);
+        wb.goto_file(&dir.join("notes.md"), Some(0), 0);
+        run(&mut wb, json!({"cmd": "type", "text": "ix"}));
+        keys(&mut wb, &["Esc"]);
+        run(&mut wb, json!({"cmd": "type", "text": "uuuuu"}));
+        assert_eq!(wb.windows.last().unwrap().ed.doc.rope.to_string(), "# Notes\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn vim_edits_saves_and_quits() {
         let mut wb = bench();
         wb.set_keymap(Keymap::Vim);

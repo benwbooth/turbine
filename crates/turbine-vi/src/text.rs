@@ -247,6 +247,14 @@ impl Text {
             self.replace(c, c, s);
         }
     }
+    /// The text to start from (a file just opened): nothing to undo back to.
+    pub fn set_fresh(&mut self, s: &str) {
+        self.text = s.to_string();
+        self.cursor = 0;
+        self.anchor = None;
+        self.pairs.clear();
+        self.typing = false;
+    }
     pub fn set(&mut self, s: &str) {
         self.snapshot();
         self.text = s.to_string();

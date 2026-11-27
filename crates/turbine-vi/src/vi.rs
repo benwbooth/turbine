@@ -2750,6 +2750,13 @@ impl Vi {
         }
         self.redo_stack.clear();
     }
+    /// The text a session starts from: nothing before it to undo to.
+    pub fn start_from(&mut self, t: &Text) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.change_base = None;
+        self.last_known = Some(t.text.clone());
+    }
     fn begin_change(&mut self, t: &Text) {
         if self.change_base.is_none() {
             self.change_base = Some(t.text.clone());
