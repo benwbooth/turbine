@@ -152,6 +152,7 @@ impl Workbench {
             "keymap": self.keymap.name(),
             "tab_complete": self.tab_complete,
             "watches": self.dbx.watches,
+            "recent_files": self.extras.recent,
             "inlay_hints": !self.lspx.inlays_off,
             "semantic": !self.lspx.semantic_off,
             "hidden_files": self.shell.explorer.show_hidden,
@@ -171,6 +172,9 @@ impl Workbench {
         }
         if let Some(b) = v["tab_complete"].as_bool() {
             self.tab_complete = b;
+        }
+        if let Some(a) = v["recent_files"].as_array() {
+            self.extras.recent = a.iter().filter_map(|x| x.as_str().map(PathBuf::from)).collect();
         }
         if let Some(a) = v["watches"].as_array() {
             self.dbx.watches = a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
@@ -213,6 +217,16 @@ impl Workbench {
             keys.push(d.key);
         }
         (rows, keys)
+    }
+
+    /// Settings, searched for a category (Options > Editor, Directories).
+    pub(super) fn open_settings_at(&mut self, q: &str) {
+        self.open_settings();
+        let (rows, _) = self.settings_rows(q);
+        if let Some(d) = &mut self.dialog {
+            d.set_value("q", q);
+            d.set_items("items", rows, 0);
+        }
     }
 
     pub(super) fn open_settings(&mut self) {

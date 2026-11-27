@@ -19,6 +19,7 @@ pub fn adapter_for(lang: &str) -> Option<Vec<String>> {
         "python" => &[&["python3", "-m", "debugpy.adapter"], &["python", "-m", "debugpy.adapter"]],
         "go" => &[&["dlv", "dap"]],
         "bash" => &[&["bash-debug-adapter"]],
+        "tessh" => &[&["tessh", "--dap"]],
         "c-sharp" | "fsharp" => &[&["netcoredbg", "--interpreter=vscode"]],
         "dart" => &[&["dart", "debug_adapter"]],
         "haskell" => &[&["haskell-debug-adapter"]],

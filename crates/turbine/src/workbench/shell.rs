@@ -652,6 +652,7 @@ impl Workbench {
     /// Open a file (or bring its window to the front) and put the cursor at
     /// a line and column; the editor gets focus.
     pub(super) fn goto_file(&mut self, p: &Path, line: Option<usize>, col: usize) {
+        self.nav_push();
         let want = Self::canon(p);
         match self.windows.iter().position(|w| w.dock.is_none() && w.ed.doc.path.as_ref().is_some_and(|q| Self::canon(q) == want)) {
             Some(i) => {

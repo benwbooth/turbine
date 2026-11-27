@@ -13,6 +13,7 @@ use turbine_ui::Canvas;
 mod build;
 mod debug_more;
 mod explorer_ops;
+mod extras;
 mod extensions;
 pub use extensions::extension_dirs;
 mod find;
@@ -236,6 +237,7 @@ pub struct Workbench {
     build: build::BuildState,
     preview: preview::PreviewState,
     git: git::GitState,
+    extras: extras::Extras,
     lsp_spawn: LspSpawner,
     lsp_requests: HashMap<(LspKey, i64), (LspReq, u32)>,
     completion: Option<Completion>,
@@ -298,19 +300,19 @@ fn menus() -> Vec<Menu> {
                 it("~A~bout Turbine...", "", "help.about"),
                 sep(),
                 it("~R~epaint Desktop", "", "app.repaint"),
-                soon("Show ~C~lipboard", "", "edit.show_clipboard"),
-                soon("~C~alculator", "", "tools.calculator"),
+                it("Show ~C~lipboard", "", "edit.show_clipboard"),
+                it("~C~alculator", "", "tools.calculator"),
             ],
         ),
         Menu::new(
             "~F~ile",
             vec![
                 it("~N~ew Text File", "Ctrl+N", "file.new"),
-                soon("New ~W~indow", "Ctrl+Shift+N", "file.new_window"),
+                it("New ~W~indow", "Ctrl+Shift+N", "file.new_window"),
                 sep(),
                 it("~O~pen File...", "F3", "file.open"),
                 it("Open ~F~older...", "", "file.open_folder"),
-                soon("Open ~R~ecent", "", "file.recent"),
+                it("Open ~R~ecent", "", "file.recent"),
                 sep(),
                 it("~S~ave", "F2", "file.save"),
                 it("Save ~A~s...", "", "file.save_as"),
@@ -418,8 +420,8 @@ fn menus() -> Vec<Menu> {
         Menu::new(
             "~G~o",
             vec![
-                soon("~B~ack", "Alt+Left", "go.back"),
-                soon("~F~orward", "Alt+Right", "go.forward"),
+                it("~B~ack", "Alt+Left", "go.back"),
+                it("~F~orward", "Alt+Right", "go.forward"),
                 sep(),
                 it("Go to ~F~ile...", "Ctrl+P", "go.file"),
                 it("Go to ~S~ymbol...", "Ctrl+Shift+O", "go.symbol"),
@@ -464,7 +466,7 @@ fn menus() -> Vec<Menu> {
             "~T~erminal",
             vec![
                 it("~N~ew Terminal", "Ctrl+Shift+`", "terminal.new"),
-                soon("~S~plit Terminal", "", "terminal.split"),
+                it("~S~plit Terminal", "", "terminal.split"),
                 sep(),
                 it("~R~un Task...", "", "terminal.task"),
                 it("Run ~B~uild Task...", "Ctrl+Shift+B", "terminal.build"),
@@ -509,8 +511,8 @@ fn menus() -> Vec<Menu> {
                 it("~C~olors...", "", "options.colors"),
                 it("Control ~S~tyle...", "", "options.style"),
                 sep(),
-                soon("~E~ditor...", "", "options.editor"),
-                soon("~D~irectories...", "", "options.dirs"),
+                it("~E~ditor...", "", "options.editor"),
+                it("~D~irectories...", "", "options.dirs"),
                 it("Se~t~tings...", "Ctrl+,", "options.settings"),
             ],
         ),
@@ -597,6 +599,7 @@ impl Workbench {
             build: Default::default(),
             preview: Default::default(),
             git: Default::default(),
+            extras: Default::default(),
             lsp_spawn: default_lsp_spawner(),
             lsp_requests: HashMap::new(),
             completion: None,
@@ -1755,6 +1758,7 @@ impl Workbench {
                     self.say("No definition found");
                     return;
                 };
+                self.nav_push();
                 let same = self.windows.last().and_then(|w| w.ed.doc.path.clone()).map(|p| std::fs::canonicalize(&p).unwrap_or(p))
                     == Some(std::fs::canonicalize(&loc.path).unwrap_or(loc.path.clone()));
                 if !same {
@@ -2116,6 +2120,7 @@ impl Workbench {
             Ok(d) => {
                 let note = if d.lossy { " (some bytes could not be decoded)" } else { "" };
                 let msg = format!("Opened {} as {}{note}", p.display(), d.encoding.name());
+                self.note_recent(p);
                 // Replace an untouched empty window.
                 if self.windows.len() == 1 && self.windows[0].ed.doc.path.is_none() && !self.windows[0].ed.doc.dirty {
                     self.windows.clear();
@@ -2315,6 +2320,7 @@ impl Workbench {
             "build.make" | "build.all" | "build.compile" | "build.stop" | "terminal.task" | "terminal.build" | "run.without_debug" => self.build_command(cmd),
             "view.preview" => self.open_preview(),
             c if c.starts_with("git.") => self.git_command(c),
+            c if self.extras_command(c) => {}
             "run.watch" => self.add_watch_dialog(),
             "edit.comment" | "selection.expand" | "selection.shrink" | "selection.copy_up" | "selection.copy_down" | "selection.move_up" | "selection.move_down" | "go.bracket"
             | "go.next_def" | "go.prev_def" | "view.fold" | "view.unfold" | "view.fold_all" | "view.unfold_all" => {
@@ -2907,6 +2913,10 @@ impl Workbench {
             }
             return;
         }
+        if matches!(kind.as_str(), "recent" | "calculator") {
+            self.extras_dialog(d, &b);
+            return;
+        }
         if let Some(root) = kind.strip_prefix("checkout:") {
             let root = root.to_string();
             self.checkout_chosen(&d, &root);
@@ -3249,6 +3259,10 @@ impl Workbench {
             Some("lsp.signature")
         } else if k.is_ctrl('.') {
             Some("edit.quick_fix")
+        } else if k.is(Key::Left, Mods::ALT) && self.windows.last().is_some_and(|w| w.term.is_none()) {
+            Some("go.back")
+        } else if k.is(Key::Right, Mods::ALT) && self.windows.last().is_some_and(|w| w.term.is_none()) {
+            Some("go.forward")
         } else if k.is(Key::PageDown, Mods::ALT) {
             Some("go.next_def")
         } else if k.is(Key::PageUp, Mods::ALT) {
@@ -5593,6 +5607,82 @@ mod tests {
         wait_until(&mut wb, "diff language", |wb| wb.windows.last().unwrap().lang.as_deref() == Some("diff"));
         keys(&mut wb, &["Ctrl+Shift+V"]);
         wait_until(&mut wb, "the patch", |wb| wb.windows.last().unwrap().special == Some("preview") && wb.windows.last().unwrap().ed.line_bg.contains(&2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn debugging_a_tessh_script() {
+        // (Needs a tessh with --dap.)
+        let has = std::process::Command::new("tessh").arg("--help").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("--dap"));
+        if !has {
+            eprintln!("skipped: no tessh --dap");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("turbine-tsh-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let f = dir.join("s.tsh");
+        std::fs::write(&f, "total = 0\ndef add a b\n    c = $a + $b\n    return $c\nfor i in [1 2 3]\n    total = add $total $i\n    print \"total $total\"\necho done\n").unwrap();
+        let mut wb = Workbench::new(&[f.clone()]);
+        wb.set_lsp_spawner(Box::new(|_, _| None));
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+        let special = |wb: &Workbench, k: &str| wb.windows.iter().find(|w| w.special == Some(k)).map(|w| w.ed.doc.rope.to_string()).unwrap_or_default();
+        wait_until(&mut wb, "tessh", |wb| wb.windows[0].lang.as_deref() == Some("tessh"));
+        // A breakpoint in add, only when a is 1.
+        wb.goto_file(&f, Some(2), 0);
+        keys(&mut wb, &["Ctrl+Shift+F8"]);
+        run(&mut wb, json!({"cmd": "type", "text": "a == 1"}));
+        keys(&mut wb, &["Enter"]);
+        keys(&mut wb, &["Ctrl+F9"]);
+        let start = Instant::now();
+        while !wb.windows.iter().any(|w| w.ed.exec_line == Some(2)) {
+            wb.tick(Instant::now());
+            assert!(start.elapsed() < Duration::from_secs(20), "no stop: {}", special(&wb, "output"));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        wait_until(&mut wb, "variables", |wb| special(wb, "debug").contains("a: int = 1"));
+        // The Immediate window: tessh's own syntax works there.
+        wb.add_watch("a + b");
+        wait_until(&mut wb, "the watch", |wb| special(wb, "debug").contains("a + b: 3"));
+        keys(&mut wb, &["F8"]);
+        wait_until(&mut wb, "step", |wb| wb.windows.iter().any(|w| w.ed.exec_line == Some(3)));
+        keys(&mut wb, &["Ctrl+F9"]);
+        let start = Instant::now();
+        while wb.debug.is_some() {
+            wb.tick(Instant::now());
+            assert!(start.elapsed() < Duration::from_secs(20), "didn't finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let out = special(&wb, "output");
+        assert!(out.contains("total 1\n") && out.contains("total 6\n") && out.contains("done\n"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recent_files_and_back_and_forward() {
+        let dir = std::env::temp_dir().join(format!("turbine-nav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "x\ny\n").unwrap();
+        let mut wb = Workbench::new(&[dir.join("a.txt")]);
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+        keys(&mut wb, &["Down", "Down"]);
+        wb.goto_file(&dir.join("b.txt"), Some(1), 0);
+        keys(&mut wb, &["Alt+Left"]);
+        let w = wb.windows.last().unwrap();
+        assert!(w.ed.doc.path.as_ref().unwrap().ends_with("a.txt"));
+        assert_eq!(w.ed.cursor_line_col().0, 2);
+        keys(&mut wb, &["Alt+Right"]);
+        assert!(wb.windows.last().unwrap().ed.doc.path.as_ref().unwrap().ends_with("b.txt"));
+        wb.run_command("file.recent");
+        let d = wb.dialog.as_ref().unwrap();
+        assert!(d.value("file").unwrap().ends_with("a.txt") || d.value("file").unwrap().ends_with("b.txt"));
+        keys(&mut wb, &["Esc"]);
+        wb.run_command("tools.calculator");
+        run(&mut wb, json!({"cmd": "type", "text": "6*7"}));
+        keys(&mut wb, &["Enter"]);
+        assert_eq!(wb.dialog.as_ref().unwrap().value("result").as_deref(), Some("42  0x2A  0b101010"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
