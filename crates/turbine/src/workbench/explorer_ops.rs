@@ -90,6 +90,9 @@ impl Workbench {
     /// The folder for new things: the selected folder, or the selected
     /// file's folder, or the project.
     fn ex_target_dir(&self, row: usize) -> PathBuf {
+        if self.shell.explorer.is_up(row) {
+            return self.shell.explorer.root.clone();
+        }
         match self.shell.explorer.path_at(row) {
             Some((p, true)) => p.clone(),
             Some((p, false)) => p.parent().map(Path::to_path_buf).unwrap_or_else(|| self.shell.explorer.root.clone()),
@@ -99,11 +102,23 @@ impl Workbench {
 
     pub(super) fn ex_command(&mut self, action: &str, row: usize) {
         let root = self.shell.explorer.root.clone();
-        let path = self.shell.explorer.path_at(row).map(|(p, _)| p.clone());
+        // (The ".." row is never renamed, deleted or made the root.)
+        let path = self.shell.explorer.path_at(row).filter(|_| !self.shell.explorer.is_up(row)).map(|(p, _)| p.clone());
         let name_dialog = |kind: String, title: &str, label: &str, value: &str| {
             Dialog::new(&kind, title).body(ui::input("name", label, value).chars(40)).buttons(vec![ui::button("ok", "O~K~", true), ui::button("cancel", "Cancel", false)])
         };
         match action {
+            "set_root" => {
+                if let Some(p) = path.filter(|p| p.is_dir()) {
+                    self.open_folder(&p);
+                }
+            }
+            "up" => {
+                if let Some(p) = root.parent() {
+                    let p = p.to_path_buf();
+                    self.open_folder(&p);
+                }
+            }
             "new_file" => {
                 let dir = self.ex_target_dir(row);
                 self.dialog = Some(name_dialog(format!("ex_new_file:{}", dir.display()), "New File", "File ~n~ame:", ""));
@@ -241,12 +256,19 @@ impl Workbench {
     }
 
     pub(super) fn open_ex_menu(&mut self, row: usize, at: Point) {
-        let is_root = self.shell.explorer.path_at(row).is_some_and(|(p, _)| *p == self.shell.explorer.root);
+        let is_root = self.shell.explorer.path_at(row).is_some_and(|(p, _)| *p == self.shell.explorer.root) || self.shell.explorer.is_up(row);
+        let is_dir = self.shell.explorer.path_at(row).is_some_and(|(_, d)| *d);
         let mut items: Vec<(&'static str, &'static str, &'static str)> = vec![
             ("New File...", "", "new_file"),
             ("New Folder...", "", "new_folder"),
             ("Open in Terminal", "", "terminal"),
         ];
+        if is_dir && !is_root {
+            items.insert(0, ("Set as Root", "", "set_root"));
+        }
+        if self.shell.explorer.root.parent().is_some() {
+            items.push(("Up a Folder", "Backspace", "up"));
+        }
         if !is_root {
             items.push(("Rename...", "F2", "rename"));
             items.push(("Delete", "Del", "delete"));
@@ -282,6 +304,8 @@ impl Workbench {
         let r = self.shell.explorer.list.area;
         let at = Point::new(r.x + 4, r.y + (row as i32 - self.shell.explorer.list.scroll as i32).max(0));
         match k.key {
+            Key::Backspace if k.mods == Mods::NONE => self.ex_command("up", row),
+            Key::Enter if k.mods == Mods::NONE && self.shell.explorer.is_up(row) => self.ex_command("up", row),
             Key::F(2) if k.mods == Mods::NONE => self.ex_command("rename", row),
             Key::Delete if k.mods == Mods::NONE => self.ex_command("delete", row),
             Key::F(10) if k.mods.shift => self.open_ex_menu(row, at),
@@ -316,11 +340,12 @@ impl Workbench {
             return false;
         }
         // The buttons at the right of the top row (the project's name).
-        if m.pos.y == area.y && self.shell.explorer.list.scroll == 0 {
+        let root_row = self.shell.explorer.root_row();
+        if m.pos.y == area.y + root_row as i32 && self.shell.explorer.list.scroll == 0 {
             if let Some(a) = self.ex_buttons(pr).into_iter().find(|(r, _)| r.contains(m.pos)).map(|(_, a)| a) {
                 if matches!(m.kind, MouseKind::Down(Button::Left)) {
                     self.shell.focus = Focus::View(Tab::Explorer);
-                    self.ex_command(a, 0);
+                    self.ex_command(a, root_row);
                 }
                 return true;
             }
@@ -342,7 +367,7 @@ impl Workbench {
         let area = self.shell.explorer.list.area;
         let icons = self.theme.style.icons;
         let labels: [(&str, &str, &'static str); 4] = [("\u{ea7f}", "+F", "new_file"), ("\u{ea80}", "+D", "new_folder"), ("\u{eb37}", "↻", "refresh"), ("\u{eac5}", "-", "collapse")];
-        let mut x = area.right() - 1 - i32::from(self.shell.explorer.list.rows.len() as i32 > area.h);
+        let mut x = area.right() - 1;
         let mut out = Vec::new();
         for (e, t, a) in labels.iter().rev() {
             let w = str_width(if icons { e } else { t }) as i32;
@@ -350,7 +375,7 @@ impl Workbench {
             if x <= part.x + 8 {
                 break;
             }
-            out.push((Rect::new(x, area.y, w, 1), *a));
+            out.push((Rect::new(x, area.y + self.shell.explorer.root_row() as i32, w, 1), *a));
         }
         out
     }

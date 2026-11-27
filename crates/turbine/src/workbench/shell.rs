@@ -1168,6 +1168,7 @@ impl Workbench {
                 }
                 out
             } {
+                ListOut::Activated(i) if self.shell.explorer.is_up(i) => self.ex_command("up", i),
                 ListOut::Activated(i) => {
                     if let Some(p) = self.shell.explorer.activate(i) {
                         self.goto_file(&p, None, 0);
@@ -1485,6 +1486,7 @@ impl Workbench {
             self.shell.explorer.user_selected();
         }
         match (t, out) {
+            (Tab::Explorer, ListOut::Activated(i)) if self.shell.explorer.is_up(i) => self.ex_command("up", i),
             (Tab::Explorer, ListOut::Activated(i)) => {
                 if let Some(p) = self.shell.explorer.activate(i) {
                     self.goto_file(&p, None, 0);

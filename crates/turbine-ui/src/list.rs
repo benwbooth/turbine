@@ -117,6 +117,8 @@ pub struct ListView {
     last_click: Option<(Point, Instant)>,
     typed: String,
     typed_at: Option<Instant>,
+    /// Show the scroll bar only while the list has the keys.
+    pub bar_when_focused: bool,
 }
 
 impl ListView {
@@ -276,7 +278,8 @@ impl ListView {
         let n = r.h.max(0) as usize;
         let max = self.rows.len().saturating_sub(n);
         self.scroll = self.scroll.min(max);
-        let bar = self.rows.len() > n && n >= 3;
+        // (A list may keep its bar for when it has the keys.)
+        let bar = self.rows.len() > n && n >= 3 && (focused || !self.bar_when_focused);
         let text_w = r.w - i32::from(bar);
         let dim = Style::new(s.panel_frame.fg, base.bg);
         for (k, row) in self.rows.iter().enumerate().skip(self.scroll).take(n) {

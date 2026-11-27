@@ -117,7 +117,11 @@ impl Explorer {
             pending: HashSet::new(),
             tx,
             rx,
-            list: ListView::new(),
+            list: {
+                let mut l = ListView::new();
+                l.bar_when_focused = true;
+                l
+            },
             paths: Vec::new(),
             refreshed: Instant::now(),
             want: None,
@@ -227,6 +231,11 @@ impl Explorer {
     fn rebuild(&mut self) {
         let mut rows = Vec::new();
         let mut paths = Vec::new();
+        // "..": up a folder (the project becomes its parent).
+        if let Some(parent) = self.root.parent() {
+            rows.push(Row::new("..").glyph(crate::filetypes::icon("..", true, false)).fg(turbine_ui::theme::vga::WHITE));
+            paths.push((parent.to_path_buf(), true));
+        }
         let name = self.root.file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_else(|| self.root.display().to_string());
         rows.push(Row::new(name).heading());
         paths.push((self.root.clone(), true));
@@ -324,7 +333,20 @@ impl Explorer {
         self.paths.get(i).filter(|(_, dir)| !dir).map(|(p, _)| p.clone())
     }
 
+    /// The ".." row (up a folder), when there is one.
+    pub fn is_up(&self, i: usize) -> bool {
+        i == 0 && self.root.parent().is_some()
+    }
+
+    /// The row of the project folder itself.
+    pub fn root_row(&self) -> usize {
+        usize::from(self.root.parent().is_some())
+    }
+
     pub fn activate(&mut self, i: usize) -> Option<PathBuf> {
+        if self.is_up(i) {
+            return None;
+        }
         let (p, dir) = self.paths.get(i)?.clone();
         if dir {
             self.toggle(&p);
@@ -966,11 +988,12 @@ mod tests {
         let mut e = Explorer::new(dir.clone());
         wait(|| e.poll(true));
         let names = |e: &Explorer| e.list.rows.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
-        assert_eq!(names(&e)[1..], ["src".to_string(), "README.md".to_string()]);
-        assert_eq!(e.activate(1), None);
+        assert_eq!(names(&e)[0], "..");
+        assert_eq!(names(&e)[2..], ["src".to_string(), "README.md".to_string()]);
+        assert_eq!(e.activate(2), None);
         wait(|| e.poll(true));
-        assert_eq!(names(&e)[1..], ["src".to_string(), "deep".into(), "README.md".into()]);
-        assert_eq!(e.activate(3), Some(dir.join("README.md")));
+        assert_eq!(names(&e)[2..], ["src".to_string(), "deep".into(), "README.md".into()]);
+        assert_eq!(e.activate(4), Some(dir.join("README.md")));
         e.reveal(&dir.join("src/deep/x.rs"));
         wait(|| {
             e.poll(true);
