@@ -2337,6 +2337,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "turbine-ext",
  "turbine-services",
  "turbine-syntax",
  "turbine-term",

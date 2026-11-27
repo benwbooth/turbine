@@ -18,6 +18,7 @@ turbine-vi = { path = "crates/turbine-vi" }
 turbine-term = { path = "crates/turbine-term" }
 turbine-syntax = { path = "crates/turbine-syntax" }
 turbine-services = { path = "crates/turbine-services" }
+turbine-ext = { path = "crates/turbine-ext" }
 ropey = "1.6"
 encoding_rs = "0.8"
 chardetng = "0.1"

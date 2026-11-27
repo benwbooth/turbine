@@ -15,6 +15,7 @@ mod extensions;
 pub use extensions::extension_dirs;
 mod find;
 mod inline_ai;
+mod lsp_more;
 mod settings;
 mod shell;
 use find::FindBar;
@@ -221,6 +222,7 @@ pub struct Workbench {
     lsp: HashMap<LspKey, LspClient>,
     /// Languages with no server (or whose server failed): not tried again.
     lsp_missing: HashSet<String>,
+    lspx: lsp_more::LspExtra,
     lsp_spawn: LspSpawner,
     lsp_requests: HashMap<(LspKey, i64), (LspReq, u32)>,
     completion: Option<Completion>,
@@ -319,10 +321,13 @@ fn menus() -> Vec<Menu> {
                 it("~P~aste", "Ctrl+V", "edit.paste"),
                 sep(),
                 soon("Toggle Line ~C~omment", "Ctrl+/", "edit.comment"),
-                soon("~F~ormat Document", "Ctrl+Shift+I", "edit.format"),
+                it("~F~ormat Document", "Ctrl+Shift+I", "edit.format"),
                 sep(),
                 it("Trigger ~S~uggest", "Ctrl+Space", "lsp.complete"),
+                it("~P~arameter Hints", "Ctrl+Shift+Space", "lsp.signature"),
+                it("~Q~uick Fix...", "Ctrl+.", "edit.quick_fix"),
                 it("Re~n~ame Symbol...", "Shift+F2", "edit.rename"),
+                it("~I~nstall Language Server...", "", "lsp.install"),
             ],
         ),
         Menu::new(
@@ -396,6 +401,7 @@ fn menus() -> Vec<Menu> {
                 sep(),
                 it("Go to ~F~ile...", "Ctrl+P", "go.file"),
                 it("Go to ~S~ymbol...", "Ctrl+Shift+O", "go.symbol"),
+                it("Go to Symbol in ~W~orkspace...", "Ctrl+T", "go.workspace_symbol"),
                 it("Go to ~D~efinition", "F12", "go.definition"),
                 it("Go to ~R~eferences", "Shift+F12", "go.references"),
                 it("Go to ~L~ine...", "Ctrl+G", "search.goto"),
@@ -536,6 +542,7 @@ impl Workbench {
             hl_pending: 0,
             lsp: HashMap::new(),
             lsp_missing: HashSet::new(),
+            lspx: Default::default(),
             lsp_spawn: default_lsp_spawner(),
             lsp_requests: HashMap::new(),
             completion: None,
@@ -1589,10 +1596,14 @@ impl Workbench {
     }
 
     fn lsp_event(&mut self, key: LspKey, e: LspEvent) {
+        if self.lsp_more_event(&key, &e) {
+            return;
+        }
         match e {
             LspEvent::Ready | LspEvent::Log(_) => {}
             LspEvent::Diagnostics { path, items } => {
                 let want = std::fs::canonicalize(&path).unwrap_or(path);
+                self.lspx.diags.insert(want.clone(), items.iter().map(|d| d.raw.clone()).collect());
                 for w in &mut self.windows {
                     let Some(p) = &w.ed.doc.path else { continue };
                     if std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) != want {
@@ -1705,14 +1716,24 @@ impl Workbench {
                 }
                 self.lsp_missing.insert(key.0);
             }
+            _ => {}
         }
     }
 
     /// The active editor's server and the cursor's position for it.
     fn lsp_here(&mut self) -> Option<(LspKey, PathBuf, Pos)> {
-        let w = self.windows.last()?;
+        let w = self.windows.last_mut()?;
         let key = w.lsp_key.clone()?;
         let path = w.ed.doc.path.clone()?;
+        // (The server has to have what was just typed before it's asked.)
+        let v = w.ed.doc.version;
+        if w.lsp_sent != Some(v) {
+            if let Some(c) = self.lsp.get_mut(&key).filter(|c| c.is_open(&path)) {
+                c.did_change(&path, v as i64, &w.ed.doc.rope.to_string());
+                w.lsp_sent = Some(v);
+            }
+        }
+        let w = self.windows.last()?;
         let (line, byte) = w.ed.doc.char_to_line_byte(w.ed.cursor);
         let text = w.ed.doc.line(line);
         Some((key, path, Pos { line: line as u32, character: lsp::utf16_col(&text, byte) }))
@@ -1720,7 +1741,7 @@ impl Workbench {
 
     fn lsp_request(&mut self, what: LspReq) {
         let Some((key, path, pos)) = self.lsp_here() else {
-            self.say("No language server for this file");
+            self.no_server();
             return;
         };
         let Some(c) = self.lsp.get_mut(&key) else { return };
@@ -1738,7 +1759,7 @@ impl Workbench {
     /// Rename the symbol at the cursor everywhere (the language server's edits).
     fn lsp_rename(&mut self, new_name: &str) {
         let Some((key, path, pos)) = self.lsp_here() else {
-            self.say("No language server for this file");
+            self.no_server();
             return;
         };
         let Some(c) = self.lsp.get_mut(&key) else { return };
@@ -1807,7 +1828,7 @@ impl Workbench {
 
     fn start_completion(&mut self) {
         let Some((key, path, pos)) = self.lsp_here() else {
-            self.say("No language server for this file");
+            self.no_server();
             return;
         };
         let w = self.windows.last().unwrap();
@@ -2107,6 +2128,16 @@ impl Workbench {
             "run.arguments" => self.arguments_dialog(),
             "lsp.hover" => self.lsp_request(LspReq::Hover),
             "go.definition" => self.lsp_request(LspReq::Definition),
+            "edit.format" => self.lsp_format(),
+            "edit.quick_fix" => self.lsp_quick_fix(),
+            "lsp.signature" => self.lsp_signature(),
+            "lsp.install" => {
+                match self.windows.last().and_then(|w| w.lang.clone()) {
+                    Some(l) => self.offer_install(&l),
+                    None => self.say("This file has no language"),
+                }
+            }
+            "go.workspace_symbol" => self.open_palette("#"),
             "go.references" => self.lsp_request(LspReq::References),
             "edit.rename" => {
                 let word = self.word_at_cursor();
@@ -2571,6 +2602,13 @@ impl Workbench {
         if self.ex_dialog_done(&kind, &d) {
             return;
         }
+        if let Some(rest) = kind.strip_prefix("install:") {
+            if let Some((lang, cmd)) = rest.split_once('\u{1f}') {
+                let (lang, cmd) = (lang.to_string(), cmd.to_string());
+                self.run_install(&lang, &cmd);
+            }
+            return;
+        }
         if kind == "rename_symbol" {
             let name = d.value("name").unwrap_or_default().trim().to_string();
             if !name.is_empty() {
@@ -2771,7 +2809,11 @@ impl Workbench {
         if k.kind == KeyKind::Release {
             return;
         }
-        // The completion list takes its keys first; the rest type on.
+        // The quick fix menu, then the completion list take their keys
+        // first; the rest type on.
+        if self.dialog.is_none() && self.lsp_menu_key(&k) {
+            return;
+        }
         if self.dialog.is_none() {
             if let Some(comp) = &mut self.completion {
                 if comp.waiting.is_none() {
@@ -2792,6 +2834,9 @@ impl Workbench {
         }
         let before = self.windows.last().map(|w| (w.win.id, w.ed.doc.version));
         self.key_inner(k);
+        if self.dialog.is_none() && before.is_some_and(|b| self.windows.last().is_some_and(|w| w.win.id == b.0)) {
+            self.lsp_after_key(&k);
+        }
         if self.completion.is_some() {
             self.refilter_completion();
         }
@@ -2862,12 +2907,18 @@ impl Workbench {
                 VimOut::NotMine => {}
             }
         }
-        let shortcut = if k.is_ctrl('i') && k.key != Key::Tab {
+        let shortcut = if (k.mods.ctrl && k.mods.shift && !k.mods.alt && matches!(k.key, Key::Char('i' | 'I'))) || (k.mods.shift && k.mods.alt && !k.mods.ctrl && matches!(k.key, Key::Char('f' | 'F'))) {
+            Some("edit.format")
+        } else if k.is_ctrl('i') && k.key != Key::Tab {
             Some("ai.agent")
         } else if k.is_ctrl('l') {
             Some("ai.chat")
         } else if k.is(Key::Char(' '), Mods::CTRL) {
             Some("lsp.complete")
+        } else if k.is(Key::Char(' '), Mods { ctrl: true, shift: true, ..Mods::NONE }) {
+            Some("lsp.signature")
+        } else if k.is_ctrl('.') {
+            Some("edit.quick_fix")
         } else if k.is(Key::F(12), Mods::NONE) {
             Some("go.definition")
         } else if k.is(Key::F(12), Mods::SHIFT) {
@@ -3173,6 +3224,9 @@ impl Workbench {
     fn mouse(&mut self, m: MouseEvent) {
         let screen = self.screen();
         let desk = self.desktop();
+        if self.dialog.is_none() && self.lspx.menu.is_some() && self.lsp_menu_mouse(&m) {
+            return;
+        }
         if self.dialog.is_none() {
             if let Some(comp) = &mut self.completion {
                 match comp.popup.handle_mouse(&m) {
@@ -3400,6 +3454,7 @@ impl Workbench {
         root = self.find_nodes(root);
         root = self.ex_nodes(root);
         root = self.inline_nodes(root);
+        root = self.lsp_more_nodes(root);
         if let Some(d) = &self.dialog {
             root = root.child(d.automation_node());
         }
@@ -3675,6 +3730,7 @@ impl App for Workbench {
         }
         self.update_highlights();
         self.update_lsp();
+        self.lsp_more_tick(now);
         self.update_debug();
         self.update_guides();
         self.update_ai(now);
@@ -3869,6 +3925,7 @@ impl App for Workbench {
                 comp.popup.draw(&mut c, at, desk, &theme);
             }
         }
+        self.draw_lsp_more(&mut c, &theme);
         self.draw_ex(&mut c, &theme);
         self.draw_find(&mut c, &theme);
         self.draw_inline(&mut c, &theme);
@@ -4719,6 +4776,104 @@ mod tests {
         run(&mut wb, json!({"cmd": "type", "text": "start"}));
         keys(&mut wb, &["Enter"]);
         wait_until(&mut wb, "the rename", |wb| wb.windows.iter().any(|w| w.ed.doc.line(0).starts_with("fn start")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn language_server_format_fixes_signatures_hints_symbols() {
+        let dir = std::env::temp_dir().join(format!("turbine-lsp2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("main.rs");
+        std::fs::write(&f, "fn main() {   \n    let x = Foo;\n    BAD;\n    add(\n}\n").unwrap();
+        let mut wb = Workbench::new(&[f.clone()]);
+        wb.set_lsp_spawner(Box::new(|lang, root| {
+            Some(turbine_services::fake::fake_server().map(|rpc| LspClient::with_rpc(rpc, root, lang)))
+        }));
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+        let ed = |wb: &Workbench| wb.windows.iter().find(|w| w.ed.doc.path.as_ref() == Some(&f)).unwrap().ed.doc.rope.to_string();
+        wait_until(&mut wb, "diagnostics", |wb| !wb.windows[0].ed.diagnostics.is_empty());
+
+        // Inlay hints after `let x`; semantic tokens make Foo a type.
+        wait_until(&mut wb, "inlay hints", |wb| wb.windows[0].ed.inlays.get(&1).is_some_and(|h| h[0] == (9, ": i32".to_string())));
+        wait_until(&mut wb, "semantic tokens", |wb| wb.windows[0].ed.semantic.get(1).is_some_and(|s| s.contains(&(12, 15, turbine_syntax::kind_index("type").unwrap()))));
+        let mut surf = Surface::new(100, 30);
+        wb.render(&mut surf);
+        assert!(surf.to_text().contains("let x: i32 = Foo;"), "the hint shows in the line");
+
+        // Format Document: the trailing spaces go, as one undo step.
+        keys(&mut wb, &["Ctrl+Shift+I"]);
+        wait_until(&mut wb, "formatting", |wb| ed(wb).starts_with("fn main() {\n"));
+        keys(&mut wb, &["Ctrl+Z"]);
+        assert!(ed(&wb).starts_with("fn main() {   \n"));
+        keys(&mut wb, &["Ctrl+Y"]);
+
+        // Ctrl+. on the BAD line: the preferred fix first; Enter applies it.
+        wb.goto_file(&f, Some(2), 5);
+        keys(&mut wb, &["Ctrl+."]);
+        wait_until(&mut wb, "quick fixes", |wb| wb.lspx.menu.is_some());
+        let titles: Vec<String> = wb.lspx.menu.as_ref().unwrap().popup.items.iter().map(|i| i.0.clone()).collect();
+        assert_eq!(titles, vec!["★ Replace BAD with GOOD", "Add a header", "Apply from the server"]);
+        assert!(run(&mut wb, json!({"cmd": "snapshot"})).to_string().contains("\"id\":\"quick_fix\""));
+        keys(&mut wb, &["Enter"]);
+        assert!(ed(&wb).contains("    GOOD;"), "{}", ed(&wb));
+        // One that's resolved first, and one the server applies itself.
+        let choose = |wb: &mut Workbench, title: &str| {
+            keys(wb, &["Ctrl+."]);
+            wait_until(wb, "quick fixes", |wb| wb.lspx.menu.is_some());
+            let i = wb.lspx.menu.as_ref().unwrap().popup.items.iter().position(|it| it.0 == title).unwrap();
+            for _ in 0..i {
+                keys(wb, &["Down"]);
+            }
+            keys(wb, &["Enter"]);
+        };
+        choose(&mut wb, "Add a header");
+        wait_until(&mut wb, "the resolved action", |wb| ed(wb).starts_with("// header\n"));
+        choose(&mut wb, "Apply from the server");
+        wait_until(&mut wb, "the server's edit", |wb| ed(wb).ends_with("// applied\n"));
+
+        // Typing ( shows the signature, the parameter by the commas.
+        let line = ed(&wb).lines().position(|l| l.contains("add(")).unwrap();
+        wb.goto_file(&f, Some(line), 8);
+        run(&mut wb, json!({"cmd": "type", "text": "("}));
+        wait_until(&mut wb, "signature", |wb| wb.lspx.signature.is_some());
+        assert_eq!(wb.lspx.signature.as_ref().unwrap().2.active, Some((4, 10)));
+        run(&mut wb, json!({"cmd": "type", "text": "1,"}));
+        wait_until(&mut wb, "second parameter", |wb| wb.lspx.signature.as_ref().is_some_and(|s| s.2.active == Some((12, 18))));
+        let mut surf = Surface::new(100, 30);
+        wb.render(&mut surf);
+        assert!(surf.to_text().contains("add(a: i32, b: i32) -> i32"));
+        run(&mut wb, json!({"cmd": "type", "text": "2)"}));
+        assert!(wb.lspx.signature.is_none(), ") closes it");
+
+        // Ctrl+T: the project's symbols; Enter goes there.
+        keys(&mut wb, &["Ctrl+T"]);
+        run(&mut wb, json!({"cmd": "type", "text": "mai"}));
+        wait_until(&mut wb, "workspace symbols", |wb| wb.shell.palette.as_ref().is_some_and(|p| p.pick(0).is_some_and(|p| matches!(p, crate::palette::Pick::Place(..)))));
+        keys(&mut wb, &["Enter"]);
+        let w = wb.windows.last().unwrap();
+        assert_eq!(w.ed.doc.path.as_ref(), Some(&f));
+        assert_eq!(w.ed.cursor_line_col(), (1, 3));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_language_server_offers_an_install() {
+        let dir = std::env::temp_dir().join(format!("turbine-lsp3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("main.go");
+        std::fs::write(&f, "package main\n").unwrap();
+        let mut wb = Workbench::new(&[f]);
+        wb.set_lsp_spawner(Box::new(|_, _| None));
+        wb.dispatch(Event::Resize(100, 30));
+        wait_until(&mut wb, "no server", |wb| wb.lsp_missing.contains("go"));
+        keys(&mut wb, &["F12"]);
+        let d = wb.dialog.as_ref().expect("the offer");
+        assert!(d.kind.starts_with("install:go\u{1f}"), "{}", d.kind);
+        keys(&mut wb, &["Esc"]);
+        keys(&mut wb, &["F12"]);
+        assert!(wb.dialog.is_none(), "offered once");
+        assert!(wb.message.as_ref().unwrap().0.contains("Install Language Server"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

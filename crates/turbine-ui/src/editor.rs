@@ -88,6 +88,14 @@ pub struct EditorView {
     pub exec_line: Option<usize>,
     /// Extra selected char ranges (vim's visual block).
     pub block: Vec<(usize, usize)>,
+    /// Inlay hints from the language server, per line: (byte, text), shown
+    /// before that byte; for the document version they were made for.
+    pub inlays: std::collections::BTreeMap<usize, Vec<(usize, String)>>,
+    pub inlays_version: u64,
+    /// Semantic highlighting (like `highlights`, from the language server),
+    /// over the tree-sitter colours; for the version it was made for.
+    pub semantic: Vec<Vec<(u32, u32, u8)>>,
+    pub semantic_version: u64,
     /// Find's matches (char ranges, in order) and the current one.
     pub found: Vec<(usize, usize)>,
     pub found_current: Option<usize>,
@@ -125,6 +133,10 @@ impl EditorView {
             block: Vec::new(),
             found: Vec::new(),
             found_current: None,
+            inlays: std::collections::BTreeMap::new(),
+            inlays_version: u64::MAX,
+            semantic: Vec::new(),
+            semantic_version: u64::MAX,
             area: Rect::default(),
             dragging: false,
             minimap: false,
@@ -140,15 +152,43 @@ impl EditorView {
         (line, self.col_of(line, byte))
     }
 
+    /// The inlay hints on a line, when they're for this text.
+    fn line_inlays(&self, line: usize) -> &[(usize, String)] {
+        if self.inlays_version != self.doc.version || self.base_rtl == Some(true) {
+            return &[];
+        }
+        self.inlays.get(&line).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Columns the line's inlay hints take before `byte` (`inclusive`: the
+    /// ones at it too: a char sits after the hints at its place, the cursor
+    /// before them).
+    fn inlay_shift(&self, line: usize, byte: usize, inclusive: bool) -> usize {
+        self.line_inlays(line).iter().filter(|(b, _)| if inclusive { *b <= byte } else { *b < byte }).map(|(_, t)| turbine_text::unicode::str_width(t)).sum()
+    }
+
+    /// The line's layout with inlay hints making room.
+    fn layout_line(&self, line: usize, text: &str) -> (Vec<Placed>, usize) {
+        let (mut placed, total) = layout(text, self.base_rtl);
+        if self.line_inlays(line).is_empty() {
+            return (placed, total);
+        }
+        for p in &mut placed {
+            p.col += self.inlay_shift(line, p.offset, true);
+        }
+        (placed, total + self.inlay_shift(line, usize::MAX, true))
+    }
+
     fn col_of(&self, line: usize, byte: usize) -> usize {
         let text = self.doc.line(line);
         let (placed, total) = layout(&text, self.base_rtl);
-        placed.iter().find(|p| p.offset == byte).map(|p| p.col).unwrap_or(total)
+        let base = placed.iter().find(|p| p.offset == byte).map(|p| p.col).unwrap_or(total);
+        base + self.inlay_shift(line, byte, false)
     }
 
     fn byte_at_col(&self, line: usize, col: usize) -> usize {
         let text = self.doc.line(line);
-        let (placed, _) = layout(&text, self.base_rtl);
+        let (placed, _) = self.layout_line(line, &text);
         let mut best: Option<&Placed> = None;
         for p in &placed {
             if p.col <= col && col < p.col + p.width {
@@ -643,7 +683,7 @@ impl EditorView {
             }
             let text = self.doc.line(li);
             let line_start = self.doc.rope.line_to_char(li);
-            let (placed, total) = layout(&text, self.base_rtl);
+            let (placed, total) = self.layout_line(li, &text);
             // Borland's bars: the execution line, else a breakpoint line.
             let bar = if self.exec_line == Some(li) {
                 Some(s.exec_bar)
@@ -678,11 +718,12 @@ impl EditorView {
                 } else if let Some(b) = bar {
                     b
                 } else {
-                    let kind = self
-                        .highlights
-                        .get(li)
-                        .and_then(|spans| spans.iter().rev().find(|(a, b, _)| (*a as usize) <= p.offset && p.offset < *b as usize))
-                        .map(|&(_, _, k)| k as usize);
+                    // (The language server's meaning first, then tree-sitter's.)
+                    let find = |spans: Option<&Vec<(u32, u32, u8)>>| {
+                        spans.and_then(|spans| spans.iter().rev().find(|(a, b, _)| (*a as usize) <= p.offset && p.offset < *b as usize)).map(|&(_, _, k)| k as usize)
+                    };
+                    let semantic = if self.semantic_version == self.doc.version { find(self.semantic.get(li)) } else { None };
+                    let kind = semantic.or_else(|| find(self.highlights.get(li)));
                     match kind {
                         Some(k) => {
                             let mut st = s.editor;
@@ -718,6 +759,11 @@ impl EditorView {
                 } else {
                     tc.print(x, y, g, st);
                 }
+            }
+            // Inlay hints (types, parameter names) in their places, dimmed.
+            for (b, t) in self.line_inlays(li) {
+                let x = text_x + self.col_of(li, *b) as i32 - self.scroll_x as i32;
+                tc.print(x, y, t, s.editor_ghost);
             }
             // Selected newline shows as one highlighted cell.
             let eol = line_start + text.chars().count();
@@ -755,6 +801,23 @@ impl EditorView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inlay_hints_make_room_and_the_cursor_stays_true() {
+        let mut ed = EditorView::new(Document::from_str("let x = 1;"));
+        ed.inlays.insert(0, vec![(5, ": i32".into())]);
+        ed.inlays_version = ed.doc.version;
+        // "let x: i32 = 1;": '=' at byte 6 moves right by the hint's width.
+        let (placed, _) = ed.layout_line(0, "let x = 1;");
+        assert_eq!(placed.iter().find(|p| p.offset == 6).unwrap().col, 6 + 5);
+        // The cursor at the hint's place sits before it; after it, past it.
+        assert_eq!(ed.col_of(0, 5), 5);
+        assert_eq!(ed.col_of(0, 6), 11);
+        assert_eq!(ed.byte_at_col(0, 11), 6);
+        // A change: the hint's stale, and goes.
+        ed.doc.insert(0, "x", 0);
+        assert_eq!(ed.col_of(0, 6), 6);
+    }
+
     use super::*;
     use crate::event::Mods;
 

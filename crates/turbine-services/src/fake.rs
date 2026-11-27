@@ -5,6 +5,13 @@
 //! - Completion: `println!`, `print!`, `panic!` and the words in the file.
 //! - Hover: "fake hover: <word>".
 //! - Definition: the first line that contains the word under the cursor.
+//! - Formatting: trailing spaces go. Code actions: "Replace BAD with GOOD"
+//!   on a BAD line, one that needs resolving ("Add a header"), and one
+//!   that's a command (the server then asks to append "// applied").
+//! - Signature help: `add(a: i32, b: i32)`, the parameter by commas.
+//! - Inlay hints: `: i32` after each `let name`. Semantic tokens: words
+//!   starting with a capital letter are types. Workspace symbols: every
+//!   `fn name` in the open files containing the query.
 
 use crate::rpc::{RpcProcess, read_message, write_message};
 use serde_json::{Value, json};
@@ -36,7 +43,16 @@ pub fn fake_server() -> std::io::Result<RpcProcess> {
                 let _ = write_message(w, &json!({"jsonrpc": "2.0", "id": id, "result": result}));
             };
             match method {
-                "initialize" => reply(&mut w, json!({"capabilities": {"textDocumentSync": 1, "completionProvider": {}, "hoverProvider": true, "definitionProvider": true}})),
+                "initialize" => reply(
+                    &mut w,
+                    json!({"capabilities": {
+                        "textDocumentSync": 1, "completionProvider": {}, "hoverProvider": true, "definitionProvider": true,
+                        "documentFormattingProvider": true, "codeActionProvider": {"resolveProvider": true},
+                        "signatureHelpProvider": {"triggerCharacters": ["(", ","]}, "inlayHintProvider": true,
+                        "semanticTokensProvider": {"legend": {"tokenTypes": ["type", "function"], "tokenModifiers": []}, "full": true},
+                        "workspaceSymbolProvider": true, "executeCommandProvider": {"commands": ["fake.apply"]}
+                    }}),
+                ),
                 "textDocument/didOpen" | "textDocument/didChange" => {
                     let text = if method == "textDocument/didOpen" {
                         p["textDocument"]["text"].as_str().unwrap_or("").to_string()
@@ -104,6 +120,105 @@ pub fn fake_server() -> std::io::Result<RpcProcess> {
                         reply(&mut w, json!({"changes": {uri.clone(): edits}}));
                     }
                 }
+                "textDocument/formatting" => {
+                    let text = docs.get(&uri).cloned().unwrap_or_default();
+                    let edits: Vec<Value> = text
+                        .lines()
+                        .enumerate()
+                        .filter(|(_, l)| l.ends_with([' ', '\t']))
+                        .map(|(i, l)| {
+                            let (a, b) = (crate::lsp::utf16_col(l, l.trim_end().len()), crate::lsp::utf16_col(l, l.len()));
+                            json!({"range": {"start": {"line": i, "character": a}, "end": {"line": i, "character": b}}, "newText": ""})
+                        })
+                        .collect();
+                    reply(&mut w, Value::Array(edits));
+                }
+                "textDocument/codeAction" => {
+                    let mut actions = Vec::new();
+                    for d in p["context"]["diagnostics"].as_array().into_iter().flatten() {
+                        actions.push(json!({"title": "Replace BAD with GOOD", "kind": "quickfix", "isPreferred": true, "diagnostics": [d],
+                            "edit": {"changes": {uri.clone(): [{"range": d["range"], "newText": "GOOD"}]}}}));
+                    }
+                    actions.push(json!({"title": "Add a header", "kind": "refactor", "data": {"uri": uri}}));
+                    actions.push(json!({"title": "Apply from the server", "command": "fake.apply", "arguments": [uri]}));
+                    reply(&mut w, Value::Array(actions));
+                }
+                "codeAction/resolve" => {
+                    let mut a = p.clone();
+                    let u = p["data"]["uri"].as_str().unwrap_or("").to_string();
+                    a["edit"] = json!({"changes": {u: [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "newText": "// header\n"}]}});
+                    reply(&mut w, a);
+                }
+                "workspace/executeCommand" => {
+                    reply(&mut w, Value::Null);
+                    let u = p["arguments"][0].as_str().unwrap_or("").to_string();
+                    let lines = docs.get(&u).map(|t| t.lines().count()).unwrap_or(0);
+                    let edit = json!({"changes": {u: [{"range": {"start": {"line": lines, "character": 0}, "end": {"line": lines, "character": 0}}, "newText": "// applied\n"}]}});
+                    let _ = write_message(&mut w, &json!({"jsonrpc": "2.0", "id": 9001, "method": "workspace/applyEdit", "params": {"edit": edit}}));
+                }
+                "textDocument/signatureHelp" => {
+                    let text = docs.get(&uri).cloned().unwrap_or_default();
+                    let l = text.lines().nth(p["position"]["line"].as_u64().unwrap_or(0) as usize).unwrap_or("");
+                    let b = crate::lsp::byte_of_utf16(l, p["position"]["character"].as_u64().unwrap_or(0) as u32);
+                    match l[..b].rfind('(') {
+                        Some(open) if !l[open..b].contains(')') => {
+                            let commas = l[open..b].matches(',').count();
+                            reply(&mut w, json!({"signatures": [{"label": "add(a: i32, b: i32) -> i32", "documentation": "Adds two numbers.",
+                                "parameters": [{"label": [4, 10]}, {"label": "b: i32"}]}], "activeSignature": 0, "activeParameter": commas}));
+                        }
+                        _ => reply(&mut w, Value::Null),
+                    }
+                }
+                "textDocument/inlayHint" => {
+                    let text = docs.get(&uri).cloned().unwrap_or_default();
+                    let hints: Vec<Value> = text
+                        .lines()
+                        .enumerate()
+                        .filter_map(|(i, l)| {
+                            let at = l.find("let ")? + 4;
+                            let end = l[at..].find(|c: char| !(c.is_alphanumeric() || c == '_')).map(|e| at + e).unwrap_or(l.len());
+                            (end > at && !l[end..].trim_start().starts_with(':')).then(|| json!({"position": {"line": i, "character": crate::lsp::utf16_col(l, end)}, "label": ": i32", "kind": 1}))
+                        })
+                        .collect();
+                    reply(&mut w, Value::Array(hints));
+                }
+                "textDocument/semanticTokens/full" => {
+                    let text = docs.get(&uri).cloned().unwrap_or_default();
+                    let mut data = Vec::new();
+                    let (mut pl, mut pc) = (0u32, 0u32);
+                    for (i, l) in text.lines().enumerate() {
+                        let mut b = 0;
+                        for word in l.split(|c: char| !c.is_alphanumeric()) {
+                            let at = b;
+                            b += word.len() + 1;
+                            if word.chars().next().is_some_and(char::is_uppercase) {
+                                let c = crate::lsp::utf16_col(l, at);
+                                let i = i as u32;
+                                let dc = if i == pl { c - pc } else { c };
+                                data.extend([i - pl, dc, word.encode_utf16().count() as u32, 0, 0]);
+                                (pl, pc) = (i, c);
+                            }
+                        }
+                    }
+                    reply(&mut w, json!({"data": data}));
+                }
+                "workspace/symbol" => {
+                    let q = p["query"].as_str().unwrap_or("").to_lowercase();
+                    let mut out = Vec::new();
+                    for (u, text) in &docs {
+                        for (i, l) in text.lines().enumerate() {
+                            if let Some(at) = l.find("fn ") {
+                                let name: String = l[at + 3..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                                if !name.is_empty() && name.to_lowercase().contains(&q) {
+                                    let c = crate::lsp::utf16_col(l, at + 3);
+                                    out.push(json!({"name": name, "kind": 12, "location": {"uri": u, "range": {"start": {"line": i, "character": c}, "end": {"line": i, "character": c}}}}));
+                                }
+                            }
+                        }
+                    }
+                    reply(&mut w, Value::Array(out));
+                }
+                "" => {} // (an answer to our applyEdit)
                 "shutdown" => reply(&mut w, Value::Null),
                 "exit" => return,
                 _ if id.is_some() => reply(&mut w, Value::Null),

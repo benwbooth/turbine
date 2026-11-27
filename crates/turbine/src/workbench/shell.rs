@@ -473,7 +473,7 @@ impl Workbench {
         }
     }
 
-    fn open_palette(&mut self, start: &str) {
+    pub(super) fn open_palette(&mut self, start: &str) {
         let root = self.shell.explorer.root.clone();
         let p = Palette::new(start, self.palette_commands(), Vec::new(), &root);
         self.shell.palette = Some(p);
@@ -485,6 +485,14 @@ impl Workbench {
         match p.pick(i) {
             Some(Pick::Command(c)) => self.run_command(&c),
             Some(Pick::Open(f)) => self.goto_file(&f, None, 0),
+            Some(Pick::Place(f, line, col16)) => {
+                self.goto_file(&f, Some(line), 0);
+                if let Some(w) = self.windows.last_mut() {
+                    let line = line.min(w.ed.doc.len_lines().saturating_sub(1));
+                    let b = lsp::byte_of_utf16(&w.ed.doc.line(line), col16 as u32);
+                    w.ed.cursor = w.ed.doc.line_byte_to_char(line, b);
+                }
+            }
             Some(Pick::Line(l)) => {
                 if let Some(ei) = self.editor_index() {
                     let id = self.windows[ei].win.id;
@@ -950,6 +958,8 @@ impl Workbench {
             Some("go.file")
         } else if cs && ch('o') {
             Some("go.symbol")
+        } else if k.is_ctrl('t') && !vim_editor && !self.windows.last().is_some_and(|w| w.is_terminal() && self.shell.focus == Focus::Editors) {
+            Some("go.workspace_symbol")
         } else if cs && ch('e') {
             Some("view.files")
         } else if cs && ch('f') {

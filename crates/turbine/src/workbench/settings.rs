@@ -31,6 +31,8 @@ const DEFS: &[Def] = &[
     Def { key: "line_numbers", category: "Editor", label: "Line numbers", description: "Number the lines in editors (QBasic and Edit never did).", kind: Kind::Bool },
     Def { key: "keymap", category: "Editor", label: "Keymap", description: "CUA keys (DOS and Windows style) or Vim.", kind: Kind::Choice },
     Def { key: "tab_complete", category: "Editor", label: "AI tab completion", description: "Grey suggestions from the AI model as you type; Tab takes one.", kind: Kind::Bool },
+    Def { key: "inlay_hints", category: "Editor", label: "Inlay hints", description: "Grey types and parameter names the language server adds between the words (they aren't in the file).", kind: Kind::Bool },
+    Def { key: "semantic", category: "Editor", label: "Semantic highlighting", description: "Colour words by what the language server knows they are (a type, a function), over the syntax colours.", kind: Kind::Bool },
     Def { key: "sidebar", category: "Layout", label: "Primary side bar", description: "The Explorer, Outline, Search, Source Control, Run and Debug and Extensions at the left (Ctrl+B).", kind: Kind::Bool },
     Def { key: "panel", category: "Layout", label: "Panel", description: "Problems, Output and terminals under the editors (Ctrl+J).", kind: Kind::Bool },
     Def { key: "secondary", category: "Layout", label: "Secondary side bar", description: "The AI chat at the right (Ctrl+Alt+B).", kind: Kind::Bool },
@@ -58,6 +60,8 @@ impl Workbench {
             "line_numbers" => b(self.editor_index().map(|i| self.windows[i].ed.line_numbers).unwrap_or(self.theme.style.line_numbers)),
             "keymap" => self.keymap.name().to_string(),
             "tab_complete" => b(self.tab_complete),
+            "inlay_hints" => b(!self.lspx.inlays_off),
+            "semantic" => b(!self.lspx.semantic_off),
             "sidebar" => b(self.shell.dock.left.visible),
             "panel" => b(self.shell.dock.bottom.visible),
             "secondary" => b(self.shell.dock.right.visible),
@@ -110,6 +114,22 @@ impl Workbench {
             }
             "keymap" => self.set_keymap(if value == Keymap::Vim.name() { Keymap::Vim } else { Keymap::Cua }),
             "tab_complete" => self.tab_complete = on,
+            "inlay_hints" => {
+                self.lspx.inlays_off = !on;
+                for w in &mut self.windows {
+                    w.ed.inlays.clear();
+                    w.ed.inlays_version = u64::MAX;
+                }
+                self.lspx.inlay_req.clear();
+            }
+            "semantic" => {
+                self.lspx.semantic_off = !on;
+                for w in &mut self.windows {
+                    w.ed.semantic.clear();
+                    w.ed.semantic_version = u64::MAX;
+                }
+                self.lspx.sem_req.clear();
+            }
             "sidebar" => toggle(self, "view.sidebar", self.shell.dock.left.visible),
             "panel" => toggle(self, "view.panel", self.shell.dock.bottom.visible),
             "secondary" => toggle(self, "view.secondary", self.shell.dock.right.visible),
@@ -131,6 +151,8 @@ impl Workbench {
         json!({
             "keymap": self.keymap.name(),
             "tab_complete": self.tab_complete,
+            "inlay_hints": !self.lspx.inlays_off,
+            "semantic": !self.lspx.semantic_off,
             "hidden_files": self.shell.explorer.show_hidden,
             "chat_model": self.chat_model,
             "chat_agent": self.shell.chat_agent,
@@ -148,6 +170,12 @@ impl Workbench {
         }
         if let Some(b) = v["tab_complete"].as_bool() {
             self.tab_complete = b;
+        }
+        if let Some(b) = v["inlay_hints"].as_bool() {
+            self.lspx.inlays_off = !b;
+        }
+        if let Some(b) = v["semantic"].as_bool() {
+            self.lspx.semantic_off = !b;
         }
         if let Some(b) = v["hidden_files"].as_bool() {
             self.shell.explorer.set_show_hidden(b);

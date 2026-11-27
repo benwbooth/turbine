@@ -1,7 +1,7 @@
 //! The command palette and quick open (Cursor's Ctrl+Shift+P and Ctrl+P):
 //! one field over a list, filtered fuzzily as you type. What's typed first
 //! picks the mode, as in VS Code: `>` commands, `:` a line, `@` a symbol in
-//! the file, anything else a file in the project.
+//! the file, `#` a symbol in the project, anything else a file in the project.
 
 use crate::views::LineInput;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,8 @@ pub enum Pick {
     Command(String),
     Open(PathBuf),
     Line(usize),
+    /// A place in a file: (path, line, UTF-16 column).
+    Place(PathBuf, usize, usize),
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +30,10 @@ pub struct Palette {
     pub list: ListView,
     commands: Vec<Item>,
     symbols: Vec<Item>,
+    /// The project's symbols matching what's typed after `#` (from the
+    /// language server), and what to say when there are none.
+    workspace: Vec<Item>,
+    workspace_empty: &'static str,
     files: Vec<Item>,
     files_rx: Option<Receiver<Vec<PathBuf>>>,
     root: PathBuf,
@@ -72,6 +78,8 @@ impl Palette {
             list: ListView::new(),
             commands,
             symbols,
+            workspace: Vec::new(),
+            workspace_empty: "Searching…",
             files: Vec::new(),
             files_rx: None,
             root: root.to_path_buf(),
@@ -128,6 +136,7 @@ impl Palette {
             Some('>') => "Command Palette",
             Some(':') => "Go to Line",
             Some('@') => "Go to Symbol in Editor",
+            Some('#') => "Go to Symbol in Workspace",
             _ => "Go to File",
         }
     }
@@ -138,6 +147,18 @@ impl Palette {
         let (pool, q): (&[Item], &str) = match text.chars().next() {
             Some('>') => (&self.commands, text[1..].trim()),
             Some('@') => (&self.symbols, text[1..].trim()),
+            Some('#') => {
+                // (The server already matched them.)
+                self.shown = self.workspace.clone();
+                let rows = if self.shown.is_empty() {
+                    vec![Row::new(if text[1..].trim().is_empty() { "Type a symbol's name" } else { self.workspace_empty })]
+                } else {
+                    self.shown.iter().map(|i| Row::new(i.label.clone()).detail(i.detail.clone())).collect()
+                };
+                self.list.set_rows(rows);
+                self.list.select(0);
+                return;
+            }
             Some(':') => {
                 let n = text[1..].trim().parse::<usize>().ok();
                 self.shown = n.map(|n| Item { label: format!("Go to line {n}"), detail: String::new(), pick: Pick::Line(n.saturating_sub(1)) }).into_iter().collect();
@@ -175,6 +196,15 @@ impl Palette {
     pub fn set_symbols(&mut self, syms: Vec<Item>) {
         self.symbols = syms;
         if self.input.text.starts_with('@') {
+            self.refilter();
+        }
+    }
+
+    /// The project's symbols for what's typed after `#`.
+    pub fn set_workspace_symbols(&mut self, items: Vec<Item>, empty: &'static str) {
+        self.workspace = items;
+        self.workspace_empty = empty;
+        if self.input.text.starts_with('#') {
             self.refilter();
         }
     }

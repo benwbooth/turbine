@@ -50,6 +50,46 @@ fn candidates(lang: &str) -> &'static [&'static [&'static str]] {
     candidates
 }
 
+/// How to install a language's server: (server, shell command). With Nix
+/// on the PATH it's a `nix profile install`, else the server's own way.
+pub fn install_command(lang: &str) -> Option<(&'static str, String)> {
+    // (server, nixpkgs attribute, the other way)
+    let (server, nixpkg, other): (&str, &str, &str) = match lang {
+        "bash" => ("bash-language-server", "bash-language-server", "npm install -g bash-language-server"),
+        "python" => ("basedpyright", "basedpyright", "pip install --user basedpyright"),
+        "javascript" | "typescript" | "tsx" => ("typescript-language-server", "typescript-language-server", "npm install -g typescript-language-server typescript"),
+        "rust" => ("rust-analyzer", "rust-analyzer", "rustup component add rust-analyzer"),
+        "go" => ("gopls", "gopls", "go install golang.org/x/tools/gopls@latest"),
+        "c" | "cpp" => ("clangd", "clang-tools", "sudo apt install clangd"),
+        "java" => ("jdtls", "jdt-language-server", ""),
+        "ruby" => ("ruby-lsp", "rubyPackages.ruby-lsp", "gem install ruby-lsp"),
+        "lua" => ("lua-language-server", "lua-language-server", ""),
+        "json" | "html" | "css" => ("vscode-langservers-extracted", "vscode-langservers-extracted", "npm install -g vscode-langservers-extracted"),
+        "yaml" => ("yaml-language-server", "yaml-language-server", "npm install -g yaml-language-server"),
+        "toml" => ("taplo", "taplo", "cargo install taplo-cli --locked --features lsp"),
+        "markdown" => ("marksman", "marksman", ""),
+        "nix" => ("nil", "nil", ""),
+        "zig" => ("zls", "zls", ""),
+        "haskell" => ("haskell-language-server", "haskell-language-server", "ghcup install hls"),
+        "ocaml" => ("ocaml-lsp", "ocamlPackages.ocaml-lsp", "opam install ocaml-lsp-server"),
+        "elixir" => ("elixir-ls", "elixir-ls", ""),
+        "kotlin" => ("kotlin-language-server", "kotlin-language-server", ""),
+        "c-sharp" => ("csharp-ls", "csharp-ls", "dotnet tool install --global csharp-ls"),
+        "php" => ("intelephense", "intelephense", "npm install -g intelephense"),
+        "dart" => ("dart", "dart", ""),
+        "qml" => ("qmlls", "kdePackages.qtdeclarative", ""),
+        _ => return None,
+    };
+    let has_nix = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("nix").is_file()));
+    if has_nix {
+        Some((server, format!("nix profile install nixpkgs#{nixpkg}")))
+    } else if !other.is_empty() {
+        Some((server, other.to_string()))
+    } else {
+        None
+    }
+}
+
 /// The LSP language id for one of Turbine's language names.
 pub fn language_id(lang: &str) -> &str {
     match lang {
@@ -154,6 +194,8 @@ pub struct Diagnostic {
     pub severity: u8,
     pub message: String,
     pub source: String,
+    /// As the server sent it (code actions get it back as context).
+    pub raw: Value,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -171,6 +213,43 @@ pub struct Location {
     pub start: Pos,
 }
 
+/// Edits to one file: (start, end, new text).
+pub type TextEdits = Vec<(Pos, Pos, String)>;
+/// Edits to several files.
+pub type WorkspaceEdit = Vec<(PathBuf, TextEdits)>;
+
+/// A quick fix or refactoring the server offers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodeAction {
+    pub title: String,
+    pub kind: String,
+    pub preferred: bool,
+    pub edit: Option<WorkspaceEdit>,
+    /// A command to run on the server (after the edit, if any).
+    pub command: Option<Value>,
+    /// The action as sent (to resolve it when it came without its edit).
+    pub raw: Value,
+}
+
+/// Signature help: the call's signature, and the active parameter's byte
+/// range in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Signature {
+    pub label: String,
+    pub active: Option<(usize, usize)>,
+    pub doc: String,
+}
+
+/// A symbol anywhere in the project.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceSymbol {
+    pub name: String,
+    pub kind: u8,
+    pub container: String,
+    pub path: PathBuf,
+    pub start: Pos,
+}
+
 #[derive(Debug)]
 pub enum LspEvent {
     Ready,
@@ -181,6 +260,17 @@ pub enum LspEvent {
     References { id: i64, locations: Vec<Location> },
     /// A rename's edits: per file, (start, end, new text), in the order given.
     Rename { id: i64, edits: Vec<(PathBuf, Vec<(Pos, Pos, String)>)> },
+    Formatting { id: i64, edits: TextEdits },
+    CodeActions { id: i64, actions: Vec<CodeAction> },
+    CodeActionResolved { id: i64, action: CodeAction },
+    Signature { id: i64, sig: Option<Signature> },
+    /// Inlay hints: (where, text, padding before, padding after).
+    InlayHints { id: i64, hints: Vec<(Pos, String, bool, bool)> },
+    /// Semantic tokens: (line, start, length in UTF-16 units, token type).
+    SemanticTokens { id: i64, tokens: Vec<(u32, u32, u32, String)> },
+    WorkspaceSymbols { id: i64, symbols: Vec<WorkspaceSymbol> },
+    /// The server asks to apply edits (after a command it ran).
+    ApplyEdit { edits: WorkspaceEdit },
     /// A request failed (or got an error back).
     Failed { id: i64, message: String },
     Log(String),
@@ -195,6 +285,13 @@ enum Kind {
     Definition,
     References,
     Rename,
+    Formatting,
+    CodeAction,
+    CodeActionResolve,
+    SignatureHelp,
+    InlayHint,
+    SemanticTokens,
+    WorkspaceSymbol,
     Other,
 }
 
@@ -209,6 +306,10 @@ pub struct LspClient {
     queued: Vec<Value>,
     open: HashMap<String, i64>,
     dead: Option<String>,
+    /// The semantic token types the server uses (from its capabilities).
+    legend: Vec<String>,
+    /// What the server said it can do.
+    pub capabilities: Value,
 }
 
 impl LspClient {
@@ -228,6 +329,8 @@ impl LspClient {
             queued: Vec::new(),
             open: HashMap::new(),
             dead: None,
+            legend: Vec::new(),
+            capabilities: Value::Null,
         };
         let root_uri = path_to_uri(root);
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -246,9 +349,26 @@ impl LspClient {
                         "publishDiagnostics": {"relatedInformation": false},
                         "completion": {"completionItem": {"snippetSupport": false, "documentationFormat": ["plaintext", "markdown"]}},
                         "hover": {"contentFormat": ["plaintext", "markdown"]},
-                        "definition": {"linkSupport": false}
+                        "definition": {"linkSupport": false},
+                        "references": {},
+                        "rename": {"prepareSupport": false},
+                        "formatting": {},
+                        "codeAction": {
+                            "codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports"]}},
+                            "resolveSupport": {"properties": ["edit"]},
+                            "dataSupport": true,
+                            "isPreferredSupport": true
+                        },
+                        "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext", "markdown"], "parameterInformation": {"labelOffsetSupport": true}}},
+                        "inlayHint": {},
+                        "semanticTokens": {
+                            "requests": {"full": true},
+                            "tokenTypes": ["namespace", "type", "class", "enum", "interface", "struct", "typeParameter", "parameter", "variable", "property", "enumMember", "event", "function", "method", "macro", "keyword", "modifier", "comment", "string", "number", "regexp", "operator", "decorator"],
+                            "tokenModifiers": [],
+                            "formats": ["relative"]
+                        }
                     },
-                    "workspace": {"workspaceFolders": true, "configuration": false}
+                    "workspace": {"workspaceFolders": true, "configuration": false, "applyEdit": true, "symbol": {}, "workspaceEdit": {"documentChanges": true}}
                 }
             }),
         );
@@ -347,6 +467,52 @@ impl LspClient {
         self.request_kind(Kind::Rename, "textDocument/rename", p)
     }
 
+    pub fn formatting(&mut self, path: &Path, tab_size: u32, spaces: bool) -> i64 {
+        let p = json!({"textDocument": {"uri": path_to_uri(path)}, "options": {"tabSize": tab_size, "insertSpaces": spaces}});
+        self.request_kind(Kind::Formatting, "textDocument/formatting", p)
+    }
+
+    /// Actions for a range, with the diagnostics there as context.
+    pub fn code_actions(&mut self, path: &Path, start: Pos, end: Pos, diagnostics: Vec<Value>) -> i64 {
+        let p = json!({
+            "textDocument": {"uri": path_to_uri(path)},
+            "range": {"start": {"line": start.line, "character": start.character}, "end": {"line": end.line, "character": end.character}},
+            "context": {"diagnostics": diagnostics}
+        });
+        self.request_kind(Kind::CodeAction, "textDocument/codeAction", p)
+    }
+
+    pub fn resolve_code_action(&mut self, raw: &Value) -> i64 {
+        self.request_kind(Kind::CodeActionResolve, "codeAction/resolve", raw.clone())
+    }
+
+    /// Run a command on the server (it may answer with workspace/applyEdit).
+    pub fn execute_command(&mut self, command: &Value) {
+        let p = json!({"command": command["command"], "arguments": command.get("arguments").cloned().unwrap_or(json!([]))});
+        self.request_kind(Kind::Other, "workspace/executeCommand", p);
+    }
+
+    pub fn signature_help(&mut self, path: &Path, pos: Pos) -> i64 {
+        self.request_kind(Kind::SignatureHelp, "textDocument/signatureHelp", Self::at(path, pos))
+    }
+
+    pub fn inlay_hints(&mut self, path: &Path, from_line: u32, to_line: u32) -> i64 {
+        let p = json!({"textDocument": {"uri": path_to_uri(path)}, "range": {"start": {"line": from_line, "character": 0}, "end": {"line": to_line, "character": 0}}});
+        self.request_kind(Kind::InlayHint, "textDocument/inlayHint", p)
+    }
+
+    /// Semantic tokens, when the server has them.
+    pub fn semantic_tokens(&mut self, path: &Path) -> Option<i64> {
+        if self.legend.is_empty() {
+            return None;
+        }
+        Some(self.request_kind(Kind::SemanticTokens, "textDocument/semanticTokens/full", json!({"textDocument": {"uri": path_to_uri(path)}})))
+    }
+
+    pub fn workspace_symbols(&mut self, query: &str) -> i64 {
+        self.request_kind(Kind::WorkspaceSymbol, "workspace/symbol", json!({"query": query}))
+    }
+
     pub fn waiting(&self) -> usize {
         self.pending.len()
     }
@@ -383,6 +549,10 @@ impl LspClient {
                     Value::Array(vec![Value::Null; n])
                 }
                 "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" => Value::Null,
+                "workspace/applyEdit" => {
+                    evs.push(LspEvent::ApplyEdit { edits: workspace_edit(&m["params"]["edit"]) });
+                    json!({"applied": true})
+                }
                 "workspace/workspaceFolders" => {
                     json!([{"uri": path_to_uri(&self.root), "name": self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()}])
                 }
@@ -424,6 +594,11 @@ impl LspClient {
         match kind {
             Kind::Initialize => {
                 self.ready = true;
+                self.capabilities = r["capabilities"].clone();
+                self.legend = r["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
+                    .as_array()
+                    .map(|a| a.iter().map(|t| t.as_str().unwrap_or("").to_string()).collect())
+                    .unwrap_or_default();
                 self.rpc.send(json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
                 for q in std::mem::take(&mut self.queued) {
                     self.rpc.send(q);
@@ -478,29 +653,69 @@ impl LspClient {
                     .unwrap_or_default();
                 evs.push(LspEvent::References { id, locations });
             }
-            Kind::Rename => {
-                // A WorkspaceEdit: `changes` {uri: [TextEdit]}, or `documentChanges`.
-                let mut edits: Vec<(PathBuf, Vec<(Pos, Pos, String)>)> = Vec::new();
-                let text_edits = |a: &Value| -> Vec<(Pos, Pos, String)> {
-                    a.as_array()
-                        .map(|v| v.iter().map(|e| (pos(&e["range"]["start"]), pos(&e["range"]["end"]), e["newText"].as_str().unwrap_or("").to_string())).collect())
-                        .unwrap_or_default()
-                };
-                if let Some(ch) = r["changes"].as_object() {
-                    for (uri, a) in ch {
-                        if let Some(p) = uri_to_path(uri) {
-                            edits.push((p, text_edits(a)));
-                        }
+            Kind::Rename => evs.push(LspEvent::Rename { id, edits: workspace_edit(r) }),
+            Kind::Formatting => evs.push(LspEvent::Formatting { id, edits: text_edits(r) }),
+            Kind::CodeAction => {
+                let actions = r.as_array().map(|a| a.iter().map(code_action).collect()).unwrap_or_default();
+                evs.push(LspEvent::CodeActions { id, actions });
+            }
+            Kind::CodeActionResolve => evs.push(LspEvent::CodeActionResolved { id, action: code_action(r) }),
+            Kind::SignatureHelp => evs.push(LspEvent::Signature { id, sig: signature(r) }),
+            Kind::InlayHint => {
+                let hints = r
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .map(|h| {
+                                let label = match &h["label"] {
+                                    Value::String(s) => s.clone(),
+                                    Value::Array(parts) => parts.iter().filter_map(|p| p["value"].as_str()).collect(),
+                                    _ => String::new(),
+                                };
+                                (pos(&h["position"]), label, h["paddingLeft"].as_bool().unwrap_or(false), h["paddingRight"].as_bool().unwrap_or(false))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                evs.push(LspEvent::InlayHints { id, hints });
+            }
+            Kind::SemanticTokens => {
+                // Relative: (delta line, delta start, length, type, modifiers) ...
+                let data: Vec<u64> = r["data"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+                let (mut line, mut start) = (0u32, 0u32);
+                let mut tokens = Vec::new();
+                for t in data.chunks_exact(5) {
+                    if t[0] > 0 {
+                        line += t[0] as u32;
+                        start = t[1] as u32;
+                    } else {
+                        start += t[1] as u32;
+                    }
+                    if let Some(ty) = self.legend.get(t[3] as usize) {
+                        tokens.push((line, start, t[2] as u32, ty.clone()));
                     }
                 }
-                if let Some(dc) = r["documentChanges"].as_array() {
-                    for d in dc {
-                        if let Some(p) = d["textDocument"]["uri"].as_str().and_then(uri_to_path) {
-                            edits.push((p, text_edits(&d["edits"])));
-                        }
-                    }
-                }
-                evs.push(LspEvent::Rename { id, edits });
+                evs.push(LspEvent::SemanticTokens { id, tokens });
+            }
+            Kind::WorkspaceSymbol => {
+                let symbols = r
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| {
+                                let loc = &s["location"];
+                                Some(WorkspaceSymbol {
+                                    name: s["name"].as_str()?.to_string(),
+                                    kind: s["kind"].as_u64().unwrap_or(0) as u8,
+                                    container: s["containerName"].as_str().unwrap_or("").to_string(),
+                                    path: uri_to_path(loc["uri"].as_str()?)?,
+                                    start: pos(&loc["range"]["start"]),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                evs.push(LspEvent::WorkspaceSymbols { id, symbols });
             }
             Kind::Other => {}
         }
@@ -515,6 +730,68 @@ impl Drop for LspClient {
     }
 }
 
+fn text_edits(a: &Value) -> TextEdits {
+    a.as_array()
+        .map(|v| v.iter().map(|e| (pos(&e["range"]["start"]), pos(&e["range"]["end"]), e["newText"].as_str().unwrap_or("").to_string())).collect())
+        .unwrap_or_default()
+}
+
+/// A WorkspaceEdit: `changes` {uri: [TextEdit]}, or `documentChanges`.
+fn workspace_edit(r: &Value) -> WorkspaceEdit {
+    let mut edits = Vec::new();
+    if let Some(ch) = r["changes"].as_object() {
+        for (uri, a) in ch {
+            if let Some(p) = uri_to_path(uri) {
+                edits.push((p, text_edits(a)));
+            }
+        }
+    }
+    if let Some(dc) = r["documentChanges"].as_array() {
+        for d in dc {
+            if let Some(p) = d["textDocument"]["uri"].as_str().and_then(uri_to_path) {
+                edits.push((p, text_edits(&d["edits"])));
+            }
+        }
+    }
+    edits
+}
+
+fn code_action(a: &Value) -> CodeAction {
+    // (A bare Command is an action too.)
+    let is_command = a["command"].is_string();
+    CodeAction {
+        title: a["title"].as_str().unwrap_or("").to_string(),
+        kind: a["kind"].as_str().unwrap_or("").to_string(),
+        preferred: a["isPreferred"].as_bool().unwrap_or(false),
+        edit: a.get("edit").filter(|e| !e.is_null()).map(workspace_edit),
+        command: if is_command { Some(a.clone()) } else { a.get("command").filter(|c| !c.is_null()).cloned() },
+        raw: a.clone(),
+    }
+}
+
+fn signature(r: &Value) -> Option<Signature> {
+    let sigs = r["signatures"].as_array()?;
+    let i = r["activeSignature"].as_u64().unwrap_or(0) as usize;
+    let s = sigs.get(i).or(sigs.first())?;
+    let label = s["label"].as_str()?.to_string();
+    let ap = s["activeParameter"].as_u64().or(r["activeParameter"].as_u64()).unwrap_or(0) as usize;
+    let active = s["parameters"].as_array().and_then(|ps| ps.get(ap)).and_then(|p| match &p["label"] {
+        // [start, end] in UTF-16 units of the label, or the parameter's text.
+        Value::Array(o) if o.len() == 2 => {
+            let (a, b) = (o[0].as_u64()? as u32, o[1].as_u64()? as u32);
+            Some((byte_of_utf16(&label, a), byte_of_utf16(&label, b)))
+        }
+        Value::String(t) => label.find(t.as_str()).map(|i| (i, i + t.len())),
+        _ => None,
+    });
+    let doc = match &s["documentation"] {
+        Value::String(d) => d.clone(),
+        Value::Object(o) => o.get("value").and_then(Value::as_str).unwrap_or("").to_string(),
+        _ => String::new(),
+    };
+    Some(Signature { label, active, doc })
+}
+
 fn pos(v: &Value) -> Pos {
     Pos { line: v["line"].as_u64().unwrap_or(0) as u32, character: v["character"].as_u64().unwrap_or(0) as u32 }
 }
@@ -526,6 +803,7 @@ fn diagnostic(d: &Value) -> Diagnostic {
         severity: d["severity"].as_u64().unwrap_or(1) as u8,
         message: d["message"].as_str().unwrap_or("").to_string(),
         source: d["source"].as_str().unwrap_or("").to_string(),
+        raw: d.clone(),
     }
 }
 
