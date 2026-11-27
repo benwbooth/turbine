@@ -127,8 +127,9 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 /// Set up the workbench (files to open, automation socket, AI).
 pub fn init(files: &[PathBuf]) {
     let mut wb = Workbench::new(files);
-    // (The app draws pictures itself.)
+    // (The app draws pictures itself, and its own title bar unless turned off.)
     wb.set_images_inline(true);
+    wb.default_own_title_bar(true);
     let (tx, rx) = mpsc::channel::<Request>();
     wb.set_requests(rx);
     let socket = turbine::server::listen(None, tx).ok();

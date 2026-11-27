@@ -883,6 +883,11 @@ impl Workbench {
         self.agent.is_some() || self.pending_task.is_some() || self.chat_streaming.is_some() || self.pending_question.is_some()
     }
 
+    /// Its own title bar unless the settings say otherwise (the app's default).
+    pub fn default_own_title_bar(&mut self, on: bool) {
+        self.shell.own_title_bar = on;
+    }
+
     /// The app's window drawn with Turbine's own title bar (no desktop frame).
     pub fn own_title_bar(&self) -> bool {
         self.shell.own_title_bar
