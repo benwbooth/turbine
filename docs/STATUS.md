@@ -12,6 +12,7 @@
 | Encodings: UTF-8/16, DOS CP437/850, chardetng, line endings | done |
 | Colour schemes + control styles | 4 + 3 built in |
 | Automation tree + JSON-lines socket + paced agent driver | done |
+| Agents read terminal screens (snapshot/text) and `wait` for text to appear | done |
 | Headless mode with scripts and text screenshots | done |
 | Find/replace | planned |
 | Splitters inside windows, file tree panel | planned |
@@ -23,7 +24,9 @@
 | tree-sitter highlighting (Helix grammars on demand) | planned |
 | LSP client | planned |
 | DAP client | planned |
-| Embedded terminal (libghostty-vt, alacritty_terminal fallback) | planned |
+| Embedded terminal (turbine-term: libghostty-vt on a PTY; works in TUI mode too) | done |
+| Terminal: kitty/xterm key encoding, bracketed paste, wheel scrollback, DOS palette, title, restart on Enter after exit | done |
+| Terminal: mouse reporting, selection/copy, find, OSC 133 marks, images, split terminals, event-driven wakeups (now ~60 Hz ticks while open) | planned |
 | WASI extension host (wasmtime, `wit/turbine.wit`) | interface drafted |
 | AI providers, tab completion, assistant, agent tools | planned |
 | hearth AI hub provider + MCP server for hearth's assistant | planned |

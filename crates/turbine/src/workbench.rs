@@ -3,6 +3,7 @@
 
 use crate::agent::{Driver, Output, Step};
 use crate::vim::{self, Keymap};
+use turbine_term::{Spawn, TerminalView};
 use turbine_vi::{ExAction, Out as VimOut, Session};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -30,6 +31,16 @@ struct EdWin {
     ed: EditorView,
     /// The window's vim state while the Vim keymap is on.
     vim: Option<Session>,
+    /// Set for terminal windows (then `ed` is an unused empty editor).
+    term: Option<TerminalView>,
+    /// The terminal's screen as text, refreshed when it changes (for agents).
+    term_text: String,
+}
+
+impl EdWin {
+    fn is_terminal(&self) -> bool {
+        self.term.is_some()
+    }
 }
 
 pub struct Workbench {
@@ -52,6 +63,8 @@ pub struct Workbench {
     selecting: Option<usize>,
     last_click: Option<(Point, Instant)>,
     keymap: Keymap,
+    /// True while applying an agent's input (it types literal text).
+    from_agent: bool,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -90,7 +103,7 @@ fn menus() -> Vec<Menu> {
                 it("Re~v~ert File", "", "file.revert"),
                 it("~C~lose Editor", "Alt+F3", "window.close"),
                 sep(),
-                soon("~D~OS Shell", "", "view.terminal"),
+                it("~D~OS Shell", "", "view.terminal"),
                 it("E~x~it", "Alt+X", "app.quit"),
             ],
         ),
@@ -152,7 +165,7 @@ fn menus() -> Vec<Menu> {
                 sep(),
                 soon("~P~roblems", "Ctrl+Shift+M", "view.problems"),
                 soon("~O~utput", "", "view.output"),
-                soon("~T~erminal", "Ctrl+`", "view.terminal"),
+                it("~T~erminal", "Ctrl+`", "view.terminal"),
                 sep(),
                 it("~L~ine Numbers", "", "view.line_numbers"),
                 it("Right to Le~f~t", "", "view.rtl"),
@@ -197,7 +210,7 @@ fn menus() -> Vec<Menu> {
         Menu::new(
             "~T~erminal",
             vec![
-                soon("~N~ew Terminal", "Ctrl+Shift+`", "terminal.new"),
+                it("~N~ew Terminal", "Ctrl+Shift+`", "terminal.new"),
                 soon("~S~plit Terminal", "", "terminal.split"),
                 sep(),
                 soon("~R~un Task...", "", "terminal.task"),
@@ -291,6 +304,7 @@ impl Workbench {
             selecting: None,
             last_click: None,
             keymap: Keymap::Cua,
+            from_agent: false,
         };
         for f in files {
             wb.open_path(f);
@@ -360,11 +374,28 @@ impl Workbench {
             win.zoomed = false;
         }
         self.next_id += 1;
-        let mut ew = EdWin { win, ed: EditorView::new(doc), vim: None };
+        let mut ew = EdWin { win, ed: EditorView::new(doc), vim: None, term: None, term_text: String::new() };
         if self.keymap == Keymap::Vim {
             ew.vim = Some(vim::attach(&mut ew.ed));
         }
         self.windows.push(ew);
+        self.renumber();
+    }
+
+    /// A terminal window running the user's shell (or `argv`).
+    fn new_terminal(&mut self, argv: Vec<String>) {
+        let d = self.desktop();
+        // The lower part of the desktop, like VS Code's panel.
+        let h = (d.h * 2 / 5).max(8).min(d.h);
+        let rect = Rect::new(d.x, d.bottom() - h, d.w, h);
+        let mut win = Window::new(self.next_id, "Terminal", rect);
+        win.min_h = 4;
+        self.next_id += 1;
+        let view = TerminalView::new(Spawn { argv, ..Default::default() });
+        if let Some(e) = view.error() {
+            self.say(format!("Terminal: {e}"));
+        }
+        self.windows.push(EdWin { win, ed: EditorView::new(Document::new()), vim: None, term: Some(view), term_text: String::new() });
         self.renumber();
     }
 
@@ -414,6 +445,7 @@ impl Workbench {
         let desk = self.desktop();
         match cmd {
             "file.new" => self.new_window(Document::new()),
+            "view.terminal" | "terminal.new" => self.new_terminal(Vec::new()),
             "file.open" => self.open_dialog(std::env::current_dir().unwrap_or_default()),
             "file.save" => self.save(false),
             "file.save_as" => self.save(true),
@@ -836,7 +868,10 @@ impl Workbench {
                 if let Some(d) = &mut self.dialog {
                     d.handle_paste(&s);
                 } else if let Some(w) = self.active() {
-                    w.ed.insert_text(&s);
+                    match &mut w.term {
+                        Some(t) => t.paste(&s),
+                        None => w.ed.insert_text(&s),
+                    }
                 }
             }
             Event::Focus(_) => {}
@@ -858,13 +893,29 @@ impl Workbench {
             }
             return;
         }
+        // A terminal gets every key except the few Turbine keeps: F10 (menus),
+        // Alt+F3 (close) and Alt+0..9 (windows). Shells need Alt+letters.
+        let reserved = k.is(Key::F(10), Mods::NONE)
+            || k.is(Key::F(3), Mods::ALT)
+            || (k.mods.alt && !k.mods.ctrl && matches!(k.key, Key::Char('0'..='9')));
+        if !self.menubar.is_open() && !reserved && self.windows.last().is_some_and(EdWin::is_terminal) {
+            let from_agent = self.from_agent;
+            let w = self.windows.last_mut().unwrap();
+            let mut k = k;
+            // Agents type literal text: their newline is a plain Enter here.
+            if from_agent && k.key == Key::Enter {
+                k.mods = Mods::NONE;
+            }
+            w.term.as_mut().unwrap().handle_key(&k);
+            return;
+        }
         match self.menubar.handle_key(&k) {
             MenuResult::Command(c) => return self.run_command(&c),
             MenuResult::Consumed => return,
             MenuResult::Ignored => {}
         }
         // Vim gets every key but the F-keys and Alt chords (menus).
-        let vim_on = self.keymap == Keymap::Vim && !self.windows.is_empty();
+        let vim_on = self.keymap == Keymap::Vim && self.windows.last().is_some_and(|w| !w.is_terminal());
         if vim_on && !matches!(k.key, Key::F(_)) && !k.mods.alt {
             let w = self.windows.last_mut().unwrap();
             let session = w.vim.get_or_insert_with(Session::new);
@@ -875,7 +926,9 @@ impl Workbench {
                 VimOut::NotMine => {}
             }
         }
-        let shortcut = if k.is(Key::F(6), Mods::SHIFT) {
+        let shortcut = if k.is(Key::Char('`'), Mods::CTRL) {
+            Some("view.terminal")
+        } else if k.is(Key::F(6), Mods::SHIFT) {
             Some("window.prev")
         } else if k.is_alt('0') {
             Some("window.list")
@@ -1213,6 +1266,7 @@ impl Workbench {
                             w.ed.cursor = w.ed.doc.rope.line_to_char(line.min(w.ed.doc.len_lines().saturating_sub(1)));
                         }
                     }
+                    Hit::Inside if w.term.is_some() => {}
                     Hit::Inside => {
                         if w.ed.handle_mouse(&m) {
                             self.selecting = Some(i);
@@ -1225,7 +1279,14 @@ impl Workbench {
                 let w = &mut self.windows[i];
                 let mut m2 = m;
                 m2.pos = w.win.inner().center();
-                w.ed.handle_mouse(&m2);
+                match &mut w.term {
+                    Some(t) => {
+                        t.handle_mouse(&m2);
+                    }
+                    None => {
+                        w.ed.handle_mouse(&m2);
+                    }
+                }
             }
             _ => {}
         }
@@ -1271,6 +1332,14 @@ impl Workbench {
                 .focused(i == top && self.dialog.is_none());
             wn = wn.child(Node::new(format!("window.{id}.close"), "button", "Close", w.win.close_rect()));
             wn = wn.child(Node::new(format!("window.{id}.zoom"), "button", "Zoom", w.win.zoom_rect()));
+            if w.term.is_some() {
+                let tn = Node::new(format!("terminal.{id}"), "terminal", w.win.title.clone(), w.win.inner())
+                    .focused(i == top && self.dialog.is_none())
+                    .value(w.term_text.clone());
+                wn = wn.child(tn);
+                root = root.child(wn);
+                continue;
+            }
             let mut ed = Node::new(format!("editor.{id}"), "editor", w.ed.doc.title(), w.win.inner())
                 .focused(i == top && self.dialog.is_none())
                 .value(format!(
@@ -1380,7 +1449,11 @@ impl Workbench {
                 return;
             }
             "text" => {
-                let t = self.windows.last().map(|w| w.ed.doc.rope.to_string()).unwrap_or_default();
+                let t = self
+                    .windows
+                    .last()
+                    .map(|w| if w.term.is_some() { w.term_text.clone() } else { w.ed.doc.rope.to_string() })
+                    .unwrap_or_default();
                 let _ = reply.send(json!({"ok": true, "text": t}));
                 return;
             }
@@ -1434,7 +1507,12 @@ impl Workbench {
                 let p = PathBuf::from(s("path").unwrap_or_default());
                 self.open_path(&p);
             }
-            "wait" => {}
+            "wait" => {
+                if let Some(t) = s("text") {
+                    let ms = cmd.get("timeout_ms").and_then(Value::as_u64).unwrap_or(10_000);
+                    self.driver.queue.push_back(Step::WaitText(t, Duration::from_millis(ms)));
+                }
+            }
             "stop" => self.driver.cancel(),
             _ => {
                 let _ = reply.send(json!({"ok": false, "error": format!("unknown cmd {name:?}")}));
@@ -1460,7 +1538,11 @@ impl Workbench {
                 Output::Release(p, b) => {
                     self.dispatch(Event::Mouse(MouseEvent { kind: MouseKind::Up(b), pos: p, mods: Mods::NONE }));
                 }
-                Output::Key(k) => self.dispatch(Event::Key(k)),
+                Output::Key(k) => {
+                    self.from_agent = true;
+                    self.dispatch(Event::Key(k));
+                    self.from_agent = false;
+                }
                 Output::Paste(s) => self.dispatch(Event::Paste(s)),
                 Output::Command(c) => self.run_command(&c),
                 Output::Resolve(t) => match self.tree().find_target(&t) {
@@ -1502,10 +1584,33 @@ impl App for Workbench {
     }
 
     fn tick(&mut self, now: Instant) -> Option<Instant> {
+        let mut any_term = false;
+        for w in &mut self.windows {
+            if let Some(t) = &mut w.term {
+                any_term = true;
+                if t.pump() {
+                    w.term_text = t.screen_text();
+                    w.win.title = t.title().unwrap_or_else(|| "Terminal".into());
+                }
+            }
+        }
         if let Some(rx) = &self.requests {
             let reqs: Vec<Request> = rx.try_iter().collect();
             for r in reqs {
                 self.request(r.cmd, r.reply);
+            }
+        }
+        if let Some((text, deadline)) = self.driver.waiting.clone() {
+            let shown = self
+                .windows
+                .last()
+                .map(|w| if w.term.is_some() { w.term_text.contains(&text) } else { w.ed.doc.rope.to_string().contains(&text) })
+                .unwrap_or(false);
+            if shown {
+                self.driver.waiting = None;
+            } else if now >= deadline {
+                self.driver.waiting = None;
+                self.fail_queue(format!("timed out waiting for {text:?}"));
             }
         }
         let mut next = None;
@@ -1526,7 +1631,9 @@ impl App for Workbench {
         }
         let msg_tick = self.message.as_ref().map(|(_, t)| *t + Duration::from_secs(4));
         let poll = self.requests.as_ref().map(|_| now + Duration::from_millis(50));
-        [next, msg_tick, poll].into_iter().flatten().min()
+        // Terminals are read on ticks: ~60 a second while one is open.
+        let term_tick = any_term.then(|| now + Duration::from_millis(16));
+        [next, msg_tick, poll, term_tick].into_iter().flatten().min()
     }
 
     fn render(&mut self, surf: &mut Surface) {
@@ -1549,6 +1656,10 @@ impl App for Workbench {
             }
             w.win.draw_frame(&mut wc, &theme, active);
             let inner = w.win.inner();
+            if let Some(t) = &mut w.term {
+                t.draw(&mut wc, inner, &theme, active && !has_modal);
+                continue;
+            }
             w.ed.draw(&mut wc, inner, &theme, active && !has_modal, active);
             if active {
                 w.ed.draw_scrollbars(&mut wc, w.win.rect, &theme);
@@ -1562,6 +1673,12 @@ impl App for Workbench {
             .windows
             .last()
             .map(|w| {
+                if let Some(t) = &w.term {
+                    return match t.error() {
+                        Some(_) => "Terminal (failed)".to_string(),
+                        None => "Terminal  F10 menu".to_string(),
+                    };
+                }
                 let (l, col) = w.ed.cursor_line_col();
                 format!(
                     "{}:{}  {} {}  {}",
@@ -1737,6 +1854,30 @@ mod tests {
         wb.dispatch(Event::Resize(40, 25));
         keys(&mut wb, &["Alt+H"]);
         assert!(wb.menubar.open.is_some(), "Help opens from the keyboard even when it doesn't fit");
+    }
+
+    #[test]
+    fn terminal_runs_a_shell_command_the_agent_types() {
+        let mut wb = bench();
+        wb.new_terminal(vec!["sh".into()]);
+        let (tx, rx) = mpsc::channel();
+        wb.request(json!({"cmd": "type", "text": "echo turbine-$((6*7))\n"}), tx.clone());
+        wb.request(json!({"cmd": "wait", "text": "turbine-42", "timeout_ms": 5000}), tx);
+        let start = Instant::now();
+        let mut replies = Vec::new();
+        while replies.len() < 2 && start.elapsed() < Duration::from_secs(8) {
+            wb.tick(Instant::now());
+            replies.extend(rx.try_iter());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert!(replies.iter().all(|r| r["ok"] == true), "{replies:?}");
+        let snap = run(&mut wb, json!({"cmd": "snapshot"}));
+        assert!(snap.to_string().contains("\"role\":\"terminal\""));
+        // Its screen drew into the window.
+        let mut surf = Surface::new(100, 30);
+        wb.render(&mut surf);
+        assert!(surf.to_text().contains("turbine-42"), "{}", surf.to_text());
     }
 
     #[test]

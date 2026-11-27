@@ -1,0 +1,11 @@
+[package]
+name = "turbine-term"
+description = "Turbine's embedded terminal: Ghostty's terminal engine (libghostty-vt) on a PTY, drawn into Turbine's cell grid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+turbine-ui.workspace = true
+libghostty-vt = "0.2.2"
+portable-pty = "0.9"

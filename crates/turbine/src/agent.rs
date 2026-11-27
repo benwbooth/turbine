@@ -28,6 +28,8 @@ pub enum Step {
     Pause(Duration),
     /// Run a command directly (only for things with no UI path).
     Command(String),
+    /// Hold everything after it until the active window shows this text.
+    WaitText(String, Duration),
     /// Send a reply once everything before it is done.
     Reply(Sender<Value>, Value),
 }
@@ -45,6 +47,8 @@ pub struct Driver {
     pub paused: bool,
     /// Mouse button the agent is holding down (pointer moves become drags).
     pub held: Option<Button>,
+    /// Waiting for text to appear (the workbench clears it).
+    pub waiting: Option<(String, Instant)>,
     /// Name shown in the status bar while driving.
     pub agent_name: String,
 }
@@ -81,6 +85,7 @@ impl Driver {
             beat: Duration::from_millis(90),
             paused: false,
             held: None,
+            waiting: None,
             agent_name: "Agent".into(),
         }
     }
@@ -90,7 +95,7 @@ impl Driver {
     }
 
     pub fn busy(&self) -> bool {
-        !self.queue.is_empty() || self.glide.is_some()
+        !self.queue.is_empty() || self.glide.is_some() || self.waiting.is_some()
     }
 
     pub fn cancel(&mut self) {
@@ -100,6 +105,7 @@ impl Driver {
         self.glide = None;
         self.paused = false;
         self.held = None;
+        self.waiting = None;
     }
 
     /// Replace the step at the front (used when a target resolves).
@@ -112,6 +118,9 @@ impl Driver {
         let mut out = Vec::new();
         if self.paused {
             return (out, None);
+        }
+        if self.waiting.is_some() {
+            return (out, Some(now + Duration::from_millis(16)));
         }
         loop {
             if let Some(g) = self.glide {
@@ -187,6 +196,10 @@ impl Driver {
                     return (out, Some(self.next_at));
                 }
                 Step::Reply(tx, v) => out.push(Output::Reply(tx, v)),
+                Step::WaitText(t, d) => {
+                    self.waiting = Some((t, now + d));
+                    return (out, Some(now + Duration::from_millis(16)));
+                }
             }
         }
     }

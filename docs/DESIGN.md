@@ -146,15 +146,24 @@ that still don't fit stay reachable with Alt+letter and the arrow keys.
 
 ### Embedded terminal
 
-`turbine-term` wraps a VT engine and draws its cell grid into a
-`TerminalView`, so the terminal works in TUI mode too (a terminal inside a
-terminal, like tmux). Engine: **libghostty-vt**, as in Tessera. Its
-`RenderState` / row / cell iterators give exactly a cell grid with
-graphemes, colours, styles and wide-cell flags, which maps straight onto
-`Surface`. It needs Zig 0.15 at build time, so it sits behind a cargo
-feature (`ghostty`, on in the Nix build) with `alacritty_terminal` as the
-fallback engine for builds without Zig and for retro targets. PTYs come
-from `portable-pty` (ConPTY on Windows).
+`turbine-term` runs a program on a PTY (`portable-pty`, ConPTY on Windows)
+and parses its output with **libghostty-vt**, Ghostty's terminal engine, as
+Tessera does. There is no second engine. Each frame, the engine's render
+state (rows, then cells, with graphemes, colours, styles and wide/spacer
+flags) is drawn straight into Turbine's `Surface`. So the terminal is the
+same widget in the TUI (a terminal inside a terminal, like tmux), the
+desktop app and the web.
+
+- The engine's types are not `Send`: the terminal lives on the UI thread,
+  and a reader thread hands PTY output over a channel, read on each tick.
+- Keys are encoded by Ghostty's encoder from the program's own modes
+  (legacy, modifyOtherKeys, kitty protocol); paste is bracketed when asked.
+- The 16-colour palette is set to VGA's, so programs look like they run on
+  the same DOS machine as the IDE; default colours come from the scheme.
+- Building it needs Zig 0.15 (the flake's dev shell and package provide it,
+  with Ghostty's source and Zig packages prefetched for offline builds).
+- Retro targets (rust9x, DOS thin clients) leave the terminal out, or
+  show a host's terminal through the remote surface protocol.
 
 ### Extensions (WASI)
 

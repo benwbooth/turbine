@@ -45,7 +45,9 @@ echo '{"cmd":"menu","path":"File/New"}
 Commands: `snapshot` (widget tree, optionally `"screen":true` for the
 screen as text), `menu`, `click` (by `target` id or `role:name`, or `x`/`y`),
 `drag`, `key` (`"Ctrl+S"`), `type`, `paste`, `command`, `open`, `text`,
-`speed` (characters per second, 0 = instant), `wait`, `stop`. Each reply
+`speed` (characters per second, 0 = instant), `wait` (with `"text"`: until
+the active window shows it, e.g. a build's last line), `stop`. Terminal
+windows report their screen text in `snapshot` and `text`. Each reply
 comes back once the action has finished on screen.
 
 ## What works today
@@ -71,19 +73,30 @@ comes back once the action has finished on screen.
   legacy encoding `chardetng` knows. Line endings are kept too.
 - Colour schemes (Turbo, QBasic, Borland Cyan, Amber) and control styles
   (Turbo Vision, QBasic, ASCII), chosen separately
+- **A built-in terminal** (Terminal > New Terminal, File > DOS Shell, Ctrl+\`)
+  running Ghostty's terminal engine (libghostty-vt), drawn in Turbine's own
+  cells, so it works inside terminal mode too. It speaks the kitty keyboard
+  protocol to programs, does bracketed paste and scrollback, and uses the DOS
+  16-colour palette. Every key goes to the program except F10 (menus),
+  Alt+F3 (close) and Alt+0..9 (windows).
 - The automation socket, plus `--headless --script` for tests and screenshots
 
 The plan covers much more: LSP, DAP, tree-sitter, an embedded terminal
-(libghostty-vt), WASI extensions, Emacs and VS Code keymaps, AI completion and an
+WASI extensions, Emacs and VS Code keymaps, AI completion and an
 assistant, hearth AI hub integration, a global menu, desktop and web front
 ends, and retro platforms. See [docs/DESIGN.md](docs/DESIGN.md) and
 [docs/STATUS.md](docs/STATUS.md).
 
 ## Build
 
+The terminal engine is Ghostty's, built with Zig 0.15. The flake's dev
+shell has Zig:
+
 ```bash
-cargo run --release -- [files...]
+nix develop -c cargo run --release -- [files...]
 ```
+
+Without Nix, put Zig 0.15 and git on your PATH and use plain `cargo`.
 
 ```bash
 nix run github:benwbooth/turbine

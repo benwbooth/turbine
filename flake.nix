@@ -14,6 +14,31 @@
         let
           cargoDeps = pkgs.rustPlatform.importCargoLock { lockFile = ./Cargo.lock; };
 
+          # Ghostty's terminal engine (libghostty-vt-sys builds it with Zig):
+          # the commit its build.rs pins and the Zig packages it needs,
+          # fetched ahead of time because builds are offline (as Tessera).
+          ghosttySrc = pkgs.fetchFromGitHub {
+            owner = "ghostty-org";
+            repo = "ghostty";
+            rev = "a887df42c56f6de86c0fe6da9c4eeca37931e083";
+            hash = "sha256-1Zz65SCk3rkJ9+Q0MmyNOTNiDSLBRIHRd3IvFM4iNXw=";
+          };
+          zigDeps = pkgs.stdenvNoCC.mkDerivation {
+            name = "ghostty-zig-deps";
+            src = ghosttySrc;
+            nativeBuildInputs = [ pkgs.zig_0_15 ];
+            dontConfigure = true;
+            dontFixup = true;
+            buildPhase = ''
+              export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig
+              zig build --fetch=all --global-cache-dir $TMPDIR/zig
+            '';
+            installPhase = "cp -r $TMPDIR/zig/p $out";
+            outputHashMode = "recursive";
+            outputHashAlgo = "sha256";
+            outputHash = "sha256-PnM+hZIlLyQwK8vJgd/Bhjt1lNIz06T8FahwliRmMrY=";
+          };
+
           # Build in a persistent target directory (/var/tmp/cargo-nix, exposed
           # to the sandbox by the system flake) so rebuilds only recompile what
           # changed. Falls back to a throwaway directory elsewhere.
@@ -28,6 +53,12 @@
               umask 000
               mkdir -p "$workDir/src" "$workDir/target"
               touch "$workDir"
+              # Zig writes into Ghostty's tree: a writable copy at a fixed path,
+              # so cargo doesn't rebuild the engine every time.
+              rsync -rc --no-times --no-perms --chmod=a+rwX ${ghosttySrc}/ "$workDir/ghostty/"
+              export GHOSTTY_SOURCE_DIR="$workDir/ghostty"
+              export GHOSTTY_ZIG_SYSTEM_DIR="${zigDeps}"
+              export ZIG_GLOBAL_CACHE_DIR="$workDir/zig-cache"
               rsync -rc --no-times --no-perms --chmod=a+rwX --delete ./ "$workDir/src/"
               export NIX_ENFORCE_PURITY=0
               cd "$workDir/src"
@@ -45,7 +76,7 @@
             version = "0.1.0";
             src = pkgs.lib.cleanSource ./.;
             inherit cargoDeps;
-            nativeBuildInputs = [ pkgs.rsync ];
+            nativeBuildInputs = [ pkgs.rsync pkgs.zig_0_15 ];
             buildPhase = persistentCargo "turbine" "--release -p turbine";
             installPhase = ''
               runHook preInstall
@@ -64,7 +95,8 @@
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer ];
+          # Zig 0.15 and git: libghostty-vt-sys builds Ghostty's terminal engine.
+          packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer zig_0_15 git ];
         };
       });
     };

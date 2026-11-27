@@ -92,6 +92,8 @@ pub struct Scheme {
     pub status_key: Style,
     pub shadow: Style,
     pub agent_pointer: Style,
+    /// The built-in terminal's default colours.
+    pub terminal: Style,
 }
 
 macro_rules! s {
@@ -130,6 +132,7 @@ impl Scheme {
             status_key: s!(RED on LIGHT_GRAY),
             shadow: s!(DARK_GRAY on BLACK),
             agent_pointer: s!(BLACK on YELLOW),
+            terminal: s!(LIGHT_GRAY on BLACK),
         }
     }
 
@@ -162,6 +165,7 @@ impl Scheme {
             status_key: s!(BLACK on CYAN),
             shadow: s!(DARK_GRAY on BLACK),
             agent_pointer: s!(BLACK on YELLOW),
+            terminal: s!(LIGHT_GRAY on BLACK),
         }
     }
 
@@ -213,6 +217,7 @@ impl Scheme {
             status_key: r,
             shadow: Style::new(dim, k),
             agent_pointer: r,
+            terminal: n,
         }
     }
 
