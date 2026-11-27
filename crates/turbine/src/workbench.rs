@@ -787,6 +787,30 @@ impl Workbench {
         true
     }
 
+    /// A right-click in the front terminal, when its program isn't using
+    /// the mouse itself: copy, paste, and the like.
+    fn term_menu_open(&mut self, p: Point) -> bool {
+        let Some(w) = self.windows.last_mut().filter(|w| w.win.inner().contains(p)) else { return false };
+        let Some(t) = w.term.as_mut() else { return false };
+        if t.terminal().is_some_and(|t| t.wants_mouse()) {
+            return false;
+        }
+        let has_sel = t.selected_text().is_some();
+        let mut items: Vec<(&str, &str, &'static str)> = Vec::new();
+        if has_sel {
+            items.push(("Copy", "Ctrl+Shift+C", "terminal.copy"));
+        }
+        items.push(("Paste", "Ctrl+Shift+V", "terminal.paste"));
+        items.push(("Select All", "", "terminal.select_all"));
+        items.push(("Clear", "Ctrl+L", "terminal.clear"));
+        items.push(("New Terminal", "Ctrl+Shift+`", "terminal.new"));
+        items.push(("Kill Terminal", "", "terminal.kill"));
+        let mut popup = ListPopup::new(items.iter().map(|(l, k, _)| (l.to_string(), k.to_string())).collect());
+        popup.place(p, self.screen());
+        self.ed_menu = Some((popup, p, items.iter().map(|i| i.2).collect()));
+        true
+    }
+
     /// A status item's drop-up (file type, encoding, line ends): true when
     /// the command is one of those.
     fn status_menu_open(&mut self, cmd: &str, at: Point) -> bool {
@@ -2444,6 +2468,31 @@ impl Workbench {
         let desk = self.desktop();
         match cmd {
             "file.new" => self.new_window(Document::new()),
+            "terminal.copy" | "terminal.paste" | "terminal.select_all" | "terminal.clear" | "terminal.kill" => {
+                let clip = self.clipboard.clone();
+                let Some(i) = self.windows.iter().rposition(|w| w.term.is_some()) else { return };
+                let t = self.windows[i].term.as_mut().unwrap();
+                match cmd {
+                    "terminal.copy" => {
+                        if let Some(s) = t.selected_text() {
+                            self.copy(s);
+                        }
+                    }
+                    "terminal.paste" => t.paste(&clip),
+                    "terminal.select_all" => t.select_all(),
+                    // (Ctrl+L: the shell clears its screen.)
+                    "terminal.clear" => {
+                        if let Some(t) = t.terminal() {
+                            t.write(b"\x0c");
+                        }
+                    }
+                    _ => {
+                        self.windows.remove(i);
+                        self.renumber();
+                        self.layout_dock();
+                    }
+                }
+            }
             "terminal.new" => {
                 self.new_terminal(Vec::new());
                 self.layout_dock();
@@ -4021,7 +4070,7 @@ impl Workbench {
             }
             return;
         }
-        if self.dialog.is_none() && matches!(m.kind, MouseKind::Down(Button::Right)) && self.ed_menu_open(m.pos) {
+        if self.dialog.is_none() && matches!(m.kind, MouseKind::Down(Button::Right)) && (self.ed_menu_open(m.pos) || self.term_menu_open(m.pos)) {
             return;
         }
         if let Some((popup, ids, _)) = &mut self.shell.tab_menu {
@@ -6055,6 +6104,19 @@ mod tests {
         assert!(p.rect().bottom() <= 35 && acts.len() == 2);
         keys(&mut wb, &["Down", "Enter"]);
         assert_eq!(wb.windows.last().unwrap().ed.doc.line_ending, turbine_text::encoding::LineEnding::CrLf);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn terminals_have_a_right_click_menu() {
+        let (dir, mut wb) = project("termmenu");
+        keys(&mut wb, &["Ctrl+`"]);
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let inner = wb.windows.last().unwrap().win.inner();
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Right), pos: Point::new(inner.x + 5, inner.y + 2), mods: Mods::NONE }));
+        let cmds = wb.ed_menu.as_ref().map(|m| m.2.clone()).unwrap_or_default();
+        assert!(cmds.contains(&"terminal.paste") && cmds.contains(&"terminal.kill"), "{cmds:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
