@@ -405,11 +405,11 @@ impl Scheme {
         s.title_active = s!(WHITE on MAGENTA);
         s.title_inactive = s!(BLACK on LIGHT_GRAY);
         s.dialog_title = s!(WHITE on MAGENTA);
-        // Tool windows as the Project window: grey, a black frame, the
-        // selected row a black bar.
-        s.panel = s!(BLACK on LIGHT_GRAY);
+        // Tool windows: the Project window's grey frame, dark inside (the
+        // files' colours stay bright), the selected row a grey bar.
+        s.panel = s!(WHITE on BLACK);
         s.panel_frame = s!(BLACK on LIGHT_GRAY);
-        s.panel_selected = s!(LIGHT_GRAY on BLACK);
+        s.panel_selected = s!(BLACK on LIGHT_GRAY);
         // (The front tab: VB-DOS's magenta title bar.)
         s.tab_active = s!(WHITE on MAGENTA);
         s

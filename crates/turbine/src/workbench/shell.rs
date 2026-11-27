@@ -1738,8 +1738,25 @@ impl Workbench {
         if let Some(tr) = l.editor_tabs {
             // (On the front window's top border: its line under the tabs.)
             let fw = self.editor_index().map(|i| &self.windows[i]);
-            let line_style = if fw.is_some_and(|w| w.ed.help_look) { Style::new(s.help.fg, s.help.bg) } else { s.frame_active };
+            let editors_focused = self.shell.focus == Focus::Editors && self.dialog.is_none();
+            let line_style = if fw.is_some_and(|w| w.ed.help_look) {
+                Style::new(s.help.fg, s.help.bg)
+            } else if theme.style.title_bar {
+                // (VB-DOS: the tabs on the window's title bar, magenta while
+                // it has the keys.)
+                if editors_focused { s.title_active } else { s.title_inactive }
+            } else {
+                s.frame_active
+            };
             let h = if theme.style.title_bar { " " } else { theme.style.active_frame.h };
+            if theme.style.title_bar {
+                // The whole bar, from the control box to the ▼▲ boxes.
+                let bar = Rect::new(tr.x - 1, tr.y, l.editors.right() - 5 - (tr.x - 1), 1);
+                c.fill(bar, " ", line_style);
+                // (Its first column is the side bar's border, shared.)
+                c.print(tr.x - 1, tr.y, "■", s.frame_icons);
+                c.print(tr.right(), tr.y, " ", line_style);
+            }
             c.fill(tr, h, line_style);
             let front = self.editor_index().map(|i| self.windows[i].win.id);
             let mut tc = c.sub(tr);
