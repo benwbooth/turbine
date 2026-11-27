@@ -151,3 +151,19 @@ nix run github:benwbooth/turbine#turbine-app
 ## License
 
 MIT
+
+## Extensions
+
+Extensions are WebAssembly components made to [`wit/turbine.wit`](wit/turbine.wit)
+(the `extension` world), run with wasmtime on a thread of their own: they
+add menu items, key bindings and commands, and read and edit documents
+through the host. [`extensions/hello`](extensions/hello) is an example;
+build and install it (into `~/.local/share/turbine/extensions`) with
+
+```
+extensions/build.sh hello
+```
+
+Turbine loads what it finds there at start, and lists it in the Extensions
+view (Ctrl+Shift+X).
+

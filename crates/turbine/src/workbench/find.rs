@@ -158,8 +158,7 @@ impl Workbench {
         let old = ed.doc.rope.slice(a..b).to_string();
         let new = if self.find.regex { re.replace(&old, self.find.replace.text.as_str()).into_owned() } else { self.find.replace.text.clone() };
         ed.doc.break_undo_group();
-        ed.doc.remove(a, b, ed.cursor);
-        ed.doc.insert(a, &new, a);
+        ed.doc.replace(a, b, &new, ed.cursor);
         ed.cursor = a + new.chars().count();
         ed.anchor = None;
         ed.doc.break_undo_group();

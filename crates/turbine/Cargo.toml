@@ -16,4 +16,5 @@ turbine-vi.workspace = true
 crossterm.workspace = true
 turbine-term.workspace = true
 turbine-syntax.workspace = true
+turbine-ext.workspace = true
 turbine-services.workspace = true

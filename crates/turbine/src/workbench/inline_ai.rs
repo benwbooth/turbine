@@ -126,8 +126,7 @@ impl Workbench {
         if let Some(w) = self.windows.iter_mut().find(|w| w.win.id == win) {
             let ed = &mut w.ed;
             ed.doc.break_undo_group();
-            ed.doc.remove(a, b, ed.cursor);
-            ed.doc.insert(a, &new, a);
+            ed.doc.replace(a, b, &new, ed.cursor);
             ed.doc.break_undo_group();
             let end = a + new.chars().count();
             ed.cursor = a;
@@ -247,8 +246,7 @@ fn put_back(ed: &mut turbine_ui::editor::EditorView, ie: &InlineEdit) {
     let (a, b) = ie.range;
     let b = b.min(ed.doc.rope.len_chars());
     ed.doc.break_undo_group();
-    ed.doc.remove(a, b, ed.cursor);
-    ed.doc.insert(a, &ie.old, a);
+    ed.doc.replace(a, b, &ie.old, ed.cursor);
     ed.doc.break_undo_group();
     ed.cursor = a;
     ed.anchor = None;

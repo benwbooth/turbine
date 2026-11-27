@@ -389,6 +389,8 @@ impl Workbench {
         let root = self.shell.explorer.root.clone();
         self.shell.search.poll(&root);
         let ext_shown = shown(self, Tab::Extensions);
+        let installed = self.extension_list();
+        self.shell.extensions.set_installed(installed.iter().map(|i| (i.name.clone(), i.description.clone(), i.error.clone(), i.loaded)).collect());
         self.shell.extensions.poll(ext_shown);
         let scm_shown = shown(self, Tab::Scm);
         self.shell.scm.poll(&root, scm_shown);
@@ -927,6 +929,11 @@ impl Workbench {
             return true;
         }
         if self.ex_key(k) {
+            return true;
+        }
+        // Extensions' key bindings.
+        if let Some(cmd) = self.ext_key(k) {
+            self.run_command(&cmd);
             return true;
         }
         let cmd = if k.mods.ctrl && !k.mods.alt && matches!(k.key, Key::Char(',')) {

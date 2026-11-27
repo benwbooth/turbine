@@ -11,6 +11,8 @@ use workbench::{Request, Workbench};
 const USAGE: &str = "\
 turbine [options] [files...]
 turbine mcp [--socket PATH]   MCP server (stdio) driving a running Turbine
+turbine pack-extension CORE.wasm OUT.wasm
+                              Make a WebAssembly extension component (see extensions/)
 
 Options:
   --automation [PATH]   Agent commands (JSON lines) on this Unix socket (on by
@@ -90,6 +92,21 @@ fn main() {
     // As a child trying a downloaded grammar: try it and exit.
     turbine_syntax::grammars::check_from_args();
     let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("pack-extension") {
+        // A core module built with wit-bindgen -> an extension component.
+        let (Some(input), Some(output)) = (argv.get(2), argv.get(3)) else {
+            eprintln!("usage: turbine pack-extension CORE.wasm OUT.wasm");
+            std::process::exit(2);
+        };
+        let packed = std::fs::read(input).map_err(|e| e.to_string()).and_then(|b| turbine_ext::pack(&b).map_err(|e| format!("{e:#}")));
+        match packed.and_then(|c| std::fs::write(output, c).map_err(|e| e.to_string())) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("turbine: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if argv.get(1).map(String::as_str) == Some("mcp") {
         let socket = argv.iter().position(|a| a == "--socket").and_then(|i| argv.get(i + 1)).map(PathBuf::from);
         std::process::exit(mcp::run(socket));
@@ -107,6 +124,9 @@ fn main() {
         if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))) {
             wb.set_look_path(dir.join("turbine/look.json"));
         }
+    }
+    if !args.headless {
+        wb.start_extensions(turbine::workbench::extension_dirs());
     }
     if let Some(k) = args.keymap {
         wb.set_keymap(k);

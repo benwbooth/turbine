@@ -172,6 +172,18 @@ impl Document {
         self.apply(Edit { at: from, removed, inserted: String::new(), cursor_before });
     }
 
+    /// Replace a range with text: one undo step.
+    pub fn replace(&mut self, from: usize, to: usize, text: &str, cursor_before: usize) {
+        let to = to.max(from).min(self.rope.len_chars());
+        let removed = self.rope.slice(from..to).to_string();
+        if removed == text {
+            return;
+        }
+        self.open_group = false;
+        self.apply(Edit { at: from, removed, inserted: text.into(), cursor_before });
+        self.open_group = false;
+    }
+
     fn apply(&mut self, e: Edit) {
         let n = e.removed.chars().count();
         self.rope.remove(e.at..e.at + n);

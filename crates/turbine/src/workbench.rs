@@ -11,6 +11,8 @@ use turbine_ui::theme::vga;
 use turbine_ui::Canvas;
 
 mod explorer_ops;
+mod extensions;
+pub use extensions::extension_dirs;
 mod find;
 mod inline_ai;
 mod settings;
@@ -262,6 +264,8 @@ pub struct Workbench {
     ex: explorer_ops::ExOps,
     /// Ctrl+K: an inline AI edit in progress.
     inline: Option<inline_ai::InlineEdit>,
+    /// WebAssembly extensions (started by the front end).
+    exts: extensions::ExtState,
 }
 
 /// The menu bar: Cursor's (VS Code's) menus and layout, merged with
@@ -558,6 +562,7 @@ impl Workbench {
             find: FindBar::default(),
             ex: explorer_ops::ExOps::default(),
             inline: None,
+            exts: extensions::ExtState::default(),
         };
         for f in files {
             // (A folder is the project: the Explorer shows it.)
@@ -1783,8 +1788,7 @@ impl Workbench {
             ed.doc.break_undo_group();
             for (s, e, t) in list {
                 let (a, b) = (to_char(ed, s), to_char(ed, e));
-                ed.doc.remove(a, b, ed.cursor);
-                ed.doc.insert(a, &t, a);
+                ed.doc.replace(a, b, &t, ed.cursor);
                 n += 1;
             }
             ed.doc.break_undo_group();
@@ -1875,8 +1879,7 @@ impl Workbench {
         let Some(w) = self.windows.last_mut() else { return };
         let cur = w.ed.cursor;
         w.ed.doc.break_undo_group();
-        w.ed.doc.remove(comp.anchor, cur, cur);
-        w.ed.doc.insert(comp.anchor, &insert, comp.anchor);
+        w.ed.doc.replace(comp.anchor, cur, &insert, cur);
         w.ed.doc.break_undo_group();
         w.ed.cursor = comp.anchor + insert.chars().count();
         w.ed.anchor = None;
@@ -2001,6 +2004,9 @@ impl Workbench {
     pub fn run_command(&mut self, cmd: &str) {
         if self.shell_command(cmd) {
             self.sync_menu_checks();
+            return;
+        }
+        if self.ext_command(cmd) {
             return;
         }
         let desk = self.desktop();
@@ -3654,6 +3660,7 @@ impl App for Workbench {
         self.layout_dock();
         self.update_views();
         self.ex_poll();
+        self.ext_poll();
         self.layout_dialogs();
         let mut any_term = false;
         for w in &mut self.windows {
@@ -4566,7 +4573,7 @@ mod tests {
         assert_eq!(wb.shell.focus, Focus::View(crate::dock::Tab::Extensions));
         wait_until(&mut wb, "the list", |wb| wb.shell.extensions.list.rows.iter().any(|r| r.text == "Rust"));
         let rows = &wb.shell.extensions.list.rows;
-        assert!(rows[0].heading && rows.last().unwrap().text.contains("WASI"));
+        assert!(rows[0].heading && rows[0].text.starts_with("Installed"), "{:?}", rows[0]);
         let i = rows.iter().position(|r| r.text == "Rust").unwrap();
         wb.shell.extensions.list.select(i);
         keys(&mut wb, &["Enter"]);
@@ -4615,6 +4622,40 @@ mod tests {
         let mut wb2 = Workbench::new(&[dir.clone()]);
         wb2.set_look_path(look);
         assert_eq!((wb2.theme.style.name, wb2.shell.minimap, wb2.driver.cps), ("VB-DOS", Some(false), 120.0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_wasm_extension_adds_a_menu_item_and_edits_through_it() {
+        // (Built and packed as extensions/build.sh does; turbine-ext's own
+        // test builds the same extension.)
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../extensions/hello");
+        let st = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--quiet", "--release", "--target", "wasm32-unknown-unknown", "--manifest-path"])
+            .arg(root.join("Cargo.toml"))
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let core = std::fs::read(root.join("target/wasm32-unknown-unknown/release/turbine_hello.wasm")).unwrap();
+        let (dir, mut wb) = project("wasm");
+        std::fs::create_dir_all(dir.join("exts/hello")).unwrap();
+        std::fs::write(dir.join("exts/hello/extension.wasm"), turbine_ext::pack(&core).unwrap()).unwrap();
+        wb.start_extensions(vec![dir.join("exts")]);
+        wait_until(&mut wb, "the Tools menu", |wb| wb.menubar.menus.iter().any(|m| m.plain_title() == "Tools" && m.items.len() == 2));
+        // The menu item, through the palette as a person would find it.
+        wb.goto_file(&dir.join("notes.md"), Some(0), 0);
+        keys(&mut wb, &["Ctrl+Shift+P"]);
+        run(&mut wb, json!({"cmd": "type", "text": "uppercase line"}));
+        keys(&mut wb, &["Enter"]);
+        wait_until(&mut wb, "the edit", |wb| wb.windows.last().unwrap().ed.doc.line(0) == "# NOTES");
+        // Its key binding, and its greeting on the status line.
+        keys(&mut wb, &["Ctrl+Z"]);
+        keys(&mut wb, &["Ctrl+Alt+U"]);
+        wait_until(&mut wb, "the key", |wb| wb.windows.last().unwrap().ed.doc.line(0) == "# NOTES");
+        wb.run_command("ext:hello:hello.greet");
+        wait_until(&mut wb, "the greeting", |wb| wb.message.as_ref().is_some_and(|(m, _)| m.contains("Hello from a WebAssembly")));
+        // The Extensions view lists it.
+        wait_until(&mut wb, "the list", |wb| wb.shell.extensions.list.rows.iter().any(|r| r.text == "hello" && r.icon == "✓"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

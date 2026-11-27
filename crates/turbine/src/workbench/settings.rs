@@ -46,7 +46,7 @@ fn def(key: &str) -> Option<&'static Def> {
 
 impl Workbench {
     /// A setting's value as shown.
-    fn setting_value(&self, key: &str) -> String {
+    pub(super) fn setting_value(&self, key: &str) -> String {
         let b = |v: bool| if v { "on" } else { "off" }.to_string();
         let mm = self.shell.minimap.unwrap_or(self.theme.style.icons);
         match key {

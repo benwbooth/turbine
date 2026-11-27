@@ -757,15 +757,19 @@ impl Scm {
 /// Turbine's WASI extensions will list here too.
 pub struct Extensions {
     pub list: ListView,
-    /// Each row's language (None for headings).
+    /// Each row's language (None for headings and extensions).
     pub langs: Vec<Option<String>>,
     rx: Option<Receiver<(Vec<Row>, Vec<Option<String>>)>>,
     loaded: bool,
+    /// Installed extensions: (name, description, why it failed, loaded).
+    installed: Vec<(String, String, Option<String>, bool)>,
+    /// The languages' rows, as found.
+    lang_rows: (Vec<Row>, Vec<Option<String>>),
 }
 
 impl Default for Extensions {
     fn default() -> Self {
-        Extensions { list: ListView::new(), langs: Vec::new(), rx: None, loaded: false }
+        Extensions { list: ListView::new(), langs: Vec::new(), rx: None, loaded: false, installed: Vec::new(), lang_rows: (Vec::new(), Vec::new()) }
     }
 }
 
@@ -816,8 +820,6 @@ impl Extensions {
                 rows.push(r.indent(1));
                 langs.push(Some(l));
             }
-            rows.push(Row::new("WASI extensions: coming").heading());
-            langs.push(None);
             let _ = tx.send((rows, langs));
         });
     }
@@ -827,11 +829,42 @@ impl Extensions {
             self.load();
         }
         let Some(rx) = &self.rx else { return false };
-        let Ok((rows, langs)) = rx.try_recv() else { return false };
+        let Ok(found) = rx.try_recv() else { return false };
         self.rx = None;
+        self.lang_rows = found;
+        self.rebuild();
+        true
+    }
+
+    /// The installed extensions (from the host), when they change.
+    pub fn set_installed(&mut self, list: Vec<(String, String, Option<String>, bool)>) {
+        if list != self.installed {
+            self.installed = list;
+            self.rebuild();
+        }
+    }
+
+    /// Installed extensions first, then the languages.
+    fn rebuild(&mut self) {
+        let mut rows = vec![Row::new(format!("Installed ({})", self.installed.len())).heading()];
+        let mut langs = vec![None];
+        if self.installed.is_empty() {
+            rows.push(Row::new("None yet: see extensions/build.sh").indent(1));
+            langs.push(None);
+        }
+        for (name, desc, err, loaded) in &self.installed {
+            let row = Row::new(name.clone()).indent(1);
+            rows.push(match (loaded, err) {
+                (_, Some(e)) => row.icon("×").fg(vga::LIGHT_RED).detail(e.lines().next().unwrap_or("").to_string()),
+                (true, None) => row.icon("✓").fg(vga::LIGHT_GREEN).detail(desc.clone()),
+                (false, None) => row.icon("·").detail("loading…"),
+            });
+            langs.push(None);
+        }
+        rows.extend(self.lang_rows.0.iter().cloned());
+        langs.extend(self.lang_rows.1.iter().cloned());
         self.list.set_rows(rows);
         self.langs = langs;
-        true
     }
 
     /// What a row says about its language, for the status line.

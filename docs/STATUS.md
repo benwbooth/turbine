@@ -16,6 +16,8 @@
 | Explorer file operations (new file/folder, rename, delete to trash, copy path, open in terminal), Open Folder, last project reopened | done |
 | Ctrl+K inline AI edit; chat Ask / Agent modes; Go to References, Rename Symbol; split editors (Ctrl+\\) | done |
 | Tabs with emoji icons and rounded pills; side bars styled as each look's tool windows | done |
+| Settings editor (Ctrl+,): searchable, every setting with its description, kept in look.json | done |
+| WebAssembly extensions: components made to wit/turbine.wit, hosted with wasmtime on their own thread; menu items, key bindings, commands, document reads and edits; Extensions view; extensions/hello example and extensions/build.sh | done (views, languages, viewers and AI worlds still drafts) |
 | Desktop app: VGA text mode pixels (9 or 8 dots by 16) stretched 4:3, characters 1.35 times taller than wide | done |
 | File Open / Save As: places + recent folders, files list with size and date columns that fit the width, type-to-filter, Backspace goes up, file type filter, hidden files, encoding and line endings on save, replace-file question | done |
 | Editor: graphemes, selection, clipboard, undo, auto-indent, bidi | done |
