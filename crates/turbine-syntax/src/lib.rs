@@ -954,7 +954,10 @@ impl Highlighter {
                         latest.insert(j.id, j);
                     }
                     for (_, j) in latest {
-                        let got = analyze(&j.lang, &j.text, Duration::from_secs(2));
+                        // (A grammar or query that panics on some text costs
+                        // that text its colours, never the thread: else no
+                        // file would be coloured again.)
+                        let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze(&j.lang, &j.text, Duration::from_secs(2)))).ok().flatten();
                         // (A grammar not tried or unpacked yet: plain for now,
                         // and the real colours once it's ready, once per language.)
                         if got.is_none() && j.lang != "text" && grammars::is_known(&j.lang) && waited.insert(j.lang.clone()) {
@@ -973,8 +976,14 @@ impl Highlighter {
                             // No grammar (or plain text): what all text
                             // shares, and indentation's folds.
                             None => {
-                                let folds = if j.text.len() < 4 << 20 { indent_blocks(&j.text).0 } else { Vec::new() };
-                                (Some(plain::spans(&j.text)), Some(Structure { folds, ..Structure::default() }))
+                                let plain = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    let folds = if j.text.len() < 4 << 20 { indent_blocks(&j.text).0 } else { Vec::new() };
+                                    (plain::spans(&j.text), folds)
+                                }));
+                                match plain {
+                                    Ok((spans, folds)) => (Some(spans), Some(Structure { folds, ..Structure::default() })),
+                                    Err(_) => (None, None),
+                                }
                             }
                         };
                         if done.send(Highlights { id: j.id, version: j.version, lines, structure }).is_err() {

@@ -1820,6 +1820,9 @@ impl Workbench {
                 self.refilter_completion();
             }
             LspEvent::Hover { id, text } => {
+                if self.hover_answer(&key, id, &text) {
+                    return;
+                }
                 if self.lsp_requests.remove(&(key, id)).is_none() {
                     return;
                 }
@@ -5893,6 +5896,23 @@ mod tests {
         let text = wb.dialog.as_ref().unwrap().value("text").unwrap_or_default();
         assert!(text.contains("fake hover: println"), "{text}");
         keys(&mut wb, &["Esc"]);
+
+        // The mouse resting on code: the server's hover in a tooltip.
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let inner = wb.windows.last().unwrap().win.inner();
+        let gutter = wb.windows.last().unwrap().ed.area().x;
+        let _ = gutter;
+        let line2 = wb.windows.last().unwrap().ed.doc.line(2);
+        let col = line2.find("println").unwrap() as i32;
+        let area = wb.windows.last().unwrap().ed.area();
+        let _ = inner;
+        let ed = &wb.windows.last().unwrap().ed;
+        let x = (area.x..area.right()).find(|&x| ed.char_at(Point::new(x, area.y + 2)).map(|c| ed.doc.char_to_line_byte(c)) == Some((2, col as usize + 1))).unwrap();
+        let at = Point::new(x, area.y + 2);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Moved, pos: at, mods: Mods::NONE }));
+        wb.tick(Instant::now() + Duration::from_millis(700));
+        wait_until(&mut wb, "the hover tooltip", |wb| wb.tip.shown.as_ref().is_some_and(|(_, t)| t.contains("fake hover")));
 
         // Shift+F12 on "println!": its uses, in the Search view.
         keys(&mut wb, &["Shift+F12"]);

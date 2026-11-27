@@ -600,6 +600,15 @@ impl EditorView {
         }
     }
 
+    /// The char under a cell of the text (None off the text or on the
+    /// line numbers).
+    pub fn char_at(&self, p: Point) -> Option<usize> {
+        if !self.area.contains(p) || (self.line_numbers && p.x < self.area.x + self.gutter_width()) {
+            return None;
+        }
+        Some(self.pos_to_char(p))
+    }
+
     /// The error or warning under a cell of the text (for its tooltip).
     pub fn diagnostic_at(&self, p: Point) -> Option<&DiagMark> {
         if !self.area.contains(p) || (self.line_numbers && p.x < self.area.x + self.gutter_width()) {

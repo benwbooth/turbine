@@ -17,6 +17,9 @@ pub(super) struct TipState {
     pub shown: Option<(Rect, String)>,
     /// Looked for at this resting place already (found nothing).
     looked: bool,
+    /// The language server asked what's under the mouse: its request, and
+    /// the place the answer belongs to.
+    pub hover: Option<((String, PathBuf), i64, Rect)>,
 }
 
 impl Workbench {
@@ -59,7 +62,57 @@ impl Workbench {
             return None;
         }
         self.tip.shown = self.tip_at(p);
+        // (Code under the mouse, nothing else to say: ask its server, as
+        // VS Code's hover does.)
+        if self.tip.shown.is_none() {
+            self.hover_ask(p);
+        }
         None
+    }
+
+    fn hover_ask(&mut self, p: Point) {
+        if self.dialog.is_some() {
+            return;
+        }
+        let Some(w) = self.windows.last_mut().filter(|w| w.term.is_none() && w.dock.is_none() && w.special.is_none()) else { return };
+        let Some(ch) = w.ed.char_at(p) else { return };
+        let (Some(key), Some(path)) = (w.lsp_key.clone(), w.ed.doc.path.clone()) else { return };
+        let (line, byte) = w.ed.doc.char_to_line_byte(ch);
+        let text = w.ed.doc.line(line);
+        // (Nothing under the mouse but space: nothing to ask.)
+        if text.get(byte..).and_then(|t| t.chars().next()).is_none_or(char::is_whitespace) {
+            return;
+        }
+        let v = w.ed.doc.version;
+        let full = (w.lsp_sent != Some(v)).then(|| w.ed.doc.rope.to_string());
+        let Some(c) = self.lsp.get_mut(&key).filter(|c| c.is_open(&path)) else { return };
+        if let Some(t) = full {
+            c.did_change(&path, v as i64, &t);
+            if let Some(w) = self.windows.last_mut() {
+                w.lsp_sent = Some(v);
+            }
+        }
+        let id = c.hover(&path, Pos { line: line as u32, character: lsp::utf16_col(&text, byte) });
+        self.tip.hover = Some((key, id, Rect::new(p.x, p.y, 1, 1)));
+    }
+
+    /// A hover answer for the tooltip: true when it was the tooltip's.
+    pub(super) fn hover_answer(&mut self, key: &(String, PathBuf), id: i64, text: &str) -> bool {
+        let Some((k, i, anchor)) = &self.tip.hover else { return false };
+        if k != key || *i != id {
+            return false;
+        }
+        let anchor = *anchor;
+        self.tip.hover = None;
+        // (Still resting there: the server's words, without its code fences.)
+        if self.tip.at.is_some_and(|(p, _)| anchor.contains(p)) && self.tip.shown.is_none() {
+            let lines: Vec<&str> = text.lines().filter(|l| !l.trim_start().starts_with("```")).collect();
+            let t = lines.join("\n").trim().to_string();
+            if !t.is_empty() {
+                self.tip.shown = Some((anchor, t));
+            }
+        }
+        true
     }
 
     /// What hovering here shows, and the place it belongs to.
