@@ -205,33 +205,6 @@ impl Workbench {
         self.windows.iter().rposition(|w| w.dock.is_none())
     }
 
-    /// Match the parts' tabs to the docked windows, put those windows in
-    /// their parts, and keep the editors inside their area.
-    /// VS Code's layout toggles, at the right of the menu bar before Help:
-    /// the side bar, the panel, the secondary side bar (lit when shown).
-    pub(super) fn layout_toggles(&self) -> Vec<(Rect, &'static str, &'static str, &'static str, bool)> {
-        let titles = self.menubar.title_rects();
-        let (Some(help), Some(before)) = (titles.last().copied(), titles.iter().rev().skip(1).find(|r| r.w > 0).copied()) else { return Vec::new() };
-        let items = [
-            ("view.sidebar", "Toggle Primary Side Bar (Ctrl+B)", "▌", self.shell.dock.left.visible),
-            ("view.panel", "Toggle Panel (Ctrl+J)", "▄", self.shell.dock.bottom.visible),
-            ("view.secondary", "Toggle Secondary Side Bar (Ctrl+Alt+B)", "▐", self.shell.dock.right.visible),
-        ];
-        let w = items.len() as i32 * 3;
-        // (At the bar's right end when Help sits with the rest, as
-        // Borland's does; else just before a right-hand Help, as QBasic's.)
-        let end = self.screen().w - 1 - w;
-        let x0 = if help.w > 0 && help.right() + 1 < end {
-            end
-        } else {
-            let x0 = help.x - 1 - w;
-            if help.w == 0 || x0 <= before.right() + 1 {
-                return Vec::new();
-            }
-            x0
-        };
-        items.iter().enumerate().map(|(i, &(cmd, name, glyph, on))| (Rect::new(x0 + i as i32 * 3, 0, 3, 1), cmd, name, glyph, on)).collect()
-    }
 
     /// The panel's buttons at the right of its top edge, as VS Code has
     /// them: New Terminal (on a terminal), Maximize (or Restore), Close.
@@ -658,7 +631,9 @@ impl Workbench {
         for m in &self.menubar.menus {
             let menu = m.plain_title();
             let menu = if menu == "≡" { "Turbine".to_string() } else { menu };
-            for it in &m.items {
+            // (A submenu's items under the menu's name, as VS Code's "View:
+            // Toggle Panel".)
+            for it in m.all_items().into_iter().filter(|it| !it.has_submenu()) {
                 if it.is_separator() || !it.enabled {
                     continue;
                 }
@@ -1949,7 +1924,9 @@ impl Workbench {
             // rest plain on the border line.
             let active = if theme.style.title_reverse { s.frame_icons } else { s.menu };
             let mine = self.group_windows(g);
-            for (id, r, x) in self.shell.editor_tab_rects.iter().filter(|t| mine.contains(&t.0)) {
+            let row_tabs: Vec<&(u32, Rect, Rect)> = self.shell.editor_tab_rects.iter().filter(|t| mine.contains(&t.0)).collect();
+            let gaps: Vec<(i32, i32)> = row_tabs.iter().take(row_tabs.len().saturating_sub(1)).map(|t| (t.1.right(), t.1.y)).collect();
+            for (id, r, x) in row_tabs.into_iter() {
                 let Some(w) = self.windows.iter().find(|w| w.win.id == *id) else { continue };
                 let on = Some(*id) == gfront;
                 let stl = if on { active } else { line_style };
@@ -1958,6 +1935,10 @@ impl Workbench {
                 tc.print(r.x, r.y, &editor_tab_name(w, icons), stl);
                 tc.print(x.x, x.y, "×", stl);
                 tc.print(x.x + 1, x.y, " ", stl);
+            }
+            // (A thin line between neighbouring tabs, in the gap after each.)
+            for (gx, gy) in gaps {
+                tc.print(gx, gy, "│", line_style);
             }
             for (mr, n, _) in self.shell.tab_more.iter().filter(|t| t.2 == g) {
                 tc.print(mr.x, mr.y, &format!("▼ {n}"), active);

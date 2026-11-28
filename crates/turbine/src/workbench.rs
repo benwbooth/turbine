@@ -26,6 +26,7 @@ mod images;
 mod inline_ai;
 mod lsp_more;
 mod preview;
+mod top_row;
 mod scm;
 mod sections;
 mod session;
@@ -340,13 +341,16 @@ pub struct Workbench {
     last_input: Option<Instant>,
 }
 
-/// The menu bar: Cursor's (VS Code's) menus and layout, merged with
-/// Borland's (the ≡ system menu, Search, Run's compile/debug items, Options
-/// and Window). Items whose feature isn't built yet are shown disabled so
-/// the structure is complete.
+/// The menu bar: VS Code's menus (File, Edit, Selection, View, Go, Run,
+/// Terminal, Help), with Turbine's AI and Tools (Turbo Pascal's: the
+/// programs that come with it, Git, extensions'), Borland's ≡ system menu,
+/// and the DOS IDEs' items folded in: Search's in Edit, Options' under File
+/// > Preferences, Window's under View > Editor Layout and Windows. Items
+/// whose feature isn't built yet are shown disabled.
 fn menus() -> Vec<Menu> {
     let it = MenuItem::new;
     let sep = MenuItem::separator;
+    let sub = MenuItem::sub;
     vec![
         Menu::new(
             "≡",
@@ -364,7 +368,7 @@ fn menus() -> Vec<Menu> {
                 sep(),
                 it("~O~pen File...", "F3", "file.open"),
                 it("Open ~F~older...", "", "file.open_folder"),
-                it("Add Folder to ~W~orkspace...", "", "file.add_folder"),
+                it("Add Folder to Wor~k~space...", "", "file.add_folder"),
                 it("Open ~R~ecent", "", "file.recent"),
                 sep(),
                 it("~S~ave", "F2", "file.save"),
@@ -376,7 +380,21 @@ fn menus() -> Vec<Menu> {
                 it("Save with Enco~d~ing...", "", "file.save_encoding"),
                 it("~C~lose Editor", "Alt+F3", "window.close"),
                 sep(),
-                it("~D~OS Shell", "", "view.terminal"),
+                sub(
+                    "~P~references",
+                    vec![
+                        it("~S~ettings...", "Ctrl+,", "options.settings"),
+                        it("~K~eymap...", "", "options.keymap"),
+                        it("~C~olors...", "", "options.colors"),
+                        it("Control S~t~yle...", "", "options.style"),
+                        sep(),
+                        it("~E~ditor...", "", "options.editor"),
+                        it("~D~irectories...", "", "options.dirs"),
+                        it("Keyboard S~h~ortcuts", "", "help.keys"),
+                    ],
+                ),
+                sep(),
+                it("DOS S~h~ell", "", "view.terminal"),
                 it("E~x~it", "Alt+X", "app.quit"),
             ],
         ),
@@ -390,15 +408,20 @@ fn menus() -> Vec<Menu> {
                 it("~C~opy", "Ctrl+C", "edit.copy"),
                 it("~P~aste", "Ctrl+V", "edit.paste"),
                 sep(),
-                it("Toggle Line ~C~omment", "Ctrl+/", "edit.comment"),
-                it("~F~ormat Document", "Ctrl+Shift+I", "edit.format"),
+                it("~F~ind...", "Ctrl+F", "search.find"),
+                it("R~e~place...", "Ctrl+H", "search.replace"),
+                it("Search A~g~ain", "Enter", "search.again"),
+                it("Find in F~i~les...", "Ctrl+Shift+F", "search.files"),
+                sep(),
+                it("Toggle Line C~o~mment", "Ctrl+/", "edit.comment"),
+                it("Format ~D~ocument", "Ctrl+Shift+I", "edit.format"),
                 sep(),
                 it("Trigger ~S~uggest", "Ctrl+Space", "lsp.complete"),
-                it("~P~arameter Hints", "Ctrl+Shift+Space", "lsp.signature"),
+                it("Parameter ~H~ints", "Ctrl+Shift+Space", "lsp.signature"),
                 it("~Q~uick Fix...", "Ctrl+.", "edit.quick_fix"),
                 it("Re~n~ame Symbol...", "Shift+F2", "edit.rename"),
                 it("Change ~L~anguage Mode...", "", "edit.language"),
-                it("~I~nstall Language Server...", "", "lsp.install"),
+                it("Install Language Ser~v~er...", "", "lsp.install"),
             ],
         ),
         Menu::new(
@@ -420,21 +443,6 @@ fn menus() -> Vec<Menu> {
             ],
         ),
         Menu::new(
-            "~S~earch",
-            vec![
-                it("~F~ind...", "Ctrl+F", "search.find"),
-                it("~R~eplace...", "Ctrl+H", "search.replace"),
-                it("~S~earch Again", "Enter", "search.again"),
-                it("Find in F~i~les...", "Ctrl+Shift+F", "search.files"),
-                sep(),
-                it("~G~o to Line Number...", "Ctrl+G", "search.goto"),
-                it("Find ~P~rocedure...", "Ctrl+Shift+O", "go.symbol"),
-                sep(),
-                it("Pre~v~ious Error", "Alt+F7", "go.prev_problem"),
-                it("~N~ext Error", "Alt+F8", "go.next_problem"),
-            ],
-        ),
-        Menu::new(
             "~V~iew",
             vec![
                 it("~C~ommand Palette...", "Ctrl+Shift+P", "view.palette"),
@@ -449,27 +457,68 @@ fn menus() -> Vec<Menu> {
                 it("~P~roblems", "Ctrl+Shift+M", "view.problems"),
                 it("~O~utput", "Ctrl+Shift+U", "view.output"),
                 it("~T~erminal", "Ctrl+`", "view.terminal"),
-                it("AI ~C~hat", "Ctrl+L", "ai.chat"),
+                it("AI Ch~a~t", "Ctrl+L", "ai.chat"),
                 sep(),
-                it("Primary Side ~B~ar", "Ctrl+B", "view.sidebar"),
-                it("Pa~n~el", "Ctrl+J", "view.panel"),
-                it("Secondar~y~ Side Bar", "Ctrl+Alt+B", "view.secondary"),
-                it("Split Edi~t~or", "Ctrl+\\", "view.split"),
-                it("Editor Ta~b~s", "", "view.editor_tabs"),
-                it("Brea~d~crumbs", "", "view.breadcrumbs"),
-                it("~M~inimap", "", "view.minimap"),
+                sub(
+                    "Appeara~n~ce",
+                    vec![
+                        it("Primary Side ~B~ar", "Ctrl+B", "view.sidebar"),
+                        it("~P~anel", "Ctrl+J", "view.panel"),
+                        it("Secondar~y~ Side Bar", "Ctrl+Alt+B", "view.secondary"),
+                        sep(),
+                        it("Editor ~T~abs", "", "view.editor_tabs"),
+                        it("Brea~d~crumbs", "", "view.breadcrumbs"),
+                        it("~M~inimap", "", "view.minimap"),
+                        it("~L~ine Numbers", "", "view.line_numbers"),
+                        it("Render ~W~hitespace", "", "view.whitespace"),
+                        it("~R~ight to Left", "", "view.rtl"),
+                        sep(),
+                        it("Reset La~y~out", "", "view.reset_layout"),
+                    ],
+                ),
+                sub(
+                    "Editor ~L~ayout",
+                    vec![
+                        it("Split ~R~ight", "Ctrl+\\", "view.split_right"),
+                        it("Split ~D~own", "", "view.split_down"),
+                        it("Split ~L~eft", "", "view.split_left"),
+                        it("Split ~U~p", "", "view.split_up"),
+                        sep(),
+                        it("~S~ingle", "", "view.single_group"),
+                        it("Two C~o~lumns", "", "view.two_columns"),
+                        it("T~h~ree Columns", "", "view.three_columns"),
+                        it("Two Ro~w~s", "", "view.two_rows"),
+                        it("~G~rid (2×2)", "", "view.grid"),
+                        sep(),
+                        it("Move to Ne~x~t Group", "Ctrl+Alt+Right", "view.next_group_editor"),
+                        it("Move to ~P~revious Group", "Ctrl+Alt+Left", "view.prev_group_editor"),
+                        it("~C~lose Group", "", "view.close_group"),
+                        sep(),
+                        it("~T~ile", "", "window.tile"),
+                        it("C~a~scade", "", "window.cascade"),
+                        it("~M~aximize All", "", "window.maximize_all"),
+                    ],
+                ),
+                sub(
+                    "~W~indows",
+                    vec![
+                        it("~Z~oom", "F5", "window.zoom"),
+                        it("~N~ext", "F6", "window.next"),
+                        it("~P~revious", "Shift+F6", "window.prev"),
+                        it("~C~lose", "Alt+F3", "window.close"),
+                        it("C~l~ose All", "", "window.close_all"),
+                        sep(),
+                        it("L~i~st...", "Alt+0", "window.list"),
+                    ],
+                ),
+                sep(),
+                it("Word Wr~a~p", "Alt+Z", "view.wrap"),
                 it("Markdown Pre~v~iew", "Ctrl+Shift+V", "view.preview"),
-                it("Reset La~y~out", "", "view.reset_layout"),
-                sep(),
-                it("~L~ine Numbers", "", "view.line_numbers"),
-                it("Right to Le~f~t", "", "view.rtl"),
-                it("~W~ord Wrap", "Alt+Z", "view.wrap"),
-                it("Render W~h~itespace", "", "view.whitespace"),
                 sep(),
                 it("~F~old", "Ctrl+Shift+[", "view.fold"),
-                it("~U~nfold", "Ctrl+Shift+]", "view.unfold"),
-                it("Fold ~A~ll", "", "view.fold_all"),
-                it("U~n~fold All", "", "view.unfold_all"),
+                it("Unfol~d~", "Ctrl+Shift+]", "view.unfold"),
+                it("Fold A~l~l", "", "view.fold_all"),
+                it("Unfold All", "", "view.unfold_all"),
             ],
         ),
         Menu::new(
@@ -478,15 +527,28 @@ fn menus() -> Vec<Menu> {
                 it("~B~ack", "Alt+Left", "go.back"),
                 it("~F~orward", "Alt+Right", "go.forward"),
                 sep(),
-                it("Go to ~F~ile...", "Ctrl+P", "go.file"),
+                it("Go to F~i~le...", "Ctrl+P", "go.file"),
                 it("Go to ~S~ymbol...", "Ctrl+Shift+O", "go.symbol"),
                 it("Go to Symbol in ~W~orkspace...", "Ctrl+T", "go.workspace_symbol"),
                 it("Go to ~D~efinition", "F12", "go.definition"),
                 it("Go to ~R~eferences", "Shift+F12", "go.references"),
                 it("Go to ~L~ine...", "Ctrl+G", "search.goto"),
-                it("Go to ~B~racket", "Ctrl+Shift+\\", "go.bracket"),
+                it("Go to Brac~k~et", "Ctrl+Shift+\\", "go.bracket"),
                 it("~N~ext Definition", "Alt+PgDn", "go.next_def"),
                 it("~P~revious Definition", "Alt+PgUp", "go.prev_def"),
+                sep(),
+                it("Ne~x~t Problem", "Alt+F8", "go.next_problem"),
+                it("Previous Pr~o~blem", "Alt+F7", "go.prev_problem"),
+                sep(),
+                sub(
+                    "Switch ~G~roup",
+                    vec![
+                        it("Group ~1~", "Ctrl+1", "view.focus_group_1"),
+                        it("Group ~2~", "Ctrl+2", "view.focus_group_2"),
+                        it("Group ~3~", "Ctrl+3", "view.focus_group_3"),
+                        it("Group ~4~", "Ctrl+4", "view.focus_group_4"),
+                    ],
+                ),
             ],
         ),
         Menu::new(
@@ -528,25 +590,6 @@ fn menus() -> Vec<Menu> {
             ],
         ),
         Menu::new(
-            "G~i~t",
-            vec![
-                it("Open ~C~hanges", "", "git.diff_file"),
-                it("~A~ll Changes", "", "git.diff_all"),
-                it("~S~taged Changes", "", "git.diff_staged"),
-                sep(),
-                it("~H~istory", "", "git.log"),
-                it("~F~ile History", "", "git.log_file"),
-                it("~W~ho Changed This Line", "", "git.blame"),
-                sep(),
-                it("Switch ~B~ranch...", "", "git.checkout"),
-                it("~P~ull", "", "git.pull"),
-                it("P~u~sh", "", "git.push"),
-                it("F~e~tch", "", "git.fetch"),
-                it("S~t~ash", "", "git.stash"),
-                it("P~o~p Stash", "", "git.stash_pop"),
-            ],
-        ),
-        Menu::new(
             "~A~I",
             vec![
                 it("~C~hat...", "Ctrl+L", "ai.chat"),
@@ -559,8 +602,9 @@ fn menus() -> Vec<Menu> {
                 it("~S~top Agent", "Esc", "agent.stop"),
             ],
         ),
-        // Turbo Pascal 7's Tools menu: the programs that come with Turbine
-        // (extensions add theirs at the end).
+        // Turbo Pascal 7's Tools menu: the programs that come with Turbine,
+        // Git (VS Code keeps it in Source Control's view), and extensions'
+        // items at the end.
         Menu::new(
             "~T~ools",
             vec![
@@ -568,51 +612,29 @@ fn menus() -> Vec<Menu> {
                 it("~C~alculator", "", "tools.calculator"),
                 it("Show C~l~ipboard", "", "edit.show_clipboard"),
                 sep(),
+                sub(
+                    "G~i~t",
+                    vec![
+                        it("Open ~C~hanges", "", "git.diff_file"),
+                        it("~A~ll Changes", "", "git.diff_all"),
+                        it("~S~taged Changes", "", "git.diff_staged"),
+                        sep(),
+                        it("~H~istory", "", "git.log"),
+                        it("~F~ile History", "", "git.log_file"),
+                        it("~W~ho Changed This Line", "", "git.blame"),
+                        sep(),
+                        it("Switch ~B~ranch...", "", "git.checkout"),
+                        it("~P~ull", "", "git.pull"),
+                        it("P~u~sh", "", "git.push"),
+                        it("F~e~tch", "", "git.fetch"),
+                        it("S~t~ash", "", "git.stash"),
+                        it("P~o~p Stash", "", "git.stash_pop"),
+                    ],
+                ),
+                sep(),
                 it("~G~rep (Find in Files)...", "Ctrl+Shift+F", "search.files"),
                 it("New ~T~erminal", "Ctrl+Shift+`", "terminal.new"),
                 it("Command ~P~alette...", "Ctrl+Shift+P", "view.palette"),
-            ],
-        ),
-        Menu::new(
-            "~O~ptions",
-            vec![
-                it("~K~eymap...", "", "options.keymap"),
-                it("~C~olors...", "", "options.colors"),
-                it("Control ~S~tyle...", "", "options.style"),
-                sep(),
-                it("~E~ditor...", "", "options.editor"),
-                it("~D~irectories...", "", "options.dirs"),
-                it("Se~t~tings...", "Ctrl+,", "options.settings"),
-            ],
-        ),
-        Menu::new(
-            "~W~indow",
-            vec![
-                it("~T~ile", "", "window.tile"),
-                it("C~a~scade", "", "window.cascade"),
-                it("~M~aximize All", "", "window.maximize_all"),
-                sep(),
-                it("~Z~oom", "F5", "window.zoom"),
-                it("~N~ext", "F6", "window.next"),
-                it("~P~revious", "Shift+F6", "window.prev"),
-                it("~C~lose", "Alt+F3", "window.close"),
-                it("C~l~ose All", "", "window.close_all"),
-                sep(),
-                // (Editor groups, as VS Code's View > Editor Layout.)
-                it("Split ~R~ight", "Ctrl+\\", "view.split_right"),
-                it("Split ~D~own", "", "view.split_down"),
-                it("Split L~e~ft", "", "view.split_left"),
-                it("Split ~U~p", "", "view.split_up"),
-                it("~S~ingle Group", "", "view.single_group"),
-                it("Two C~o~lumns", "", "view.two_columns"),
-                it("T~h~ree Columns", "", "view.three_columns"),
-                it("Two Ro~w~s", "", "view.two_rows"),
-                it("~G~rid (2×2)", "", "view.grid"),
-                it("Move to Ne~x~t Group", "Ctrl+Alt+Right", "view.next_group_editor"),
-                it("Move to Previous Gro~u~p", "Ctrl+Alt+Left", "view.prev_group_editor"),
-                it("Close Group", "", "view.close_group"),
-                sep(),
-                it("~L~ist...", "Alt+0", "window.list"),
             ],
         ),
         Menu::new(
@@ -629,7 +651,7 @@ fn menus() -> Vec<Menu> {
                 it("~K~eyboard...", "", "help.keys"),
                 it("~V~im Keys...", "", "help.vim"),
                 sep(),
-                it("~A~bout...", "", "help.about"),
+                it("A~b~out...", "", "help.about"),
             ],
         ),
     ]
@@ -2570,24 +2592,28 @@ impl Workbench {
             .map(|w| (w.ed.line_numbers, w.ed.base_rtl == Some(true)))
             .unwrap_or((true, false));
         let tab = self.tab_complete;
+        let d = &self.shell.dock;
+        let on = [
+            ("view.line_numbers", ln),
+            ("view.rtl", rtl),
+            ("ai.tab", tab),
+            ("view.sidebar", d.left.visible),
+            ("view.panel", d.bottom.visible),
+            ("view.secondary", d.right.visible),
+            ("view.editor_tabs", d.editor_tabs),
+            ("view.breadcrumbs", d.breadcrumbs),
+            ("view.minimap", self.shell.minimap.unwrap_or(self.theme.style.icons)),
+            ("selection.column", self.windows.last().is_some_and(|w| w.ed.column_mode)),
+            ("view.wrap", self.shell.word_wrap),
+            ("view.whitespace", self.shell.show_whitespace),
+        ];
+        // (Submenus' items too: Appearance's toggles.)
         for m in &mut self.menubar.menus {
-            for it in &mut m.items {
-                match it.command.as_str() {
-                    "view.line_numbers" => it.checked = Some(ln),
-                    "view.rtl" => it.checked = Some(rtl),
-                    "ai.tab" => it.checked = Some(tab),
-                    "view.sidebar" => it.checked = Some(self.shell.dock.left.visible),
-                    "view.panel" => it.checked = Some(self.shell.dock.bottom.visible),
-                    "view.secondary" => it.checked = Some(self.shell.dock.right.visible),
-                    "view.editor_tabs" => it.checked = Some(self.shell.dock.editor_tabs),
-                    "view.breadcrumbs" => it.checked = Some(self.shell.dock.breadcrumbs),
-                    "view.minimap" => it.checked = Some(self.shell.minimap.unwrap_or(self.theme.style.icons)),
-                    "selection.column" => it.checked = Some(self.windows.last().is_some_and(|w| w.ed.column_mode)),
-                    "view.wrap" => it.checked = Some(self.shell.word_wrap),
-                    "view.whitespace" => it.checked = Some(self.shell.show_whitespace),
-                    _ => {}
+            m.for_each_item_mut(&mut |it| {
+                if let Some((_, v)) = on.iter().find(|(c, _)| *c == it.command) {
+                    it.checked = Some(*v);
                 }
-            }
+            });
         }
     }
 
@@ -3608,7 +3634,7 @@ impl Workbench {
             Event::Resize(w, h) => {
                 let old = self.desktop();
                 self.size = (w, h);
-                self.menubar.width = w;
+                self.menubar.width = self.menus_width();
                 let d = self.desktop();
                 // Windows keep their place and share of the desktop as it
                 // grows or shrinks (zoomed ones fill it).
@@ -4245,13 +4271,10 @@ impl Workbench {
             self.dialog_result(r);
             return;
         }
-        if !self.menubar.is_open() && m.pos.y == 0 {
-            if let Some(cmd) = self.layout_toggles().into_iter().find(|t| t.0.contains(m.pos)).map(|t| t.1) {
-                if matches!(m.kind, MouseKind::Down(Button::Left)) {
-                    self.run_command(cmd);
-                }
-                return;
-            }
+        // The top row: ← →, the command center, the toggles, the window's
+        // buttons and its free space (the menus' titles are the menu bar's).
+        if self.top_mouse(&m) {
+            return;
         }
         match self.menubar.handle_mouse(&m, screen) {
             MenuResult::Command(c) => return self.run_command(&c),
@@ -4457,11 +4480,30 @@ impl Workbench {
                     }
                     mn = mn.child(n);
                 }
+                // (An open submenu's items, beside it.)
+                if let Some(parent) = m.items.get(self.menubar.item_sel).filter(|_| self.menubar.sub_open) {
+                    for (j, it) in parent.submenu.iter().enumerate() {
+                        if it.is_separator() {
+                            continue;
+                        }
+                        let Some(r) = self.menubar.sub_item_rect(j, screen) else { continue };
+                        let mut n = Node::new(format!("menuitem.{}", it.command), "menuitem", it.plain_label(), r).enabled(it.enabled);
+                        if let Some(c) = it.checked {
+                            n = n.value(if c { "checked" } else { "unchecked" });
+                        }
+                        mn = mn.child(n);
+                    }
+                }
             }
             bar = bar.child(mn);
         }
-        for (r, cmd, name, _, on) in self.layout_toggles() {
-            bar = bar.child(Node::new(format!("layout.{cmd}"), "button", name, r).value(if on { "on" } else { "off" }));
+        for it in self.top_items() {
+            let id = if it.action.starts_with("view.") { format!("layout.{}", it.action) } else { format!("top.{}", it.action) };
+            let mut n = Node::new(id, "button", it.name, it.rect).tip(it.name);
+            if it.action.starts_with("view.") {
+                n = n.value(if it.on { "on" } else { "off" });
+            }
+            bar = bar.child(n);
         }
         root = root.child(bar);
         let top = self.windows.len().saturating_sub(1);
@@ -4596,8 +4638,8 @@ impl Workbench {
         self.driver.queue.push_back(Step::Pause(Duration::from_millis(300)));
         self.queue_type(DEMO_CODE);
         self.driver.queue.push_back(Step::Pause(Duration::from_millis(400)));
-        self.queue_menu("Window/Tile");
-        self.queue_menu("Options/Colors");
+        self.queue_menu("View/Editor Layout/Tile");
+        self.queue_menu("File/Preferences/Colors");
         self.queue_click("listitem:Borland Cyan");
         self.queue_click("button:OK");
     }
@@ -4752,88 +4794,22 @@ impl Workbench {
     }
 }
 
-/// The window's layout: with its own title bar, a title row and under it
-/// the client area Turbine lays itself out in (its own coordinates start
-/// at the client area's corner); else the client area is all of it.
+/// The window's layout: the client area is all of it. (With Turbine's own
+/// title bar, the menu bar's row is the title bar too, as VS Code's: the
+/// window's buttons at its right end, its free space moves the window.)
 impl Workbench {
     /// The client area's place in the window (where Turbine's row 0 is).
     pub fn client_area(&self) -> Rect {
         let (w, h) = self.outer;
-        let top = i32::from(self.shell.own_title_bar);
-        Rect::new(0, top, w, (h - top).max(4))
+        Rect::new(0, 0, w, h.max(4))
     }
 
-    /// The title row's place, when it has one.
-    pub fn title_row(&self) -> Option<Rect> {
-        self.shell.own_title_bar.then(|| Rect::new(0, 0, self.outer.0, 1))
-    }
-
-    /// An event in the window's terms: the title row's, or the client
-    /// area's (moved into its own coordinates).
+    /// An event in the window's terms.
     fn frame_event(&mut self, ev: Event) {
-        let ev = match ev {
-            Event::Resize(w, h) => {
-                self.outer = (w, h);
-                let c = self.client_area();
-                Event::Resize(c.w, c.h)
-            }
-            Event::Mouse(m) if self.shell.own_title_bar => {
-                if self.title_row().is_some_and(|r| r.contains(m.pos)) {
-                    return self.title_mouse(m);
-                }
-                let c = self.client_area();
-                Event::Mouse(MouseEvent { pos: Point::new(m.pos.x - c.x, m.pos.y - c.y), ..m })
-            }
-            ev => ev,
-        };
+        if let Event::Resize(w, h) = ev {
+            self.outer = (w, h);
+        }
         self.event_inner(ev);
-    }
-}
-
-impl Workbench {
-    /// The title row's buttons: (place on the window, action, name, label).
-    pub(super) fn title_buttons(&self) -> Vec<(Rect, i32, &'static str, &'static str)> {
-        if !self.shell.own_title_bar {
-            return Vec::new();
-        }
-        let Some(r) = self.title_row() else { return Vec::new() };
-        let x = r.right() - 9;
-        // (In the style's own marks: QBasic's arrows, Borland's triangles
-        // and close box.)
-        let qbasic = self.theme.style.name.contains("QBasic") || self.theme.style.name.contains("QuickBASIC");
-        let (min, max, close) = if qbasic { ("[↓]", "[↑]", "[×]") } else { ("[▼]", "[▲]", "[■]") };
-        vec![(Rect::new(x, 0, 3, 1), 1, "Minimize", min), (Rect::new(x + 3, 0, 3, 1), 2, "Maximize or Restore", max), (Rect::new(x + 6, 0, 3, 1), 3, "Close", close)]
-    }
-
-    /// The mouse on the title row: its buttons; elsewhere a drag moves the
-    /// window and a double-click maximizes it.
-    fn title_mouse(&mut self, m: MouseEvent) {
-        if !matches!(m.kind, MouseKind::Down(Button::Left)) {
-            return;
-        }
-        if let Some(op) = self.title_buttons().into_iter().find(|b| b.0.contains(m.pos)).map(|b| b.1) {
-            self.window_op = op;
-            return;
-        }
-        let double = self.last_click.is_some_and(|(p, t)| p.y == -1 && (p.x - m.pos.x).abs() < 2 && t.elapsed() < Duration::from_millis(400));
-        self.last_click = Some((Point::new(m.pos.x, -1), Instant::now()));
-        self.window_op = if double { 2 } else { 4 };
-    }
-
-    /// Draw the title row: the title in the middle, the buttons at the right.
-    fn draw_title_row(&self, surf: &mut Surface) {
-        let mut c = surf.canvas();
-        let w = self.outer.0;
-        let st = self.theme.scheme.title_active;
-        c.fill(Rect::new(0, 0, w, 1), " ", st);
-        let t = self.title();
-        let t = if t.is_empty() { "Turbine".to_string() } else { format!("{t} - Turbine") };
-        let room = (w - 22).max(0) as usize;
-        let shown: String = if str_width(&t) > room { t.chars().take(room.saturating_sub(1)).chain(std::iter::once('…')).collect() } else { t };
-        c.print((w - str_width(&shown) as i32) / 2, 0, &shown, st);
-        for (r, _, _, label) in self.title_buttons() {
-            c.print(r.x, 0, label, self.theme.scheme.frame_icons);
-        }
     }
 }
 
@@ -4963,33 +4939,7 @@ impl App for Workbench {
     }
 
     fn render(&mut self, surf: &mut Surface) {
-        // The window's layout: the client area drawn where it goes, the
-        // title row above it.
-        // (No title row: Turbine is the whole window, as it always was.)
-        if !self.shell.own_title_bar {
-            return self.render_client(surf);
-        }
-        // (The window's size is the front end's, from its resize: the
-        // surface follows it, the client area inside it.)
-        if (surf.w, surf.h) != self.outer {
-            *surf = Surface::new(self.outer.0, self.outer.1);
-        }
-        let c = self.client_area();
-        if (c.w, c.h) != self.size {
-            self.dispatch(Event::Resize(c.w, c.h));
-        }
-        let mut client = Surface::new(c.w, c.h);
-        client.cursor_blink = surf.cursor_blink;
-        self.render_client(&mut client);
-        for y in 0..c.h.min(surf.h - c.y) {
-            for x in 0..c.w.min(surf.w - c.x) {
-                surf.cells[((y + c.y) * surf.w + x + c.x) as usize] = client.cells[(y * c.w + x) as usize].clone();
-            }
-        }
-        surf.cursor = client.cursor.map(|(p, sh)| (Point::new(p.x + c.x, p.y + c.y), sh));
-        surf.cursor_blink = client.cursor_blink;
-        surf.images = client.images.into_iter().map(|(r, p)| (Rect::new(r.x + c.x, r.y + c.y, r.w, r.h), p)).collect();
-        self.draw_title_row(surf);
+        self.render_client(surf)
     }
 
     fn should_quit(&self) -> bool {
@@ -5255,13 +5205,11 @@ impl Workbench {
                 c.set_cursor(Point::new(1 + *col as i32, self.size.1 - 1), turbine_ui::CursorShape::Bar);
             }
         }
+        self.menubar.width = self.menus_width();
         self.menubar.draw(&mut c, &theme, screen);
-        // (The layout toggles: [▌] lit when its part shows, dim when not.)
-        for (r, _, _, glyph, on) in self.layout_toggles() {
-            let base = theme.scheme.menu;
-            let st = if on { Style { fg: theme.scheme.menu_hotkey.fg, ..base } } else { Style { fg: theme.scheme.shadow.fg, ..base } };
-            c.print(r.x, r.y, &format!("[{glyph}]"), st);
-        }
+        // (The rest of the top row: ← → and the command center, the layout
+        // toggles lit when their part shows, the window's buttons.)
+        self.draw_top_items(&mut c, &theme);
         if let Some(comp) = &mut self.completion {
             let at = self.windows.last().filter(|w| w.win.id == comp.win_id).and_then(|w| w.ed.cursor_screen_pos());
             if let (Some(at), false) = (at, comp.popup.items.is_empty()) {
@@ -5526,7 +5474,7 @@ fn keys_help_md(menus: &[Menu], vim: bool) -> String {
         md.push_str("\nThe Vim keymap is on: in Normal mode the letters are vim's (Help > Vim Keys); the Ctrl and F-keys below still work.\n");
     }
     for m in menus {
-        let rows: Vec<(String, String)> = m.items.iter().filter(|i| !i.shortcut.is_empty() && !i.label.is_empty()).map(|i| (i.shortcut.clone(), i.label.replace('~', "").trim_end_matches("...").to_string())).collect();
+        let rows: Vec<(String, String)> = m.all_items().into_iter().filter(|i| !i.shortcut.is_empty() && !i.label.is_empty()).map(|i| (i.shortcut.clone(), i.label.replace('~', "").trim_end_matches("...").to_string())).collect();
         if rows.is_empty() {
             continue;
         }
@@ -5632,7 +5580,7 @@ mod tests {
     #[test]
     fn agent_picks_a_color_scheme_in_a_dialog() {
         let mut wb = bench();
-        run(&mut wb, json!({"cmd": "menu", "path": "Options/Colors..."}));
+        run(&mut wb, json!({"cmd": "menu", "path": "File/Preferences/Colors..."}));
         assert!(wb.dialog.is_some());
         run(&mut wb, json!({"cmd": "click", "target": "listitem:QBasic"}));
         let r = run(&mut wb, json!({"cmd": "click", "target": "button:OK"}));
@@ -5779,7 +5727,7 @@ mod tests {
         // Ctrl-W n opens a window; F6 and menus work in vim mode.
         keys(&mut wb, &["Ctrl+W", "n"]);
         assert_eq!(wb.windows.len(), 2);
-        run(&mut wb, json!({"cmd": "menu", "path": "Window/Tile"}));
+        run(&mut wb, json!({"cmd": "menu", "path": "View/Editor Layout/Tile"}));
         let snap = run(&mut wb, json!({"cmd": "snapshot"}));
         assert!(snap.to_string().contains("vim NORMAL"));
     }
@@ -6518,32 +6466,41 @@ mod tests {
     }
 
     #[test]
-    fn its_own_title_bar_asks_the_window() {
+    fn its_own_title_bar_is_the_menu_row_as_vs_codes() {
         let mut wb = bench();
         wb.event(Event::Resize(120, 30));
         wb.setting_set("title_bar", "on");
-        // (The client area one row down, the menu bar its first row.)
-        assert_eq!(wb.client_area(), Rect::new(0, 1, 120, 29));
-        assert_eq!(wb.size, (120, 29));
+        // (One row: the menus, ← → and the command center, the toggles, the
+        // window's buttons; the client area is the whole window.)
+        assert_eq!(wb.client_area(), Rect::new(0, 0, 120, 30));
+        assert_eq!(wb.size, (120, 30));
         assert!(wb.own_title_bar());
-        let b = wb.title_buttons();
-        assert_eq!(b.len(), 3);
+        let items = wb.top_items();
+        let find = |a: &str| items.iter().find(|t| t.action == a).map(|t| t.rect).unwrap_or_else(|| panic!("{a}: {items:?}"));
+        let (center, back, sidebar, close) = (find("center"), find("go.back"), find("view.sidebar"), find("win:3"));
+        let titles = wb.menubar.title_rects();
+        let last_menu = titles.iter().rev().find(|r| r.w > 0 && r.right() < center.x).unwrap();
+        assert!(last_menu.right() < back.x && back.right() <= center.x && center.right() < sidebar.x && sidebar.right() <= close.x, "{items:?}");
+        assert_eq!(close.right(), 120);
         let at = |r: Rect| Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(r.x + 1, 0), mods: Mods::NONE });
-        wb.event(at(b[0].0));
+        wb.event(at(find("win:1")));
         assert_eq!(wb.take_window_op(), 1);
-        wb.event(at(b[2].0));
+        wb.event(at(close));
         assert_eq!(wb.take_window_op(), 3);
-        // The free middle of the bar: a move.
-        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(100, 0), mods: Mods::NONE }));
+        // The free part of the row: a move.
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(back.x - 1, 0), mods: Mods::NONE }));
         assert_eq!(wb.take_window_op(), 4);
+        // The command center: Go to File.
+        wb.event(at(center));
+        assert!(wb.shell.palette.is_some());
+        keys(&mut wb, &["Esc"]);
         let mut surf = Surface::new(120, 30);
         wb.render(&mut surf);
         let t = surf.to_text();
-        let rows: Vec<&str> = t.lines().collect();
-        assert!(rows[0].ends_with("[▼][▲][■]") && rows[0].contains("Turbine"), "{}", rows[0]);
-        assert!(rows[1].contains("File") && rows[1].contains("Edit"), "the menu bar under it: {}", rows[1]);
-        // A click on the menu bar's row in the window reaches the menus.
-        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(3, 1), mods: Mods::NONE }));
+        let row = t.lines().next().unwrap();
+        assert!(row.contains("File  Edit") && row.contains(" ← ") && row.contains("[▌]") && row.trim_end().ends_with("[▼][▲][■]"), "{row}");
+        // A click on a menu's title still opens it.
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(3, 0), mods: Mods::NONE }));
         assert!(wb.menubar.is_open());
     }
 
@@ -8236,7 +8193,7 @@ mod tests {
         wb.run_command("view.editor_tabs");
         wb.run_command("view.breadcrumbs");
         wb.dispatch(Event::Resize(80, 25));
-        run(&mut wb, json!({"cmd": "menu", "path": "Options/Control Style..."}));
+        run(&mut wb, json!({"cmd": "menu", "path": "File/Preferences/Control Style..."}));
         run(&mut wb, json!({"cmd": "click", "target": "listitem:QBasic / MS-DOS Edit"}));
         run(&mut wb, json!({"cmd": "click", "target": "button:OK"}));
         assert_eq!(wb.theme.scheme.name, "QBasic");

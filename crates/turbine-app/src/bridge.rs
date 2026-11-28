@@ -360,21 +360,36 @@ fn app_menus_json() -> String {
                 serde_json::json!({
                     // Qt marks the mnemonic with &, Turbine with ~...~.
                     "title": qt_mnemonic(&m.title),
-                    "items": m.items.iter().enumerate().map(|(ii, it)| serde_json::json!({
-                        "id": format!("{mi}.{ii}:{}", it.command),
-                        "text": qt_mnemonic(&it.label),
-                        "shortcut": it.shortcut,
-                        "enabled": it.enabled,
-                        "separator": it.is_separator(),
-                        "checkable": it.checked.is_some(),
-                        "checked": it.checked == Some(true),
-                    })).collect::<Vec<_>>()
+                    "items": menu_items_json(&m.items, &format!("{mi}"))
                 })
             })
             .collect();
         serde_json::Value::Array(menus).to_string()
     })
     .unwrap_or_else(|| "[]".into())
+}
+
+/// A menu's items for GlobalMenuBar (submenus as nested "items").
+fn menu_items_json(items: &[turbine_ui::menu::MenuItem], path: &str) -> Vec<serde_json::Value> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(ii, it)| {
+            let mut v = serde_json::json!({
+                "id": format!("{path}.{ii}:{}", it.command),
+                "text": qt_mnemonic(&it.label),
+                "shortcut": it.shortcut,
+                "enabled": it.enabled,
+                "separator": it.is_separator(),
+                "checkable": it.checked.is_some(),
+                "checked": it.checked == Some(true),
+            });
+            if it.has_submenu() {
+                v["items"] = serde_json::Value::Array(menu_items_json(&it.submenu, &format!("{path}.{ii}")));
+            }
+            v
+        })
+        .collect()
 }
 
 /// "~F~ile" → "&File"; a literal & doubled.

@@ -18,14 +18,32 @@ pub struct MenuItem {
     pub command: String,
     pub enabled: bool,
     pub checked: Option<bool>,
+    /// A submenu's items (it opens at the side, ►), as VS Code's
+    /// Preferences and Editor Layout.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub submenu: Vec<MenuItem>,
 }
 
 impl MenuItem {
     pub fn new(label: &str, shortcut: &str, command: &str) -> Self {
-        MenuItem { label: label.into(), shortcut: shortcut.into(), command: command.into(), enabled: true, checked: None }
+        MenuItem { label: label.into(), shortcut: shortcut.into(), command: command.into(), enabled: true, checked: None, submenu: Vec::new() }
+    }
+    /// An item that opens a submenu.
+    pub fn sub(label: &str, items: Vec<MenuItem>) -> Self {
+        MenuItem { label: label.into(), shortcut: String::new(), command: String::new(), enabled: true, checked: None, submenu: items }
     }
     pub fn separator() -> Self {
-        MenuItem { label: String::new(), shortcut: String::new(), command: String::new(), enabled: false, checked: None }
+        MenuItem { label: String::new(), shortcut: String::new(), command: String::new(), enabled: false, checked: None, submenu: Vec::new() }
+    }
+    pub fn has_submenu(&self) -> bool {
+        !self.submenu.is_empty()
+    }
+    /// It, and every item in its submenus (to find one by its command).
+    pub fn walk<'a>(&'a self, out: &mut Vec<&'a MenuItem>) {
+        out.push(self);
+        for s in &self.submenu {
+            s.walk(out);
+        }
     }
     pub fn disabled(mut self) -> Self {
         self.enabled = false;
@@ -52,6 +70,24 @@ pub struct Menu {
 impl Menu {
     pub fn new(title: &str, items: Vec<MenuItem>) -> Self {
         Menu { title: title.into(), items }
+    }
+    /// Every item, those in submenus too.
+    pub fn all_items(&self) -> Vec<&MenuItem> {
+        let mut v = Vec::new();
+        for it in &self.items {
+            it.walk(&mut v);
+        }
+        v
+    }
+    /// Every item, mutable, those in submenus too.
+    pub fn for_each_item_mut(&mut self, f: &mut impl FnMut(&mut MenuItem)) {
+        fn go(items: &mut [MenuItem], f: &mut impl FnMut(&mut MenuItem)) {
+            for it in items {
+                f(it);
+                go(&mut it.submenu, f);
+            }
+        }
+        go(&mut self.items, f);
     }
     pub fn plain_title(&self) -> String {
         self.title.replace('~', "")
@@ -81,6 +117,9 @@ pub struct MenuBar {
     pub title_sel: usize,
     /// Highlighted item in the open drop-down.
     pub item_sel: usize,
+    /// The highlighted item's submenu is open, and its highlighted item.
+    pub sub_open: bool,
+    pub sub_sel: usize,
     /// Mouse button held since opening (release on an item picks it).
     tracking: bool,
     /// Screen width, for laying the titles out (0 = unlimited).
@@ -106,6 +145,7 @@ impl MenuBar {
         self.active = false;
         self.open = None;
         self.tracking = false;
+        self.sub_open = false;
     }
 
     /// Rectangle of each title in the bar.
@@ -173,9 +213,7 @@ impl MenuBar {
     /// Rectangle of the drop-down for menu `i` (frame included).
     pub fn dropdown_rect(&self, i: usize, screen: Rect) -> Rect {
         let m = &self.menus[i];
-        let label_w = m.items.iter().map(|it| str_width(&it.plain_label())).max().unwrap_or(0) as i32;
-        let key_w = m.items.iter().map(|it| str_width(&it.shortcut)).max().unwrap_or(0) as i32;
-        let w = label_w + if key_w > 0 { key_w + 3 } else { 0 } + 6;
+        let w = items_width(&m.items);
         let h = m.items.len() as i32 + 2;
         let tr = self.title_rects()[i];
         let x = (tr.x - 1).min(screen.right() - w - 2).max(0);
@@ -189,7 +227,59 @@ impl MenuBar {
         Rect::new(d.x + 1, d.y + 1 + j as i32, d.w - 2, 1)
     }
 
+    /// The open submenu's box: beside its item (at the left when there's
+    /// no room at the right).
+    pub fn sub_rect(&self, screen: Rect) -> Option<Rect> {
+        let i = self.open?;
+        let item = self.menus[i].items.get(self.item_sel).filter(|it| it.has_submenu() && self.sub_open)?;
+        let d = self.dropdown_rect(i, screen);
+        let w = items_width(&item.submenu);
+        let h = item.submenu.len() as i32 + 2;
+        let y = (d.y + self.item_sel as i32).min(screen.bottom() - h).max(1);
+        let x = if d.right() - 1 + w <= screen.right() { d.right() - 1 } else { (d.x - w + 1).max(0) };
+        Some(Rect::new(x, y, w.min(screen.w), h))
+    }
+
+    pub fn sub_item_rect(&self, j: usize, screen: Rect) -> Option<Rect> {
+        let r = self.sub_rect(screen)?;
+        Some(Rect::new(r.x + 1, r.y + 1 + j as i32, r.w - 2, 1))
+    }
+
+    fn open_sub(&mut self) -> bool {
+        let Some(i) = self.open else { return false };
+        let Some(it) = self.menus[i].items.get(self.item_sel).filter(|it| it.has_submenu() && it.enabled) else { return false };
+        self.sub_sel = it.submenu.iter().position(|s| s.enabled).unwrap_or(0);
+        self.sub_open = true;
+        true
+    }
+
+    fn step_sub(&mut self, dir: i32) {
+        let Some(i) = self.open else { return };
+        let items = &self.menus[i].items[self.item_sel].submenu;
+        let n = items.len() as i32;
+        let mut j = self.sub_sel as i32;
+        for _ in 0..n {
+            j = (j + dir).rem_euclid(n);
+            if items[j as usize].enabled {
+                self.sub_sel = j as usize;
+                return;
+            }
+        }
+    }
+
+    fn pick_sub(&mut self) -> MenuResult {
+        let Some(i) = self.open else { return MenuResult::Consumed };
+        let Some(it) = self.menus[i].items[self.item_sel].submenu.get(self.sub_sel) else { return MenuResult::Consumed };
+        if !it.enabled || it.is_separator() {
+            return MenuResult::Consumed;
+        }
+        let cmd = it.command.clone();
+        self.close();
+        MenuResult::Command(cmd)
+    }
+
     fn open_menu(&mut self, i: usize) {
+        self.sub_open = false;
         self.active = true;
         self.title_sel = i;
         self.open = Some(i);
@@ -204,6 +294,7 @@ impl MenuBar {
             j = (j + dir).rem_euclid(n);
             if self.menus[i].items[j as usize].enabled {
                 self.item_sel = j as usize;
+                self.sub_open = false;
                 return;
             }
         }
@@ -216,6 +307,11 @@ impl MenuBar {
         };
         let it = &self.menus[i].items[self.item_sel];
         if !it.enabled {
+            return MenuResult::Consumed;
+        }
+        // (A submenu's item: it opens.)
+        if it.has_submenu() {
+            self.open_sub();
             return MenuResult::Consumed;
         }
         let cmd = it.command.clone();
@@ -251,6 +347,30 @@ impl MenuBar {
         }
         if !self.is_open() {
             return MenuResult::Ignored;
+        }
+        // An open submenu has the keys: ↑ ↓, Enter or a letter picks,
+        // ← or Esc back to its menu.
+        if self.sub_open && self.open.is_some() {
+            let i = self.open.unwrap();
+            match ev.key {
+                Key::Up => self.step_sub(-1),
+                Key::Down => self.step_sub(1),
+                Key::Left | Key::Esc => self.sub_open = false,
+                Key::Enter => return self.pick_sub(),
+                Key::Char(c) => {
+                    let c = c.to_ascii_lowercase();
+                    if let Some(j) = self.menus[i].items[self.item_sel].submenu.iter().position(|it| it.enabled && it.hotkey() == Some(c)) {
+                        self.sub_sel = j;
+                        return self.pick_sub();
+                    }
+                }
+                _ => {}
+            }
+            return MenuResult::Consumed;
+        }
+        // (→ on a submenu's item opens it.)
+        if ev.key == Key::Right && self.open_sub() {
+            return MenuResult::Consumed;
         }
         let n = self.menus.len();
         match ev.key {
@@ -295,6 +415,23 @@ impl MenuBar {
         let on_item = self.open.and_then(|i| {
             (0..self.menus[i].items.len()).find(|&j| self.item_rect(i, j, screen).contains(ev.pos))
         });
+        // The open submenu: hovering lights its items, a click or release picks.
+        let sub_n = self.open.map_or(0, |i| self.menus[i].items.get(self.item_sel).map_or(0, |it| it.submenu.len()));
+        let on_sub = (0..sub_n).find(|&j| self.sub_item_rect(j, screen).is_some_and(|r| r.contains(ev.pos)));
+        let in_sub = self.sub_rect(screen).is_some_and(|r| r.contains(ev.pos));
+        if in_sub {
+            if let Some(j) = on_sub {
+                let enabled = self.open.is_some_and(|i| self.menus[i].items[self.item_sel].submenu[j].enabled);
+                if enabled {
+                    self.sub_sel = j;
+                }
+                if matches!(ev.kind, MouseKind::Up(Button::Left)) || (matches!(ev.kind, MouseKind::Down(Button::Left)) && !self.tracking) {
+                    self.tracking = false;
+                    return self.pick_sub();
+                }
+            }
+            return MenuResult::Consumed;
+        }
         match ev.kind {
             MouseKind::Down(Button::Left) => {
                 if let Some(t) = on_title {
@@ -309,6 +446,8 @@ impl MenuBar {
                 if let Some(j) = on_item {
                     self.item_sel = j;
                     self.tracking = true;
+                    self.sub_open = false;
+                    self.open_sub();
                     return MenuResult::Consumed;
                 }
                 if self.is_open() {
@@ -330,8 +469,11 @@ impl MenuBar {
                     }
                 }
                 if let Some(j) = on_item {
-                    if self.menus[self.open.unwrap()].items[j].enabled {
+                    if self.menus[self.open.unwrap()].items[j].enabled && (self.item_sel != j || !self.sub_open) {
                         self.item_sel = j;
+                        // (Resting on a submenu's item opens it, as VS Code's do.)
+                        self.sub_open = false;
+                        self.open_sub();
                     }
                 }
                 MenuResult::Consumed
@@ -340,6 +482,11 @@ impl MenuBar {
                 let was_tracking = std::mem::take(&mut self.tracking);
                 if let Some(j) = on_item {
                     self.item_sel = j;
+                    // (Let go on a submenu's item: it stays open to pick from.)
+                    if self.menus[self.open.unwrap()].items[j].has_submenu() {
+                        self.open_sub();
+                        return MenuResult::Consumed;
+                    }
                     return self.pick();
                 }
                 let _ = was_tracking;
@@ -367,40 +514,60 @@ impl MenuBar {
         }
     }
 
-    /// Draw the open drop-down (call after everything else so it's on top).
+    /// Draw the open drop-down (call after everything else so it's on top),
+    /// and its open submenu beside it.
     pub fn draw_dropdown(&self, c: &mut Canvas, theme: &Theme, screen: Rect) {
         let Some(i) = self.open else { return };
-        let s = &theme.scheme;
-        let fc = theme.style.menu_frame;
         let d = self.dropdown_rect(i, screen);
-        c.fill(d, " ", s.menu);
-        crate::frame::draw_frame(c, d, fc, s.menu);
-        if theme.style.shadows {
-            c.shadow(d, s.shadow);
+        let sel = if self.sub_open { None } else { Some(self.item_sel) };
+        draw_items(c, theme, d, &self.menus[i].items, sel, Some(self.item_sel));
+        if let Some(r) = self.sub_rect(screen) {
+            draw_items(c, theme, r, &self.menus[i].items[self.item_sel].submenu, Some(self.sub_sel), None);
         }
-        for (j, it) in self.menus[i].items.iter().enumerate() {
-            let r = self.item_rect(i, j, screen);
-            if it.is_separator() {
-                c.print(d.x, r.y, "├", s.menu);
-                c.hline(d.x + 1, r.y, d.w - 2, fc.h, s.menu);
-                c.print(d.right() - 1, r.y, "┤", s.menu);
-                continue;
-            }
-            let sel = j == self.item_sel;
-            let (st, hot) = match (sel, it.enabled) {
-                (true, _) => (s.menu_selected, s.menu_selected_hotkey),
-                (false, true) => (s.menu, s.menu_hotkey),
-                (false, false) => (s.menu_disabled, s.menu_disabled),
-            };
-            c.fill(r, " ", st);
-            if it.checked == Some(true) {
-                c.print(r.x, r.y, "√", st);
-            }
-            c.print_hot(r.x + 2, r.y, &it.label, st, if it.enabled { hot } else { st });
-            if !it.shortcut.is_empty() {
-                let kw = str_width(&it.shortcut) as i32;
-                c.print(r.right() - kw - 1, r.y, &it.shortcut, st);
-            }
+    }
+}
+
+/// A drop-down's width for its items (labels, keys, a submenu's ►).
+fn items_width(items: &[MenuItem]) -> i32 {
+    let label_w = items.iter().map(|it| str_width(&it.plain_label())).max().unwrap_or(0) as i32;
+    let key_w = items.iter().map(|it| if it.has_submenu() { 1 } else { str_width(&it.shortcut) }).max().unwrap_or(0) as i32;
+    label_w + if key_w > 0 { key_w + 3 } else { 0 } + 6
+}
+
+/// A box of items: `sel` lit; `parent` (the item whose submenu is open)
+/// lit dimmer.
+fn draw_items(c: &mut Canvas, theme: &Theme, d: Rect, items: &[MenuItem], sel: Option<usize>, parent: Option<usize>) {
+    let s = &theme.scheme;
+    let fc = theme.style.menu_frame;
+    c.fill(d, " ", s.menu);
+    crate::frame::draw_frame(c, d, fc, s.menu);
+    if theme.style.shadows {
+        c.shadow(d, s.shadow);
+    }
+    for (j, it) in items.iter().enumerate() {
+        let r = Rect::new(d.x + 1, d.y + 1 + j as i32, d.w - 2, 1);
+        if it.is_separator() {
+            c.print(d.x, r.y, "├", s.menu);
+            c.hline(d.x + 1, r.y, d.w - 2, fc.h, s.menu);
+            c.print(d.right() - 1, r.y, "┤", s.menu);
+            continue;
+        }
+        let lit = sel == Some(j) || (sel.is_none() && parent == Some(j));
+        let (st, hot) = match (lit, it.enabled) {
+            (true, _) => (s.menu_selected, s.menu_selected_hotkey),
+            (false, true) => (s.menu, s.menu_hotkey),
+            (false, false) => (s.menu_disabled, s.menu_disabled),
+        };
+        c.fill(r, " ", st);
+        if it.checked == Some(true) {
+            c.print(r.x, r.y, "√", st);
+        }
+        c.print_hot(r.x + 2, r.y, &it.label, st, if it.enabled { hot } else { st });
+        if it.has_submenu() {
+            c.print(r.right() - 2, r.y, "►", st);
+        } else if !it.shortcut.is_empty() {
+            let kw = str_width(&it.shortcut) as i32;
+            c.print(r.right() - kw - 1, r.y, &it.shortcut, st);
         }
     }
 }
