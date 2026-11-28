@@ -1713,6 +1713,10 @@ impl Workbench {
                 Some(Tab::Pane(id)) => {
                     let is_chat = self.windows.iter().any(|w| w.win.id == id && w.special == Some("chat"));
                     if is_chat && m.pos.y >= r.bottom() - 3 {
+                        if press && m.pos.y == r.bottom() - 3 {
+                            self.chat_picker_click(r, m.pos);
+                            return true;
+                        }
                         if press {
                             self.shell.focus = Focus::Chat;
                             // (The mode pill at the row's start switches the mode.)
@@ -1978,6 +1982,8 @@ impl Workbench {
                         c.print(r.x, y, if fc.v == "║" { "╟" } else { "├" }, fs);
                         c.hline(r.x + 1, y, r.w - 2, "─", fs);
                         c.print(r.right() - 1, y, if fc.v == "║" { "╢" } else { "┤" }, fs);
+                        // (The model and how hard it thinks, on that line.)
+                        self.draw_chat_pickers(c, r, theme, focused);
                         // The mode (Ctrl+. or a click switches it), then the field.
                         let (mode, hint) = self.chat_mode_label(theme.style.icons);
                         let pill = s.menu_selected;

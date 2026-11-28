@@ -1,28 +1,41 @@
 //! AI models for the editor: chat and fill-in-the-middle completion.
 //!
-//! On a hearth desktop the models come from hearth's AI hub (`hearth-ai`,
-//! JSON lines on stdin/stdout): it lists every local server and what's
-//! installed and loaded, and Turbine asks it to load a model before using
-//! it, so hearth's graphics-memory arbiter stays in charge. Requests then go
-//! straight to that server's OpenAI-compatible API (or Ollama's own for
-//! fill-in-the-middle). Without the hub: a local Ollama, or any
-//! OpenAI-compatible server named by `TURBINE_AI_URL` (+ `TURBINE_AI_KEY`,
-//! `TURBINE_AI_MODEL`).
+//! Two ways to reach them:
 //!
+//! - **The hearth AI hub** (on a hearth desktop): its OpenAI-compatible app
+//!   API, address and token in `$XDG_RUNTIME_DIR/hearth/ai-api.json`. It
+//!   lists every model the desktop has (local servers, hearth's model
+//!   services such as Inkling, and Claude Code / Codex / Gemini when cloud AI
+//!   is allowed), "default" and "fast" first (Settings > AI > Apps), and makes
+//!   room in graphics memory before each request, so it stays in charge.
+//! - **Standalone**: Turbine finds them itself: a local Ollama, a llama.cpp
+//!   server, any OpenAI-compatible server named by `TURBINE_AI_URL`
+//!   (+ `TURBINE_AI_KEY`, `TURBINE_AI_MODEL`), and the cloud APIs whose keys
+//!   are set (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
+//!   `ZAI_API_KEY` for GLM). `TURBINE_AI_HUB=0` forces this.
+//!
+//! How hard a reasoning model thinks is [`Ai::thinking`].
 //! Everything slow runs on threads; results come back as [`AiEvent`]s.
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 /// A model somewhere Turbine can reach.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Model {
-    /// The hub's provider id ("ollama", "llamacpp", ...) or "env"/"ollama-direct".
+    /// The hub's provider id ("ollama", "service:…", "claude", ...), or
+    /// standalone's ("ollama-direct", "llamacpp", "env", "openai", ...).
     pub provider: String,
+    /// The name requests use (through the hub: its id, "<provider>/<model>").
     pub name: String,
+    /// The name shown ("Inkling 2 Mini", "qwen3.5:4b (Ollama)").
+    pub label: String,
+    /// It runs in the cloud (what's typed leaves the computer).
+    pub cloud: bool,
+    /// Reached through the hub's app API.
+    pub via_hub: bool,
     /// API base ending in /v1 (OpenAI-compatible).
     pub base: String,
     pub key: Option<String>,
@@ -47,6 +60,8 @@ pub enum AiEvent {
     Error { id: u64, message: String },
     /// The hub went away (or was never there).
     HubGone(String),
+    /// Part of a reasoning model's thinking (shown as it thinks).
+    Thinking { id: u64, text: String },
 }
 
 #[derive(Clone, Debug)]
@@ -82,7 +97,8 @@ pub fn models_from_state(st: &Value) -> Vec<Model> {
             let lower = name.to_lowercase();
             let fim = caps.contains(&"insert") || (lower.contains("coder") && lower.contains("base"));
             let chat = !lower.contains("base") && !lower.contains("ocr") && !lower.contains("embed") && !lower.contains("translate");
-            out.push(Model { provider: id.clone(), name: name.clone(), base: base.clone(), key: None, loaded: loaded.contains(&name), fim, chat });
+            let label = m["label"].as_str().map(str::to_string).unwrap_or_else(|| format!("{name} ({})", p["label"].as_str().unwrap_or(&id)));
+            out.push(Model { provider: id.clone(), name: name.clone(), label, base: base.clone(), key: None, loaded: loaded.contains(&name), fim, chat, ..Default::default() });
         }
     }
     out
@@ -164,14 +180,18 @@ pub fn strip_thinking(chunk: &str, in_think: &mut bool) -> String {
     }
 }
 
-/// The connection to hearth's AI hub, if there is one.
-struct Hub {
-    child: Child,
-    stdin: ChildStdin,
+/// The hub's app API: (base ending in /v1, token).
+#[derive(Clone, Debug)]
+struct HubApi {
+    base: String,
+    token: String,
 }
 
 pub struct Ai {
-    hub: Option<Hub>,
+    hub: Option<HubApi>,
+    /// How hard reasoning models think: "off", "low", "medium", "high";
+    /// None leaves it to the model (Ollama's: off, as thinking aloud is slow).
+    pub thinking: Option<String>,
     tx: Sender<AiEvent>,
     rx: Receiver<AiEvent>,
     next_id: u64,
@@ -184,113 +204,193 @@ fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().timeout_connect(Some(Duration::from_secs(5))).timeout_global(Some(Duration::from_secs(600))).build().into()
 }
 
+/// The hub's app API, when hearth's hub runs (its file says where).
+fn hub_api() -> Option<HubApi> {
+    let file = std::env::var("HEARTH_AI_API_FILE").ok().map(std::path::PathBuf::from).or_else(|| {
+        let run = std::env::var("XDG_RUNTIME_DIR").ok()?;
+        Some(std::path::Path::new(&run).join("hearth").join("ai-api.json"))
+    })?;
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
+    Some(HubApi { base: api_base(v["url"].as_str()?), token: v["token"].as_str()?.to_string() })
+}
+
+/// Standalone: what this computer has, and the clouds whose keys are set.
+fn standalone_models() -> Vec<Model> {
+    let mut out = Vec::new();
+    if let Ok(url) = std::env::var("TURBINE_AI_URL") {
+        let base = api_base(&url);
+        let key = std::env::var("TURBINE_AI_KEY").ok();
+        match std::env::var("TURBINE_AI_MODEL") {
+            Ok(name) => out.push(Model { provider: "env".into(), label: name.clone(), name, base, key, loaded: true, chat: true, ..Default::default() }),
+            Err(_) => out.extend(list_models("env", "TURBINE_AI_URL", &base, key.as_deref(), false)),
+        }
+    }
+    let ollama = std::env::var("OLLAMA_HOST").map(|h| if h.starts_with("http") { h } else { format!("http://{h}") }).unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    let tags: Option<Value> = agent().get(&format!("{ollama}/api/tags")).call().ok().and_then(|mut r| r.body_mut().read_json().ok());
+    if let Some(t) = tags {
+        let state = json!({"providers": [{"id": "ollama-direct", "label": "Ollama", "kind": "local", "running": true, "url": ollama, "installed": t["models"].clone(), "loaded": []}]});
+        out.extend(models_from_state(&state));
+    }
+    let llama = std::env::var("TURBINE_LLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:8181".into());
+    out.extend(list_models("llamacpp", "llama.cpp", &api_base(&llama), None, false));
+    for (id, label, base, vars) in CLOUD {
+        if let Some(key) = vars.iter().find_map(|v| std::env::var(v).ok().filter(|k| !k.is_empty())) {
+            out.extend(list_models(id, label, base, Some(&key), true));
+        }
+    }
+    out
+}
+
+/// The hub's model list (GET /v1/models) as models.
+pub fn models_from_hub(v: &Value, base: &str, token: &str) -> Vec<Model> {
+    let mut out = Vec::new();
+    for m in v["data"].as_array().cloned().unwrap_or_default() {
+        let id = m["id"].as_str().unwrap_or("").to_string();
+        let h = &m["hearth"];
+        if id.is_empty() || h["available"] == false {
+            continue;
+        }
+        let inner = h["model"].as_str().unwrap_or(&id).to_lowercase();
+        let mut label = h["label"].as_str().unwrap_or(&id).to_string();
+        // ("default" and "fast": Settings > AI > Apps's picks.)
+        if id == "default" || id == "fast" {
+            label = format!("hearth {id}: {label}");
+        }
+        let fim = inner.contains("coder") && inner.contains("base");
+        let chat = !inner.contains("base") && !inner.contains("ocr") && !inner.contains("embed") && !inner.contains("translate");
+        out.push(Model {
+            provider: h["provider"].as_str().unwrap_or("hub").to_string(),
+            name: id,
+            label,
+            cloud: h["cloud"] == true,
+            via_hub: true,
+            base: base.to_string(),
+            key: Some(token.to_string()),
+            loaded: false,
+            fim,
+            chat,
+        });
+    }
+    out
+}
+
+/// The cloud APIs Turbine can use standalone: (provider, label, base, key's variables).
+const CLOUD: [(&str, &str, &str, &[&str]); 4] = [
+    ("openai", "OpenAI", "https://api.openai.com/v1", &["OPENAI_API_KEY"]),
+    ("anthropic", "Claude", "https://api.anthropic.com/v1", &["ANTHROPIC_API_KEY"]),
+    ("gemini", "Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", &["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
+    ("glm", "GLM", "https://api.z.ai/api/paas/v4", &["ZAI_API_KEY", "GLM_API_KEY", "ZHIPUAI_API_KEY"]),
+];
+
+/// An OpenAI-compatible server's models (GET /models), as chat models.
+fn list_models(provider: &str, label: &str, base: &str, key: Option<&str>, cloud: bool) -> Vec<Model> {
+    let mut req = agent().get(&format!("{base}/models"));
+    if let Some(k) = key {
+        req = req.header("Authorization", &format!("Bearer {k}"));
+        if provider == "anthropic" {
+            req = req.header("x-api-key", k).header("anthropic-version", "2023-06-01");
+        }
+    }
+    let Some(v) = req.call().ok().and_then(|mut r| r.body_mut().read_json::<Value>().ok()) else { return Vec::new() };
+    v["data"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| m["id"].as_str().map(|s| s.trim_start_matches("models/").to_string()))
+        // (Chat models only: no embeddings, speech, pictures.)
+        .filter(|id| !["embed", "tts", "whisper", "dall-e", "image", "audio", "moderation", "transcribe", "realtime", "aqa"].iter().any(|w| id.contains(w)))
+        .map(|id| Model {
+            provider: provider.into(),
+            label: format!("{id} ({label})"),
+            name: id,
+            cloud,
+            base: base.to_string(),
+            key: key.map(str::to_string),
+            loaded: !cloud,
+            chat: true,
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// The request fields that set how hard a model thinks: local servers'
+/// templates read `chat_template_kwargs` (llama.cpp: Inkling, Qwen,
+/// gpt-oss), Ollama and the cloud APIs `reasoning_effort`.
+pub fn thinking_fields(m: &Model, thinking: Option<&str>) -> Vec<(&'static str, Value)> {
+    let local = !m.cloud;
+    match thinking {
+        None if m.provider.starts_with("ollama") && !m.via_hub => vec![("reasoning_effort", json!("none"))],
+        None => Vec::new(),
+        Some("off") if local => vec![("reasoning_effort", json!("none")), ("chat_template_kwargs", json!({"enable_thinking": false, "reasoning_effort": "low"}))],
+        Some("off") => vec![("reasoning_effort", json!("minimal"))],
+        Some(l) if local => vec![("reasoning_effort", json!(l)), ("chat_template_kwargs", json!({"enable_thinking": true, "reasoning_effort": l}))],
+        Some(l) => vec![("reasoning_effort", json!(l))],
+    }
+}
+
 impl Ai {
-    /// Connect: the hub when `hearth-ai` is installed (and `TURBINE_AI_HUB`
-    /// isn't "0"), else the fallbacks. Models arrive as an event.
+    /// Connect: the hub's app API when hearth's hub runs (and
+    /// `TURBINE_AI_HUB` isn't "0"), else standalone. Models arrive as an event.
     pub fn start() -> Ai {
         let (tx, rx) = mpsc::channel();
-        let mut ai = Ai { hub: None, tx, rx, next_id: 1, models: Vec::new(), source: String::new() };
+        let mut ai = Ai { hub: None, thinking: None, tx, rx, next_id: 1, models: Vec::new(), source: String::new() };
         let use_hub = std::env::var("TURBINE_AI_HUB").map(|v| v != "0").unwrap_or(true) && std::env::var("TURBINE_AI_URL").is_err();
-        if use_hub && crate::rpc::on_path("hearth-ai") {
-            if let Ok(h) = ai.spawn_hub() {
-                ai.hub = Some(h);
-                ai.source = "hearth AI hub".into();
-                ai.refresh();
-                return ai;
-            }
-        }
-        ai.source = "local".into();
-        ai.fallback_models();
+        ai.hub = use_hub.then(hub_api).flatten();
+        ai.source = if ai.hub.is_some() { "hearth AI hub".into() } else { "standalone".into() };
+        ai.refresh();
         ai
     }
 
     /// A client that knows only these models (tests).
     pub fn with_models(models: Vec<Model>) -> Ai {
         let (tx, rx) = mpsc::channel();
-        Ai { hub: None, tx, rx, next_id: 1, models, source: "test".into() }
+        Ai { hub: None, thinking: None, tx, rx, next_id: 1, models, source: "test".into() }
     }
 
     pub fn has_hub(&self) -> bool {
         self.hub.is_some()
     }
 
-    fn spawn_hub(&self) -> std::io::Result<Hub> {
-        let mut child = Command::new("hearth-ai").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let tx = self.tx.clone();
-        std::thread::Builder::new().name("hearth-ai".into()).spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-                if v["type"] == "state" && tx.send(AiEvent::Models(models_from_state(&v))).is_err() {
-                    return;
-                }
-            }
-            let _ = tx.send(AiEvent::HubGone("hearth-ai exited".into()));
-        })?;
-        Ok(Hub { child, stdin })
-    }
-
-    fn hub_send(&mut self, v: Value) {
-        if let Some(h) = &mut self.hub {
-            if writeln!(h.stdin, "{v}").and_then(|_| h.stdin.flush()).is_err() {
-                self.hub = None;
-            }
-        }
-    }
-
     /// Ask for the model list again.
     pub fn refresh(&mut self) {
-        if self.hub.is_some() {
-            self.hub_send(json!({"cmd": "refresh"}));
-        } else {
-            self.fallback_models();
-        }
-    }
-
-    /// Before using a model: through the hub, so it can make room for it.
-    pub fn prepare(&mut self, m: &Model) {
-        // (A service starts itself on the first request: its socket.)
-        if !m.loaded && self.hub.is_some() && !m.provider.starts_with("service:") {
-            let (p, n) = (m.provider.clone(), m.name.clone());
-            self.hub_send(json!({"cmd": "load", "provider": p, "model": n}));
-        }
-    }
-
-    /// Without the hub: TURBINE_AI_URL, else a local Ollama.
-    fn fallback_models(&mut self) {
         let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            if let Ok(url) = std::env::var("TURBINE_AI_URL") {
-                let model = std::env::var("TURBINE_AI_MODEL").unwrap_or_else(|_| "default".into());
-                let m = Model {
-                    provider: "env".into(),
-                    name: model,
-                    base: api_base(&url),
-                    key: std::env::var("TURBINE_AI_KEY").ok(),
-                    loaded: true,
-                    fim: false,
-                    chat: true,
-                };
-                let _ = tx.send(AiEvent::Models(vec![m]));
-                return;
+        match self.hub.clone() {
+            Some(h) => {
+                std::thread::spawn(move || {
+                    let r = agent().get(&format!("{}/models", h.base)).header("Authorization", &format!("Bearer {}", h.token)).call();
+                    match r.map_err(|e| e.to_string()).and_then(|mut r| r.body_mut().read_json::<Value>().map_err(|e| e.to_string())) {
+                        Ok(v) => {
+                            let _ = tx.send(AiEvent::Models(models_from_hub(&v, &h.base, &h.token)));
+                        }
+                        // (The hub stopped: standalone, as it was never there.)
+                        Err(e) => {
+                            let _ = tx.send(AiEvent::HubGone(e));
+                            let _ = tx.send(AiEvent::Models(standalone_models()));
+                        }
+                    }
+                });
             }
-            let url = std::env::var("OLLAMA_HOST").map(|h| if h.starts_with("http") { h } else { format!("http://{h}") }).unwrap_or_else(|_| "http://127.0.0.1:11434".into());
-            let tags: Option<Value> = agent().get(&format!("{url}/api/tags")).call().ok().and_then(|mut r| r.body_mut().read_json().ok());
-            let state = json!({"providers": [{
-                "id": "ollama-direct", "kind": "local", "running": tags.is_some(), "url": url,
-                "installed": tags.as_ref().map(|t| t["models"].clone()).unwrap_or(json!([])), "loaded": []
-            }]});
-            let _ = tx.send(AiEvent::Models(models_from_state(&state)));
-        });
+            None => {
+                std::thread::spawn(move || {
+                    let _ = tx.send(AiEvent::Models(standalone_models()));
+                });
+            }
+        }
     }
+
+    /// Before using a model (the hub makes room itself, on each request).
+    pub fn prepare(&mut self, _m: &Model) {}
 
     pub fn poll(&mut self) -> Vec<AiEvent> {
         let evs: Vec<AiEvent> = self.rx.try_iter().collect();
         for e in &evs {
             match e {
                 AiEvent::Models(m) => self.models = m.clone(),
-                AiEvent::HubGone(_) => self.hub = None,
+                AiEvent::HubGone(_) => {
+                    self.hub = None;
+                    self.source = "standalone".into();
+                }
                 _ => {}
             }
         }
@@ -304,12 +404,12 @@ impl Ai {
         self.prepare(model);
         let tx = self.tx.clone();
         let m = model.clone();
+        let think = thinking_fields(model, self.thinking.as_deref());
         std::thread::spawn(move || {
             let msgs: Vec<Value> = messages.iter().map(|x| json!({"role": x.role, "content": x.content})).collect();
             let mut body = json!({"model": m.name, "messages": msgs, "stream": true});
-            // (Qwen 3.5 on Ollama thinks for a long time unless told not to.)
-            if m.provider.starts_with("ollama") {
-                body["reasoning_effort"] = json!("none");
+            for (k, v) in think {
+                body[k] = v;
             }
             let mut req = agent().post(&format!("{}/chat/completions", m.base)).header("Content-Type", "application/json");
             if let Some(k) = &m.key {
@@ -332,7 +432,14 @@ impl Ai {
                     break;
                 }
                 let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
-                let raw = v["choices"][0]["delta"]["content"].as_str().unwrap_or("");
+                // (Its thinking, where the server keeps it apart: shown as it comes.)
+                let delta = &v["choices"][0]["delta"];
+                if let Some(t) = delta["reasoning_content"].as_str().or(delta["reasoning"].as_str()).filter(|t| !t.is_empty()) {
+                    if tx.send(AiEvent::Thinking { id, text: t.to_string() }).is_err() {
+                        return;
+                    }
+                }
+                let raw = delta["content"].as_str().unwrap_or("");
                 // Drop <think>…</think> reasoning some models still emit.
                 let text = strip_thinking(raw, &mut in_think);
                 if !text.is_empty() && tx.send(AiEvent::Chunk { id, text }).is_err() {
@@ -352,10 +459,11 @@ impl Ai {
         self.prepare(model);
         let tx = self.tx.clone();
         let m = model.clone();
+        let think = thinking_fields(model, self.thinking.as_deref());
         std::thread::spawn(move || {
             let mut body = json!({"model": m.name, "messages": messages, "tools": tools, "stream": false});
-            if m.provider.starts_with("ollama") {
-                body["reasoning_effort"] = json!("none");
+            for (k, v) in think {
+                body[k] = v;
             }
             let mut req = agent().post(&format!("{}/chat/completions", m.base)).header("Content-Type", "application/json");
             if let Some(k) = &m.key {
@@ -399,7 +507,7 @@ impl Ai {
         let tx = self.tx.clone();
         let m = model.clone();
         std::thread::spawn(move || {
-            let result: Result<String, String> = if m.provider.starts_with("ollama") {
+            let result: Result<String, String> = if m.provider.starts_with("ollama") && !m.via_hub {
                 // Ollama's own API does FIM with the model's template.
                 let root = m.base.trim_end_matches("/v1").to_string();
                 let body = json!({"model": m.name, "prompt": prefix, "suffix": suffix, "stream": false, "raw": false,
@@ -427,15 +535,6 @@ impl Ai {
             });
         });
         id
-    }
-}
-
-impl Drop for Ai {
-    fn drop(&mut self) {
-        if let Some(h) = &mut self.hub {
-            let _ = h.child.kill();
-            let _ = h.child.wait();
-        }
     }
 }
 
@@ -485,5 +584,28 @@ mod tests {
         let ms = models_from_state(&st);
         let m = pick_chat(&ms).unwrap();
         assert_eq!((m.name.as_str(), m.base.as_str()), ("inkling-2-mini", "http://127.0.0.1:11438/v1"));
+    }
+
+    #[test]
+    fn hub_api_models_and_thinking() {
+        let v = json!({"object": "list", "data": [
+            {"id": "default", "hearth": {"provider": "claude", "model": "haiku", "label": "haiku (Claude Code)", "available": true, "cloud": true}},
+            {"id": "service:inkling-2-mini.service/inkling-2-mini", "hearth": {"provider": "service:inkling-2-mini.service", "model": "inkling-2-mini", "label": "Inkling 2 Mini", "available": true}},
+            {"id": "ollama/qwen2.5-coder:1.5b-base", "hearth": {"provider": "ollama", "model": "qwen2.5-coder:1.5b-base", "label": "qwen2.5-coder:1.5b-base (Ollama)", "available": true}},
+            {"id": "gone/x", "hearth": {"provider": "gone", "model": "x", "available": false}}
+        ]});
+        let ms = models_from_hub(&v, "http://127.0.0.1:18380/v1", "tok");
+        assert_eq!(ms.len(), 3);
+        assert_eq!((ms[0].label.as_str(), ms[0].cloud), ("hearth default: haiku (Claude Code)", true));
+        assert!(ms.iter().all(|m| m.via_hub && m.key.as_deref() == Some("tok")));
+        assert_eq!(pick_chat(&ms).unwrap().name, "service:inkling-2-mini.service/inkling-2-mini");
+        assert_eq!(pick_fim(&ms).unwrap().name, "ollama/qwen2.5-coder:1.5b-base");
+        // Thinking: local templates and the cloud's field; nothing unasked.
+        let (ink, claude) = (&ms[1], &ms[0]);
+        assert!(thinking_fields(ink, None).is_empty());
+        let f = thinking_fields(ink, Some("high"));
+        assert_eq!(f[1].1["reasoning_effort"], "high");
+        assert_eq!(thinking_fields(claude, Some("high")), vec![("reasoning_effort", json!("high"))]);
+        assert_eq!(thinking_fields(ink, Some("off"))[1].1["enable_thinking"], false);
     }
 }

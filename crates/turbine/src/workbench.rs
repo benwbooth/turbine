@@ -11,6 +11,7 @@ use turbine_ui::theme::vga;
 use turbine_ui::Canvas;
 
 mod build;
+mod chat_pickers;
 mod debug_more;
 mod docview;
 mod explorer_ops;
@@ -287,8 +288,12 @@ pub struct Workbench {
     chat_streaming: Option<(u64, String)>,
     /// The chat model the person picked (else the hub's loaded one).
     chat_model: Option<String>,
+    /// How hard the chat's model thinks ("off" … "high"; None: its own way).
+    chat_thinking: Option<String>,
     /// Where the chat's "thinking…" stands until the answer's first words.
     chat_wait: Option<usize>,
+    /// The answer's thinking so far, and when it started (shown as it comes).
+    chat_thought: (String, Option<Instant>),
     /// A question asked before the model list arrived.
     pending_question: Option<String>,
     agent: Option<AgentRun>,
@@ -682,7 +687,9 @@ impl Workbench {
             chat_history: Vec::new(),
             chat_streaming: None,
             chat_model: None,
+            chat_thinking: None,
             chat_wait: None,
+            chat_thought: (String::new(), None),
             pending_question: None,
             agent: None,
             pending_task: None,
@@ -875,6 +882,9 @@ impl Workbench {
     fn status_choice(&mut self, a: &str) {
         if let Some(x) = a.strip_prefix("scm:") {
             self.scm_action(x);
+            return;
+        }
+        if self.chat_picker_choice(a) {
             return;
         }
         let Some(w) = self.windows.iter_mut().rev().find(|w| w.term.is_none() && w.special.is_none()) else { return };
@@ -1446,7 +1456,9 @@ impl Workbench {
     /// Connect to the AI models (hearth's hub when it's there).
     pub fn start_ai(&mut self) {
         if self.ai.is_none() {
-            self.ai = Some(Ai::start());
+            let mut ai = Ai::start();
+            ai.thinking = self.chat_thinking.clone();
+            self.ai = Some(ai);
         }
     }
 
@@ -1509,7 +1521,8 @@ impl Workbench {
         }
         let ctx = self.chat_context();
         self.chat_history.push(ChatMessage { role: "user".into(), content: format!("{q}\n\n{ctx}") });
-        self.append_chat(&format!("\n## You\n\n{q}\n\n## {}\n\n", model.name));
+        let shown = if model.label.is_empty() { model.name.clone() } else { model.label.clone() };
+        self.append_chat(&format!("\n## You\n\n{q}\n\n## {shown}\n\n"));
         // (A model starting, or thinking first, takes a while: say so.)
         self.chat_wait = self.windows.iter().find(|w| w.special == Some("chat")).map(|w| w.ed.doc.rope.len_chars());
         self.append_chat(CHAT_WAIT);
@@ -1521,12 +1534,37 @@ impl Workbench {
     /// Take the chat's "thinking…" away (its answer is coming, or failed).
     fn clear_chat_wait(&mut self) {
         let Some(at) = self.chat_wait.take() else { return };
+        let (thought, since) = std::mem::take(&mut self.chat_thought);
         let Some(w) = self.windows.iter_mut().find(|w| w.special == Some("chat")) else { return };
         let end = w.ed.doc.rope.len_chars();
-        if at <= end && w.ed.doc.rope.slice(at..end).to_string() == CHAT_WAIT {
+        if at <= end {
             w.ed.doc.remove(at, end, end);
             w.ed.doc.dirty = false;
             w.ed.cursor = w.ed.doc.rope.len_chars();
+        }
+        // (It thought: for how long stays, as Cursor's "Thought for 4s".)
+        if let (false, Some(t)) = (thought.trim().is_empty(), since) {
+            self.append_chat(&format!("*Thought for {} s*\n\n", t.elapsed().as_secs().max(1)));
+        }
+    }
+
+    /// The model's thinking so far, live where the answer will go: its last
+    /// few lines in a quote (a stream to watch, not to read back).
+    fn show_chat_thinking(&mut self, text: &str) {
+        let Some(at) = self.chat_wait else { return };
+        let (thought, since) = &mut self.chat_thought;
+        since.get_or_insert_with(Instant::now);
+        thought.push_str(text);
+        let lines: Vec<&str> = thought.lines().filter(|l| !l.trim().is_empty()).collect();
+        let tail = lines[lines.len().saturating_sub(4)..].iter().map(|l| format!("> {}", l.trim())).collect::<Vec<_>>().join("\n");
+        let shown = format!("*thinking…*\n\n{tail}\n");
+        let Some(w) = self.windows.iter_mut().find(|w| w.special == Some("chat")) else { return };
+        let end = w.ed.doc.rope.len_chars();
+        if at <= end {
+            w.ed.doc.replace(at, end, &shown, end);
+            w.ed.doc.dirty = false;
+            w.ed.cursor = w.ed.doc.rope.len_chars();
+            w.ed.line_bg = chat_line_colours(&w.ed.doc);
         }
     }
 
@@ -1763,6 +1801,11 @@ impl Workbench {
                     }
                 }
                 AiEvent::HubGone(why) => self.say(format!("AI hub: {why}")),
+                AiEvent::Thinking { id, text } => {
+                    if self.chat_streaming.as_ref().is_some_and(|(i, _)| *i == id) {
+                        self.show_chat_thinking(&text);
+                    }
+                }
                 AiEvent::Chunk { id, text } if self.inline_chunk(id, &text) => {}
                 AiEvent::Done { id } if self.inline_done(id) => {}
                 AiEvent::Error { id, ref message } if self.inline_error(id, message) => {}
@@ -5798,6 +5841,34 @@ mod tests {
     }
 
     #[test]
+    fn the_chat_picks_its_model_and_how_hard_it_thinks() {
+        let (dir, mut wb) = project("pickers");
+        let m = |name: &str, label: &str, cloud: bool| ai::Model { provider: "p".into(), name: name.into(), label: label.into(), cloud, chat: true, base: "http://127.0.0.1:9/v1".into(), ..Default::default() };
+        wb.set_ai(Ai::with_models(vec![m("service:x/inkling-2-mini", "Inkling 2 Mini", false), m("claude/sonnet", "Claude Code sonnet", true)]));
+        wb.run_command("view.secondary");
+        let mut surf = Surface::new(120, 36);
+        wb.render(&mut surf);
+        let r = wb.layout().right.unwrap();
+        let pickers = wb.chat_pickers(r);
+        assert!(pickers[0].2.contains("Inkling 2 Mini") && pickers[1].2.contains("Default"), "{pickers:?}");
+        // The model's list: a click, the cloud one marked, picked.
+        let at = Point::new(pickers[0].0.x + 1, pickers[0].0.y);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: at, mods: Mods::NONE }));
+        let (popup, _, acts) = wb.status_menu.take().expect("the model list");
+        assert_eq!(popup.items[1].0, "☁ Claude Code sonnet");
+        wb.status_choice(&acts[1]);
+        assert_eq!(wb.chat_model().unwrap().name, "claude/sonnet");
+        // Thinking: High goes with every request.
+        let at = Point::new(wb.chat_pickers(r)[1].0.x + 1, r.bottom() - 3);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: at, mods: Mods::NONE }));
+        let (_, _, acts) = wb.status_menu.take().expect("the thinking list");
+        wb.status_choice(acts.iter().find(|a| a.ends_with(":high")).unwrap());
+        assert_eq!(wb.ai.as_ref().unwrap().thinking.as_deref(), Some("high"));
+        assert!(wb.chat_pickers(r)[1].2.contains("High"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn the_secondary_side_bar_button_opens_the_chat() {
         let (dir, mut wb) = project("rightbar");
         assert!(wb.shell.dock.right.tabs.is_empty());
@@ -7690,6 +7761,7 @@ mod tests {
             loaded: true,
             fim: true,
             chat: true,
+            ..Default::default()
         }]));
         // Chat: the answer streams into the AI Chat window, thinking left out.
         wb.ask("what does this do?");
@@ -7726,6 +7798,7 @@ mod tests {
             loaded: true,
             fim: false,
             chat: true,
+            ..Default::default()
         }]));
         wb.tab_complete = false;
         run(&mut wb, json!({"cmd": "type", "text": "let x = 1;\nkeep"}));
@@ -7804,6 +7877,7 @@ mod tests {
             loaded: true,
             fim: false,
             chat: true,
+            ..Default::default()
         }]));
         wb
     }

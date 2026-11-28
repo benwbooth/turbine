@@ -58,11 +58,21 @@ pub fn draw_vscroll(c: &mut Canvas, x: i32, y: i32, h: i32, first: usize, shown:
     c.print(x, y + h - 1, ch[1], style);
     c.vline(x, y + 1, h - 2, ch[4], style);
     let (at, len) = thumb((h - 2).max(0) as usize, first, shown, total);
-    // (A solid light grey bar, as long as the share in view.)
-    let ts = Style { fg: crate::theme::vga::LIGHT_GRAY, ..style };
+    // (A solid bar, as long as the share in view: light grey, or white
+    // where the bar's own ground is light grey, as on a dialog.)
+    let ts = thumb_style(style);
     for i in 0..len {
         c.print(x, y + 1 + (at + i) as i32, "█", ts);
     }
+}
+
+/// A thumb's colours: it must stand out from the track and the ground
+/// (light grey on a light grey dialog would read as a gap).
+pub fn thumb_style(track: Style) -> Style {
+    use crate::theme::vga;
+    let fg = if track.bg == vga::LIGHT_GRAY || track.bg == vga::WHITE { vga::WHITE } else { vga::LIGHT_GRAY };
+    let fg = if fg == track.bg { vga::BLACK } else { fg };
+    Style { fg, ..track }
 }
 
 /// The thumb's place and length on a track: as long as the share of the
@@ -89,7 +99,7 @@ pub fn draw_hscroll(c: &mut Canvas, x: i32, y: i32, w: i32, first: usize, shown:
     c.print(x + w - 1, y, ch[3], style);
     c.hline(x + 1, y, w - 2, ch[4], style);
     let (at, len) = thumb((w - 2).max(0) as usize, first, shown, total);
-    let ts = Style { fg: crate::theme::vga::LIGHT_GRAY, ..style };
+    let ts = thumb_style(style);
     for i in 0..len {
         c.print(x + 1 + (at + i) as i32, y, "█", ts);
     }

@@ -45,6 +45,7 @@ const DEFS: &[Def] = &[
     Def { key: "secondary", category: "Layout", label: "Secondary side bar", description: "The AI chat at the right (Ctrl+Alt+B).", kind: Kind::Bool },
     Def { key: "hidden_files", category: "Files", label: "Show hidden files", description: "List files and folders whose names start with a dot in the Explorer.", kind: Kind::Bool },
     Def { key: "chat_model", category: "AI", label: "Chat model", description: "The model for the chat, Ctrl+K and the agent (from hearth's AI hub, or Ollama / llama.cpp).", kind: Kind::Choice },
+    Def { key: "thinking", category: "AI", label: "Thinking", description: "How hard a reasoning model thinks before it answers: Default (the model's own way), Off, Low, Medium or High. More is slower; you watch it think in the chat.", kind: Kind::Choice },
     Def { key: "chat_agent", category: "AI", label: "Chat sends to the agent", description: "The chat field starts in Agent mode (Ctrl+. switches it).", kind: Kind::Bool },
     Def { key: "agent_speed", category: "Agent", label: "Typing speed", description: "Characters a second the agent types at, so you can watch it work (0: as fast as it can).", kind: Kind::Text },
 ];
@@ -81,6 +82,7 @@ impl Workbench {
             "secondary" => b(self.shell.dock.right.visible),
             "hidden_files" => b(self.shell.explorer.show_hidden),
             "chat_model" => self.chat_model().map(|m| m.name).unwrap_or_else(|| "(none yet)".into()),
+            "thinking" => self.chat_thinking.clone().map_or("Default".into(), |t| super::chat_pickers::THINKING.iter().find(|(k, _)| *k == t).map_or(t.clone(), |(_, l)| l.to_string())),
             "chat_agent" => b(self.shell.chat_agent),
             "agent_speed" => format!("{}", self.driver.cps),
             _ => String::new(),
@@ -95,6 +97,7 @@ impl Workbench {
             "keymap" => vec![Keymap::Cua.name().to_string(), Keymap::Vim.name().to_string()],
             "cursor_style" => vec!["Block".into(), "Underline".into(), "Bar".into()],
             "chat_model" => self.ai.as_ref().map(|a| a.models.iter().filter(|m| m.chat).map(|m| m.name.clone()).collect()).unwrap_or_default(),
+            "thinking" => super::chat_pickers::THINKING.iter().map(|(_, l)| l.to_string()).collect(),
             _ => Vec::new(),
         }
     }
@@ -186,6 +189,14 @@ impl Workbench {
             "secondary" => toggle(self, "view.secondary", self.shell.dock.right.visible),
             "hidden_files" => self.shell.explorer.set_show_hidden(on),
             "chat_model" => self.chat_model = Some(value.to_string()),
+            "thinking" => {
+                // (By its key or its name: "high" or "High"; "" or Default: the model's own.)
+                let key = super::chat_pickers::THINKING.iter().find(|(k, l)| k.eq_ignore_ascii_case(value) || l.eq_ignore_ascii_case(value)).map_or("", |(k, _)| *k);
+                self.chat_thinking = (!key.is_empty()).then(|| key.to_string());
+                if let Some(ai) = &mut self.ai {
+                    ai.thinking = self.chat_thinking.clone();
+                }
+            }
             "chat_agent" => self.shell.chat_agent = on,
             "agent_speed" => {
                 if let Ok(n) = value.trim().parse::<f64>() {
@@ -216,6 +227,7 @@ impl Workbench {
             // (Renamed: the old key saved the old default, showing them.)
             "show_hidden_files": self.shell.explorer.show_hidden,
             "chat_model": self.chat_model,
+            "thinking": self.chat_thinking,
             "chat_agent": self.shell.chat_agent,
             "agent_speed": self.driver.cps,
             "line_numbers": self.shell.line_numbers,
@@ -267,6 +279,9 @@ impl Workbench {
         }
         if let Some(b) = v["show_hidden_files"].as_bool() {
             self.shell.explorer.set_show_hidden(b);
+        }
+        if let Some(t) = v["thinking"].as_str() {
+            self.setting_set("thinking", t);
         }
         if let Some(m) = v["chat_model"].as_str() {
             self.chat_model = Some(m.to_string());
