@@ -96,6 +96,8 @@ fn candidates(lang: &str) -> &'static [&'static [&'static str]] {
         "lean" => &[&["lake", "serve"]],
         "gdscript" => &[],
         "just" => &[&["just-lsp"]],
+        // (tessh's own: `tessh --lsp`, in the tessh that runs and checks the file.)
+        "tessh" => &[&["tessh", "--lsp"]],
         "awk" => &[&["awk-language-server"]],
         "hare" => &[],
         "jsonnet" => &[&["jsonnet-language-server"]],
@@ -961,6 +963,51 @@ mod tests {
         assert_eq!(utf16_col(l, 5), 3);
         assert_eq!(byte_of_utf16(l, 3), 5);
         assert_eq!(byte_of_utf16(l, 99), l.len());
+    }
+
+    /// tessh's own server (`tessh --lsp`), when the tessh installed has it
+    /// (TURBINE_TEST_TESSH: another tessh): a problem and a hover.
+    #[test]
+    fn tessh_server_diagnostics_and_hover() {
+        let tessh = std::env::var("TURBINE_TEST_TESSH").unwrap_or_else(|_| "tessh".into());
+        let has_lsp = std::process::Command::new(&tessh).arg("--help").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("--lsp"));
+        if !has_lsp {
+            eprintln!("skipped: no tessh with --lsp");
+            return;
+        }
+        assert_eq!(server_for("tessh").map(|a| a[1..].to_vec()), on_path("tessh").then(|| vec!["--lsp".to_string()]));
+        let dir = std::env::temp_dir().join(format!("turbine-tessh-lsp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("demo.tsh");
+        let text = "# Say hello.\ndef greet who\n  \"hi $who\"\nprint (greet (1 + )\n";
+        std::fs::write(&f, text).unwrap();
+        let mut c = LspClient::start(&[tessh, "--lsp".into()], &dir, "tessh").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut opened = false;
+        let mut hover = None;
+        let mut diags = None;
+        while hover.is_none() || diags.is_none() {
+            assert!(std::time::Instant::now() < deadline, "tessh --lsp: diagnostics {diags:?}, hover {hover:?}, dead {:?}", c.dead());
+            if c.is_ready() && !opened {
+                c.did_open(&f, 1, text);
+                c.hover(&f, Pos { line: 3, character: 8 });
+                opened = true;
+            }
+            for e in c.poll() {
+                match e {
+                    LspEvent::Diagnostics { items, .. } => diags = Some(items),
+                    LspEvent::Hover { text, .. } => hover = Some(text),
+                    _ => {}
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let diags = diags.unwrap();
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].start.line, 3);
+        let hover = hover.unwrap();
+        assert!(hover.contains("def greet who") && hover.contains("Say hello."), "{hover}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
