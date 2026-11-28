@@ -84,6 +84,7 @@ pub(super) struct Shell {
     pub show_whitespace: bool,
     /// Brackets coloured by depth, and the cursor's pair marked (Settings).
     pub rainbow_brackets: bool,
+    pub indent_guides: bool,
     pub match_brackets: bool,
     /// The app draws its own title bar (the menu bar row: title, buttons).
     pub own_title_bar: bool,
@@ -142,6 +143,7 @@ impl Shell {
             cursor_blink: true,
             show_whitespace: false,
             rainbow_brackets: true,
+            indent_guides: true,
             match_brackets: true,
             own_title_bar: false,
             mirrored: HashMap::new(),

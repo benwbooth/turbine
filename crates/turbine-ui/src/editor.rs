@@ -58,6 +58,7 @@ pub struct DiagMark {
 /// The minimap's width in cells (eight chars of text each, as braille
 /// dots), and the lines in each of its rows.
 mod brackets;
+mod guides;
 mod multi;
 mod wrap;
 mod structure;
@@ -105,11 +106,15 @@ pub struct EditorView {
     pub column_mode: bool,
     /// Long lines wrap at the window's edge (View > Word Wrap).
     pub wrap: bool,
-    /// Spaces, tabs and line ends drawn faintly (· → ¶).
+    /// Spaces, tabs and line ends drawn faintly (· → ↵).
     pub show_whitespace: bool,
     /// The up-down bar inside the window's last column, not on its edge
     /// (the edge being the right side bar's, which drags to resize it).
     pub vbar_inside: bool,
+    /// Faint lines at each indent level (VS Code's indent guides).
+    pub indent_guides: bool,
+    /// (version, columns) of the file's indent step.
+    guide_step: (u64, usize),
     /// Brackets coloured by depth (VS Code's bracket pair colourization).
     pub rainbow_brackets: bool,
     /// The bracket at the cursor and its partner marked.
@@ -197,6 +202,8 @@ impl EditorView {
             cursors: Vec::new(),
             column_mode: false,
             vbar_inside: false,
+            indent_guides: true,
+            guide_step: (u64::MAX, 0),
             rainbow_brackets: true,
             match_brackets: true,
             brackets: Default::default(),
@@ -952,6 +959,10 @@ impl EditorView {
         let pair = if self.help_look { None } else { self.bracket_pair() };
         let light_page = (base.bg.0 as u32 * 3 + base.bg.1 as u32 * 6 + base.bg.2 as u32) / 10 > 110;
         let pair_bg = if light_page { crate::theme::vga::LIGHT_GRAY } else { crate::theme::vga::DARK_GRAY };
+        // (Indent guides: faint, the cursor's block's brighter.)
+        let active_guide = if self.help_look { None } else { self.active_guide() };
+        let guide = Style { fg: if light_page { crate::theme::vga::LIGHT_GRAY } else { crate::theme::vga::DARK_GRAY }, ..base };
+        let guide_on = Style { fg: if light_page { crate::theme::vga::DARK_GRAY } else { crate::theme::vga::LIGHT_GRAY }, ..base };
         for &li in shown.iter() {
             let nrows = if wrap_w > 0 { self.line_rows(li, wrap_w) } else { 1 };
             for sub in 0..nrows {
@@ -1133,14 +1144,29 @@ impl EditorView {
                         }
                     }
                 }
+                // Indent guides in the leading whitespace (a row's first only).
+                if sub == 0 && !self.help_look && self.line_bg.get(li).is_none_or(|b| *b == 0) {
+                    for gc in self.guide_cols(li) {
+                        if gc < sx || (wrap_w > 0 && gc >= wrap_w) {
+                            continue;
+                        }
+                        let p = placed.iter().find(|p| p.col == gc);
+                        let ch = p.map(|p| line_start + p.char_off);
+                        if ch.is_some_and(|ch| sel.is_some_and(|(a, b)| ch >= a && ch < b)) {
+                            continue;
+                        }
+                        let on = active_guide.is_some_and(|(c, a, b)| c == gc && li >= a && li <= b);
+                        tc.print(text_x + gc as i32 - sx as i32, y, "│", if on { guide_on } else { guide });
+                    }
+                }
                 // A wrapped row's end: ↩ in the column kept for it.
                 if wrap_w > 0 && sub + 1 < nrows {
                     tc.print(text_x + wrap_w as i32, y, "↩", s.editor_ghost);
                 }
-                // The line's end, when whitespace shows (¶; ←¶ for CR LF files).
+                // The line's end, when whitespace shows (↵; ←↵ for CR LF files).
                 if self.show_whitespace && sub + 1 == nrows && li + 1 < self.doc.len_lines() {
                     let x = text_x + total as i32 - sx as i32;
-                    let mark = if self.doc.line_ending == turbine_text::encoding::LineEnding::CrLf { "←¶" } else { "¶" };
+                    let mark = if self.doc.line_ending == turbine_text::encoding::LineEnding::CrLf { "←↵" } else { "↵" };
                     tc.print(x, y, mark, s.editor_ghost);
                 }
                 // Selected newline shows as one highlighted cell.

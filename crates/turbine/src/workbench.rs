@@ -587,6 +587,7 @@ fn menus() -> Vec<Menu> {
             vec![
                 it("~T~ile", "", "window.tile"),
                 it("C~a~scade", "", "window.cascade"),
+                it("~M~aximize All", "", "window.maximize_all"),
                 sep(),
                 it("~Z~oom", "F5", "window.zoom"),
                 it("~N~ext", "F6", "window.next"),
@@ -1102,6 +1103,7 @@ impl Workbench {
         ed.wrap = self.shell.word_wrap;
         ed.show_whitespace = self.shell.show_whitespace;
         ed.rainbow_brackets = self.shell.rainbow_brackets;
+        ed.indent_guides = self.shell.indent_guides;
         ed.match_brackets = self.shell.match_brackets;
         let mut ew = EdWin { win, ed, vim: None, term: None, term_text: String::new(), lang: None, lang_for: None, lang_fixed: None, hl_sent: None, lsp_key: None, lsp_sent: None, was_dirty: false, special: None, dock: None, mirror: None };
         if self.keymap == Keymap::Vim {
@@ -2868,6 +2870,14 @@ impl Workbench {
                 self.dialog = Some(d);
             }
             "window.tile" => self.tile(),
+            // (Back to every editor filling the editors' place, after Tile or Cascade.)
+            "window.maximize_all" => {
+                for w in self.windows.iter_mut().filter(|w| w.dock.is_none()) {
+                    if !w.win.zoomed {
+                        w.win.toggle_zoom(desk);
+                    }
+                }
+            }
             "window.cascade" => {
                 for (i, w) in self.windows.iter_mut().enumerate() {
                     let o = i as i32;
@@ -5865,6 +5875,19 @@ mod tests {
         wb.status_choice(acts.iter().find(|a| a.ends_with(":high")).unwrap());
         assert_eq!(wb.ai.as_ref().unwrap().thinking.as_deref(), Some("high"));
         assert!(wb.chat_pickers(r)[1].2.contains("High"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn maximize_all_undoes_tile() {
+        let (dir, mut wb) = project("maxall");
+        wb.goto_file(&dir.join("src/main.rs"), Some(0), 0);
+        wb.goto_file(&dir.join("notes.md"), Some(0), 0);
+        wb.run_command("window.tile");
+        assert!(wb.windows.iter().filter(|w| w.dock.is_none()).all(|w| !w.win.zoomed));
+        wb.run_command("window.maximize_all");
+        let ed: Vec<_> = wb.windows.iter().filter(|w| w.dock.is_none()).collect();
+        assert!(ed.len() >= 2 && ed.iter().all(|w| w.win.zoomed && w.win.rect == ed[0].win.rect));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

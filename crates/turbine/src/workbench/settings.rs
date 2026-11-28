@@ -34,9 +34,10 @@ const DEFS: &[Def] = &[
     Def { key: "cursor_style", category: "Editor", label: "Cursor", description: "The text cursor: a block, as DOS's overwrite cursor; an underline, as DOS's insert cursor; or a bar. Typing over (Insert) shows the other of block and underline.", kind: Kind::Choice },
     Def { key: "cursor_blink", category: "Editor", label: "Cursor blinks", description: "Whether the cursor blinks.", kind: Kind::Bool },
     Def { key: "word_wrap", category: "Editor", label: "Word wrap", description: "Long lines wrap at the window's edge instead of running off it (Alt+Z).", kind: Kind::Bool },
+    Def { key: "indent_guides", category: "Editor", label: "Indent guides", description: "Faint lines at each indent level; the one around the cursor brighter.", kind: Kind::Bool },
     Def { key: "rainbow_brackets", category: "Editor", label: "Bracket pair colours", description: "Brackets coloured by how deeply they nest (yellow, magenta, cyan), as VS Code's; one with no opener red.", kind: Kind::Bool },
     Def { key: "match_brackets", category: "Editor", label: "Match brackets", description: "The bracket at the cursor and its partner marked.", kind: Kind::Bool },
-    Def { key: "show_whitespace", category: "Editor", label: "Render whitespace", description: "Show spaces (·), tabs (→) and line ends (¶; ←¶ for CR LF files) faintly.", kind: Kind::Bool },
+    Def { key: "show_whitespace", category: "Editor", label: "Render whitespace", description: "Show spaces (·), tabs (→) and line ends (↵; ←↵ for CR LF files) faintly.", kind: Kind::Bool },
     Def { key: "title_bar", category: "Layout", label: "Turbine's own title bar", description: "The desktop app without the desktop's window frame: the title and the minimize, maximize and close buttons in the menu bar's row; drag the free part of it to move the window.", kind: Kind::Bool },
     Def { key: "inlay_hints", category: "Editor", label: "Inlay hints", description: "Grey types and parameter names the language server adds between the words (they aren't in the file).", kind: Kind::Bool },
     Def { key: "semantic", category: "Editor", label: "Semantic highlighting", description: "Colour words by what the language server knows they are (a type, a function), over the syntax colours.", kind: Kind::Bool },
@@ -72,6 +73,7 @@ impl Workbench {
             "word_wrap" => b(self.shell.word_wrap),
             "show_whitespace" => b(self.shell.show_whitespace),
             "rainbow_brackets" => b(self.shell.rainbow_brackets),
+            "indent_guides" => b(self.shell.indent_guides),
             "match_brackets" => b(self.shell.match_brackets),
             "title_bar" => b(self.shell.own_title_bar),
             "cursor_style" => self.shell.cursor_style.clone(),
@@ -150,6 +152,12 @@ impl Workbench {
                 let (w, h) = self.outer;
                 <Self as turbine_ui::App>::event(self, Event::Resize(w, h));
             }
+            "indent_guides" => {
+                self.shell.indent_guides = on;
+                for w in &mut self.windows {
+                    w.ed.indent_guides = on;
+                }
+            }
             "rainbow_brackets" => {
                 self.shell.rainbow_brackets = on;
                 for w in &mut self.windows {
@@ -218,6 +226,7 @@ impl Workbench {
             "word_wrap": self.shell.word_wrap,
             "show_whitespace": self.shell.show_whitespace,
             "rainbow_brackets": self.shell.rainbow_brackets,
+            "indent_guides": self.shell.indent_guides,
             "match_brackets": self.shell.match_brackets,
             "title_bar": self.shell.own_title_bar,
             "cursor_style": self.shell.cursor_style,
@@ -253,7 +262,7 @@ impl Workbench {
         if let Some(b) = v["title_bar"].as_bool() {
             self.setting_set("title_bar", if b { "on" } else { "off" });
         }
-        for key in ["rainbow_brackets", "match_brackets"] {
+        for key in ["rainbow_brackets", "match_brackets", "indent_guides"] {
             if let Some(b) = v[key].as_bool() {
                 self.setting_set(key, if b { "on" } else { "off" });
             }
