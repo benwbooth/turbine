@@ -227,8 +227,8 @@ impl Workbench {
         let id = w.win.id;
         let root = base.clone().map(|b| lsp::project_root(&b.join("x"))).unwrap_or_default();
         self.preview.previews.insert(id, Preview { source: Source::Window(src), base, asked: None, changed_at: None, generation: 0, rendered: None, jump: None, kind, root, back: Vec::new(), inplace: None });
-        // Side by side with its file.
-        self.shell.split = Some((src, id, 1));
+        // Side by side with its file: a group of its own at the right.
+        self.group_beside(src, id);
     }
 
     /// Each tick: render what changed (a file's preview a moment after

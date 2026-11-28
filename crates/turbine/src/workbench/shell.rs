@@ -53,11 +53,6 @@ pub(super) struct Shell {
     pub explicit_project: bool,
     /// The chat sends to the agent (which works the UI) instead of asking.
     pub chat_agent: bool,
-    /// Split editors: the windows in the left and right halves, and which
-    /// half was used last (a file chosen next goes there).
-    pub split: Option<(u32, u32, usize)>,
-    /// Ctrl+\ with one editor: the file picked next opens beside it.
-    pub split_pending: Option<u32>,
     /// Long lines wrap (new editors too).
     pub word_wrap: bool,
     /// The preview tab (VS Code's): a file clicked once in the Explorer
@@ -67,7 +62,7 @@ pub(super) struct Shell {
     /// The last click on an editor tab (a double click keeps a preview).
     pub tab_click: Option<(u32, Instant)>,
     /// The tabs that didn't fit: "▼ n" (its place, how many), and its list.
-    pub tab_more: Option<(Rect, usize)>,
+    pub tab_more: Vec<(Rect, usize, u32)>,
     /// The tab row scrolled by the wheel: the first tab shown, while the
     /// front editor stays the one it was then.
     pub tab_scroll: Option<(usize, Option<u32>)>,
@@ -129,12 +124,10 @@ impl Shell {
             palette: None,
             explicit_project,
             chat_agent: false,
-            split: None,
-            split_pending: None,
             word_wrap: false,
             preview_tab: None,
             tab_click: None,
-            tab_more: None,
+            tab_more: Vec::new(),
             tab_menu: None,
             tab_scroll: None,
             crumb_scroll: None,
@@ -361,45 +354,13 @@ impl Workbench {
                 list.area = area;
             }
         }
-        // Split editors: the pair side by side; a file brought to the front
-        // takes the half used last.
-        let front = self.editor_index().map(|i| self.windows[i].win.id);
-        if let Some(pending) = self.shell.split_pending {
-            if front.is_some_and(|f| f != pending) && self.shell.palette.is_none() {
-                self.shell.split = Some((pending, front.unwrap(), 1));
-                self.shell.split_pending = None;
-            } else if self.shell.palette.is_none() {
-                self.shell.split_pending = None;
-            }
-        }
-        if let Some((a, b, active)) = self.shell.split {
-            let alive = |id: u32| ids.contains(&id) && self.windows.iter().any(|w| w.win.id == id && w.dock.is_none());
-            if !alive(a) || !alive(b) {
-                self.shell.split = None;
-            } else if let Some(f) = front {
-                self.shell.split = Some(if f == a {
-                    (a, b, 0)
-                } else if f == b {
-                    (a, b, 1)
-                } else if active == 0 {
-                    (f, b, 0)
-                } else {
-                    (a, f, 1)
-                });
-            }
-        }
-        let halves = self.shell.split.map(|(a, b, _)| {
-            let e = l.editors;
-            let lw = e.w / 2;
-            ((a, Rect::new(e.x, e.y, lw, e.h)), (b, Rect::new(e.x + lw, e.y, e.w - lw, e.h)))
-        });
+        // Editor groups: each its place, its windows in it.
+        let _ = &ids;
+        self.layout_groups(l.editors);
+        let grouped = self.group_count() > 1;
         for w in &mut self.windows {
-            if let (None, Some(((a, ra), (b, rb)))) = (w.dock, halves) {
-                if w.win.id == a || w.win.id == b {
-                    w.win.zoomed = false;
-                    w.win.rect = if w.win.id == a { ra } else { rb };
-                    continue;
-                }
+            if w.dock.is_none() && grouped {
+                continue;
             }
             match w.dock {
                 Some(side) => {
@@ -417,43 +378,38 @@ impl Workbench {
         }
     }
 
-    /// Where the editor tabs go: one per window on the desktop, in the
+    /// Each group's tab row: in its window's top edge (the one row across
+    /// the editors when there's one group).
+    pub(super) fn tab_rows(&self, l: &Layout) -> Vec<(u32, Rect)> {
+        let Some(tr) = l.editor_tabs else { return Vec::new() };
+        if self.group_count() < 2 {
+            return vec![(self.groups.active, tr)];
+        }
+        self.groups.rects.iter().filter(|(_, r)| r.w > 16).map(|(g, r)| (*g, Rect::new(r.x + 2, r.y, r.w - 9, 1))).collect()
+    }
+
+    /// Where the editor tabs go: one per window in each group, in the
     /// order they were opened, as many as fit.
     fn layout_editor_tabs(&mut self, l: &Layout) {
         self.shell.editor_tab_rects.clear();
-        self.shell.tab_more = None;
-        let Some(tr) = l.editor_tabs else { return };
-        let mut eds: Vec<&EdWin> = self.windows.iter().filter(|w| w.dock.is_none()).collect();
-        eds.sort_by_key(|w| w.win.id);
-        let icons = self.theme.style.icons;
-        let width = |w: &EdWin| str_width(&editor_tab_name(w, icons)) as i32 + 2;
-        let total: i32 = eds.iter().map(|w| width(w)).sum();
-        // Too many: the front tab stays in view, the rest that fit with it,
-        // and "▼ n" opens a list of them all.
-        let more_w = 6;
-        let front_now = self.editor_index().map(|i| self.windows[i].win.id);
-        // (Scrolled by the wheel: from that tab, until another editor comes
-        // to the front.)
-        let scrolled = self.shell.tab_scroll.filter(|(_, f)| *f == front_now).map(|(s, _)| s);
-        let (shown, overflow) = if total <= tr.w {
-            (eds.clone(), 0)
-        } else if let Some(start) = scrolled {
-            let start = start.min(eds.len().saturating_sub(1));
-            let mut x = 0;
-            let mut v = Vec::new();
-            for w in &eds[start..] {
-                if x + width(w) > tr.w - more_w {
-                    break;
-                }
-                x += width(w);
-                v.push(*w);
-            }
-            let n = eds.len() - v.len();
-            (v, n)
-        } else {
-            let front = front_now;
-            let mut start = 0;
-            loop {
+        self.shell.tab_more.clear();
+        for (g, tr) in self.tab_rows(l) {
+            let ids = self.group_windows(g);
+            let eds: Vec<&EdWin> = ids.iter().filter_map(|id| self.windows.iter().find(|w| w.win.id == *id)).collect();
+            let icons = self.theme.style.icons;
+            let width = |w: &EdWin| str_width(&editor_tab_name(w, icons)) as i32 + 2;
+            let total: i32 = eds.iter().map(|w| width(w)).sum();
+            // Too many: the front tab stays in view, the rest that fit with
+            // it, and "▼ n" opens a list of the others.
+            let more_w = 6;
+            let front_now = self.group_front(g);
+            // (Scrolled by the wheel: from that tab, until another editor
+            // comes to the front.)
+            let scrolled = self.shell.tab_scroll.filter(|(_, f)| *f == front_now).map(|(s, _)| s);
+            let (shown, overflow) = if total <= tr.w {
+                (eds.clone(), 0)
+            } else if let Some(start) = scrolled {
+                let start = start.min(eds.len().saturating_sub(1));
                 let mut x = 0;
                 let mut v = Vec::new();
                 for w in &eds[start..] {
@@ -463,30 +419,48 @@ impl Workbench {
                     x += width(w);
                     v.push(*w);
                 }
-                if front.is_none_or(|f| v.iter().any(|w| w.win.id == f)) || start + 1 >= eds.len() {
-                    let n = eds.len() - v.len();
-                    break (v, n);
+                let n = eds.len() - v.len();
+                (v, n)
+            } else {
+                let mut start = 0;
+                loop {
+                    let mut x = 0;
+                    let mut v = Vec::new();
+                    for w in &eds[start..] {
+                        if x + width(w) > tr.w - more_w {
+                            break;
+                        }
+                        x += width(w);
+                        v.push(*w);
+                    }
+                    if front_now.is_none_or(|f| v.iter().any(|w| w.win.id == f)) || start + 1 >= eds.len() {
+                        let n = eds.len() - v.len();
+                        break (v, n);
+                    }
+                    start += 1;
                 }
-                start += 1;
+            };
+            let mut x = tr.x;
+            let mut rects = Vec::new();
+            for w in shown {
+                let wdt = width(w);
+                rects.push((w.win.id, Rect::new(x, tr.y, wdt - 1, 1), Rect::new(x + wdt - 2, tr.y, 1, 1)));
+                x += wdt;
             }
-        };
-        let mut x = tr.x;
-        for w in shown {
-            let wdt = width(w);
-            self.shell.editor_tab_rects.push((w.win.id, Rect::new(x, tr.y, wdt - 1, 1), Rect::new(x + wdt - 2, tr.y, 1, 1)));
-            x += wdt;
-        }
-        if overflow > 0 {
-            self.shell.tab_more = Some((Rect::new(tr.right() - more_w + 1, tr.y, more_w - 1, 1), overflow));
+            self.shell.editor_tab_rects.extend(rects);
+            if overflow > 0 {
+                self.shell.tab_more.push((Rect::new(tr.right() - more_w + 1, tr.y, more_w - 1, 1), overflow, g));
+            }
         }
     }
 
     /// "▼ n": every editor, to pick one.
-    pub(super) fn open_tab_menu(&mut self) {
-        let Some((r, _)) = self.shell.tab_more else { return };
-        // (Only the tabs that didn't fit: the shown ones are a click away.)
+    pub(super) fn open_tab_menu(&mut self, at: Point) {
+        let Some(&(r, _, g)) = self.shell.tab_more.iter().find(|m| m.0.contains(at)).or(self.shell.tab_more.first()) else { return };
+        // (Only the group's tabs that didn't fit: the shown ones are a click away.)
         let shown: HashSet<u32> = self.shell.editor_tab_rects.iter().map(|t| t.0).collect();
-        let mut eds: Vec<(u32, String)> = self.windows.iter().filter(|w| w.dock.is_none() && !shown.contains(&w.win.id)).map(|w| (w.win.id, editor_tab_name(w, self.theme.style.icons).trim().to_string())).collect();
+        let mine: HashSet<u32> = self.group_windows(g).into_iter().collect();
+        let mut eds: Vec<(u32, String)> = self.windows.iter().filter(|w| mine.contains(&w.win.id) && !shown.contains(&w.win.id)).map(|w| (w.win.id, editor_tab_name(w, self.theme.style.icons).trim().to_string())).collect();
         eds.sort_by_key(|e| e.0);
         let items = eds.iter().map(|(_, n)| (n.clone(), String::new())).collect();
         let mut popup = turbine_ui::popup::ListPopup::new(items);
@@ -929,7 +903,7 @@ impl Workbench {
     }
 
     /// Bring a docked window to the front (it gets the keys).
-    fn activate_pane(&mut self, id: u32) {
+    pub(super) fn activate_pane(&mut self, id: u32) {
         if let Some(i) = self.windows.iter().position(|w| w.win.id == id) {
             let w = self.windows.remove(i);
             self.windows.push(w);
@@ -991,61 +965,46 @@ impl Workbench {
         self.shell.focus = Focus::Chat;
     }
 
-    /// Ctrl+\: split the editors (or join them back).
-    fn toggle_split(&mut self) {
-        if self.shell.split.take().is_some() {
-            let d = self.layout().editors;
-            for w in self.windows.iter_mut().filter(|w| w.dock.is_none()) {
-                w.win.zoomed = false;
-                w.win.toggle_zoom(d);
-            }
-            return;
-        }
-        let eds: Vec<u32> = self.windows.iter().rev().filter(|w| w.dock.is_none()).map(|w| w.win.id).collect();
-        match eds.as_slice() {
-            [front, other, ..] => self.shell.split = Some((*other, *front, 1)),
-            [only] => {
-                // One editor: the same file beside it (as VS Code does);
-                // an edit in either shows in both.
-                let only = *only;
-                let Some(i) = self.windows.iter().position(|w| w.win.id == only) else { return };
-                let src = &self.windows[i];
-                let group = src.mirror.unwrap_or(only);
-                let mut ed = EditorView::new(src.ed.doc.clone());
-                ed.line_numbers = src.ed.line_numbers;
-                ed.cursor = src.ed.cursor;
-                ed.scroll_y = src.ed.scroll_y;
-                ed.highlights = src.ed.highlights.clone();
-                let lang = src.lang.clone();
-                let mut win = Window::new(self.next_id, &src.win.title, src.win.rect);
-                win.toggle_zoom(self.layout().editors);
-                self.next_id += 1;
-                let id = win.id;
-                self.windows[i].mirror = Some(group);
-                let vim = (self.keymap == Keymap::Vim).then(Session::new);
-                self.windows.push(EdWin {
-                    win,
-                    ed,
-                    vim,
-                    term: None,
-                    term_text: String::new(),
-                    lang,
-                    lang_for: None,
-                    lang_fixed: None,
-                    hl_sent: None,
-                    lsp_key: None,
-                    lsp_sent: None,
-                    was_dirty: false,
-                    special: None,
-                    dock: None,
-                    mirror: Some(group),
-                });
-                self.renumber();
-                self.shell.split = Some((only, id, 1));
-            }
-            [] => {}
-        }
-        self.focus_editor();
+    /// Another window on window `i`'s document (beside it in a group): an
+    /// edit in either shows in both. Its id; it's in front.
+    pub(super) fn mirror_window(&mut self, i: usize) -> u32 {
+        let src = &self.windows[i];
+        let only = src.win.id;
+        let group = src.mirror.unwrap_or(only);
+        let mut ed = EditorView::new(src.ed.doc.clone());
+        ed.line_numbers = src.ed.line_numbers;
+        ed.cursor = src.ed.cursor;
+        ed.scroll_y = src.ed.scroll_y;
+        ed.highlights = src.ed.highlights.clone();
+        ed.wrap = src.ed.wrap;
+        ed.show_whitespace = src.ed.show_whitespace;
+        let lang = src.lang.clone();
+        let special = src.special;
+        let mut win = Window::new(self.next_id, &src.win.title, src.win.rect);
+        win.toggle_zoom(self.layout().editors);
+        self.next_id += 1;
+        let id = win.id;
+        self.windows[i].mirror = Some(group);
+        let vim = (self.keymap == Keymap::Vim).then(Session::new);
+        self.windows.push(EdWin {
+            win,
+            ed,
+            vim,
+            term: None,
+            term_text: String::new(),
+            lang,
+            lang_for: None,
+            lang_fixed: None,
+            hl_sent: None,
+            lsp_key: None,
+            lsp_sent: None,
+            was_dirty: false,
+            special,
+            dock: None,
+            mirror: Some(group),
+        });
+        self.renumber();
+        id
     }
 
     /// Windows showing one document: copy the one that changed (an edit,
@@ -1211,7 +1170,23 @@ impl Workbench {
             "view.minimap" => self.shell.minimap = Some(!self.shell.minimap.unwrap_or(self.theme.style.icons)),
             "ai.chat" => self.show_chat(),
             "view.focus_editor" => self.focus_editor(),
-            "view.split" => self.toggle_split(),
+            "view.split" | "view.split_right" => self.split_editor(true, false),
+            "view.split_down" => self.split_editor(false, false),
+            "view.split_left" => self.split_editor(true, true),
+            "view.split_up" => self.split_editor(false, true),
+            "view.single_group" => self.single_group(),
+            "view.two_columns" => self.group_layout("two_columns"),
+            "view.three_columns" => self.group_layout("three_columns"),
+            "view.two_rows" => self.group_layout("two_rows"),
+            "view.grid" => self.group_layout("grid"),
+            "view.next_group_editor" => self.move_editor_to_group(1),
+            "view.prev_group_editor" => self.move_editor_to_group(-1),
+            "view.close_group" => self.close_group(),
+            c if c.starts_with("view.focus_group_") => {
+                if let Ok(n) = c["view.focus_group_".len()..].parse::<usize>() {
+                    self.focus_group(n.saturating_sub(1));
+                }
+            }
             "view.reset_layout" => {
                 let tabs = (self.shell.dock.bottom.tabs.clone(), self.shell.dock.right.tabs.clone());
                 self.shell.dock = Dock::default();
@@ -1305,6 +1280,16 @@ impl Workbench {
             Some("view.panel")
         } else if k.mods.ctrl && !k.mods.alt && matches!(k.key, Key::Char('\\')) {
             Some("view.split")
+        } else if k.mods.ctrl && k.mods.alt && !k.mods.shift && matches!(k.key, Key::Right) {
+            Some("view.next_group_editor")
+        } else if k.mods.ctrl && k.mods.alt && !k.mods.shift && matches!(k.key, Key::Left) {
+            Some("view.prev_group_editor")
+        } else if k.mods.ctrl && !k.mods.alt && !k.mods.shift && matches!(k.key, Key::Char('1'..='8')) && !vim_editor {
+            // (Ctrl+1…8: that editor group, as VS Code's.)
+            let Key::Char(c) = k.key else { unreachable!() };
+            let n = c as usize - '0' as usize;
+            self.run_command(&format!("view.focus_group_{n}"));
+            return true;
         } else if k.is_ctrl('l') && !self.windows.last().is_some_and(|w| w.is_terminal() && self.shell.focus == Focus::Editors) {
             Some("ai.chat")
         } else {
@@ -1569,6 +1554,39 @@ impl Workbench {
             return true;
         }
         let l = self.layout();
+        // An edge between editor groups being dragged; a tab being dragged.
+        if self.groups.drag.is_some() {
+            match m.kind {
+                MouseKind::Drag(_) => self.group_sash_drag(m.pos, l.editors),
+                _ => self.groups.drag = None,
+            }
+            return true;
+        }
+        if let Some((id, from)) = self.groups.tab_drag {
+            match m.kind {
+                MouseKind::Drag(_) => {
+                    // (A little way first: a click isn't a drag.)
+                    let moved = (m.pos.x - from.x).abs() + (m.pos.y - from.y).abs() >= 2;
+                    self.groups.drop = if moved && self.group_count() > 0 { self.tab_drop_at(m.pos) } else { None };
+                    return true;
+                }
+                MouseKind::Up(_) => {
+                    let dropped = self.groups.drop.take().is_some();
+                    self.groups.tab_drag = None;
+                    if dropped {
+                        self.tab_drop(id, m.pos);
+                    }
+                    return true;
+                }
+                _ => {
+                    self.groups.tab_drag = None;
+                    self.groups.drop = None;
+                }
+            }
+        }
+        if matches!(m.kind, MouseKind::Down(Button::Left)) && self.group_sash_press(m.pos, l.editors) {
+            return true;
+        }
         if self.shell.dock.dragging() {
             match m.kind {
                 MouseKind::Drag(_) => self.shell.dock.drag_to(m.pos),
@@ -1631,13 +1649,14 @@ impl Workbench {
                 return true;
             }
         }
-        if let (Some(dir), Some(tr)) = (wheel, l.editor_tabs) {
-            if tr.contains(m.pos) && self.shell.tab_more.is_some() {
-                let front = self.editor_index().map(|i| self.windows[i].win.id);
-                let mut eds: Vec<u32> = self.windows.iter().filter(|w| w.dock.is_none()).map(|w| w.win.id).collect();
-                eds.sort();
-                let first = self.shell.editor_tab_rects.first().and_then(|t| eds.iter().position(|id| *id == t.0)).unwrap_or(0);
-                let last_shown = self.shell.editor_tab_rects.last().and_then(|t| eds.iter().position(|id| *id == t.0)).unwrap_or(0);
+        let rows = self.tab_rows(&l);
+        if let (Some(dir), Some(&(g, _))) = (wheel, rows.iter().find(|(_, r)| r.contains(m.pos))) {
+            if self.shell.tab_more.iter().any(|t| t.2 == g) {
+                let front = self.group_front(g);
+                let eds = self.group_windows(g);
+                let mine: Vec<u32> = self.shell.editor_tab_rects.iter().map(|t| t.0).filter(|id| eds.contains(id)).collect();
+                let first = mine.first().and_then(|f| eds.iter().position(|id| id == f)).unwrap_or(0);
+                let last_shown = mine.last().and_then(|f| eds.iter().position(|id| id == f)).unwrap_or(0);
                 let start = if dir > 0 && last_shown + 1 < eds.len() { first + 1 } else if dir < 0 { first.saturating_sub(1) } else { first };
                 self.shell.tab_scroll = Some((start, front));
                 self.layout_dock();
@@ -1660,16 +1679,16 @@ impl Workbench {
                 return true;
             }
         }
-        // Editor tabs.
-        if let Some(tr) = l.editor_tabs {
-            if press && self.shell.tab_more.is_some_and(|(r, _)| r.contains(m.pos)) {
-                self.open_tab_menu();
-                return true;
-            }
-            if tr.contains(m.pos) {
-                if press {
-                    let hit = self.shell.editor_tab_rects.iter().find(|(_, r, _)| r.contains(m.pos)).copied();
-                    if let Some((id, _, x)) = hit {
+        // Editor tabs (each group's row).
+        if press && self.shell.tab_more.iter().any(|t| t.0.contains(m.pos)) {
+            self.open_tab_menu(m.pos);
+            return true;
+        }
+        if let Some(&(g, _)) = rows.iter().find(|(_, r)| r.contains(m.pos)) {
+            if press {
+                let hit = self.shell.editor_tab_rects.iter().find(|(_, r, _)| r.contains(m.pos)).copied();
+                match hit {
+                    Some((id, _, x)) => {
                         // (A second click on the preview tab keeps it.)
                         let again = self.shell.tab_click.is_some_and(|(i, t)| i == id && t.elapsed() < Duration::from_millis(500));
                         self.shell.tab_click = Some((id, Instant::now()));
@@ -1678,9 +1697,21 @@ impl Workbench {
                             self.run_command("window.close");
                         } else if again {
                             self.keep_preview();
+                        } else {
+                            // (Held: it may be dragged to another group.)
+                            self.groups.tab_drag = Some((id, m.pos));
                         }
                     }
+                    None => self.groups.active = g,
                 }
+            }
+            return true;
+        }
+        // An empty group: a click makes it the one files open in.
+        if press && self.group_count() > 1 {
+            if let Some(&(g, _)) = self.groups.rects.iter().find(|(g, r)| r.contains(m.pos) && self.group_windows(*g).is_empty()) {
+                self.groups.active = g;
+                self.shell.focus = Focus::Editors;
                 return true;
             }
         }
@@ -1875,40 +1906,52 @@ impl Workbench {
     pub(super) fn draw_shell(&mut self, c: &mut Canvas, theme: &Theme) {
         let l = self.layout();
         let s = &theme.scheme;
-        // Editor tabs: one per window on the desktop, the front one lit.
-        if let Some(tr) = l.editor_tabs {
+        // Editor tabs: each group's row, its front one lit; the group in
+        // use with the active frame, the others plain.
+        let grouped = self.group_count() > 1;
+        for (g, tr) in self.tab_rows(&l) {
+            let in_use = !grouped || g == self.groups.active;
             // (On the front window's top border: its line under the tabs.)
-            let fw = self.editor_index().map(|i| &self.windows[i]);
-            let editors_focused = self.shell.focus == Focus::Editors && self.dialog.is_none();
+            let gfront = self.group_front(g);
+            let fw = gfront.and_then(|id| self.windows.iter().find(|w| w.win.id == id));
+            let editors_focused = self.shell.focus == Focus::Editors && self.dialog.is_none() && in_use;
             let line_style = if fw.is_some_and(|w| w.ed.help_look) {
                 Style::new(s.help.fg, s.help.bg)
             } else if theme.style.title_bar {
                 // (VB-DOS: the tabs on the window's title bar, magenta while
                 // it has the keys.)
                 if editors_focused { s.title_active } else { s.title_inactive }
-            } else {
+            } else if in_use {
                 s.frame_active
+            } else {
+                s.frame
             };
-            let h = if theme.style.title_bar { " " } else { theme.style.active_frame.h };
+            let h = if theme.style.title_bar { " " } else if in_use { theme.style.active_frame.h } else { theme.style.inactive_frame.h };
+            // (The group's own right end: the editors', or its place's.)
+            let right = self.groups.rects.iter().find(|(x, _)| *x == g && grouped).map_or(l.editors.right(), |(_, r)| r.right());
             if theme.style.title_bar {
                 // The whole bar, from the control box to the ▼▲ boxes.
-                let bar = Rect::new(tr.x - 1, tr.y, l.editors.right() - 5 - (tr.x - 1), 1);
+                let bar = Rect::new(tr.x - 1, tr.y, right - 5 - (tr.x - 1), 1);
                 c.fill(bar, " ", line_style);
                 // (Its first column is the side bar's border, shared.)
                 c.print(tr.x - 1, tr.y, "■", s.frame_icons);
                 c.print(tr.right(), tr.y, " ", line_style);
             }
+            // (An empty group's row: its frame says so; no tabs to draw.)
+            if fw.is_none() {
+                continue;
+            }
             c.fill(tr, h, line_style);
-            let front = self.editor_index().map(|i| self.windows[i].win.id);
             let mut tc = c.sub(tr);
             let icons = theme.style.icons;
             // The front tab as the originals title a window: a grey box
             // (QBasic's reverse title, the grey of the others' menus); the
             // rest plain on the border line.
             let active = if theme.style.title_reverse { s.frame_icons } else { s.menu };
-            for (id, r, x) in &self.shell.editor_tab_rects {
+            let mine = self.group_windows(g);
+            for (id, r, x) in self.shell.editor_tab_rects.iter().filter(|t| mine.contains(&t.0)) {
                 let Some(w) = self.windows.iter().find(|w| w.win.id == *id) else { continue };
-                let on = Some(*id) == front;
+                let on = Some(*id) == gfront;
                 let stl = if on { active } else { line_style };
                 // (The preview tab in italics, as VS Code shows it.)
                 let stl = if self.shell.preview_tab == Some(*id) { Style { attrs: turbine_ui::theme::Attrs { italic: true, ..stl.attrs }, ..stl } } else { stl };
@@ -1916,7 +1959,7 @@ impl Workbench {
                 tc.print(x.x, x.y, "×", stl);
                 tc.print(x.x + 1, x.y, " ", stl);
             }
-            if let Some((mr, n)) = self.shell.tab_more {
+            for (mr, n, _) in self.shell.tab_more.iter().filter(|t| t.2 == g) {
                 tc.print(mr.x, mr.y, &format!("▼ {n}"), active);
             }
         }

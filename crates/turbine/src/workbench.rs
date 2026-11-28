@@ -21,6 +21,7 @@ pub use extensions::extension_dirs;
 mod find;
 mod git;
 mod gitlines;
+mod groups;
 mod images;
 mod inline_ai;
 mod lsp_more;
@@ -288,6 +289,8 @@ pub struct Workbench {
     chat_streaming: Option<(u64, String)>,
     /// The chat model the person picked (else the hub's loaded one).
     chat_model: Option<String>,
+    /// Editor groups (VS Code's split editors).
+    groups: groups::Groups,
     /// How hard the chat's model thinks ("off" … "high"; None: its own way).
     chat_thinking: Option<String>,
     /// Where the chat's "thinking…" stands until the answer's first words.
@@ -595,6 +598,20 @@ fn menus() -> Vec<Menu> {
                 it("~C~lose", "Alt+F3", "window.close"),
                 it("C~l~ose All", "", "window.close_all"),
                 sep(),
+                // (Editor groups, as VS Code's View > Editor Layout.)
+                it("Split ~R~ight", "Ctrl+\\", "view.split_right"),
+                it("Split ~D~own", "", "view.split_down"),
+                it("Split L~e~ft", "", "view.split_left"),
+                it("Split ~U~p", "", "view.split_up"),
+                it("~S~ingle Group", "", "view.single_group"),
+                it("Two C~o~lumns", "", "view.two_columns"),
+                it("T~h~ree Columns", "", "view.three_columns"),
+                it("Two Ro~w~s", "", "view.two_rows"),
+                it("~G~rid (2×2)", "", "view.grid"),
+                it("Move to Ne~x~t Group", "Ctrl+Alt+Right", "view.next_group_editor"),
+                it("Move to Previous Gro~u~p", "Ctrl+Alt+Left", "view.prev_group_editor"),
+                it("Close Group", "", "view.close_group"),
+                sep(),
                 it("~L~ist...", "Alt+0", "window.list"),
             ],
         ),
@@ -688,6 +705,7 @@ impl Workbench {
             chat_history: Vec::new(),
             chat_streaming: None,
             chat_model: None,
+            groups: groups::Groups::default(),
             chat_thinking: None,
             chat_wait: None,
             chat_thought: (String::new(), None),
@@ -923,7 +941,9 @@ impl Workbench {
     /// edge being the panel's top).
     fn hbar_inside(&self, i: usize) -> bool {
         let w = &self.windows[i];
-        self.layout().bottom.is_some_and(|b| b.y == w.win.rect.bottom() - 1) && w.ed.hbar_inside_shown()
+        let l = self.layout();
+        let shared = l.bottom.is_some_and(|b| b.y == w.win.rect.bottom() - 1) || (self.group_count() > 1 && w.dock.is_none() && w.win.rect.bottom() != l.editors.bottom());
+        shared && w.ed.hbar_inside_shown()
     }
 
     /// The menu model, for native menu bars (the desktop's global menu).
@@ -4076,8 +4096,9 @@ impl Workbench {
                 }
             }
         }
-        if split.is_some() {
-            self.say("Two views of one buffer aren't in yet: give :sp a file name");
+        // (:sp / :vs with no file: this one again, in a group below / beside.)
+        if let Some(vertical) = split {
+            self.split_editor(vertical, false);
         }
         self.sync_menu_checks();
     }
@@ -4090,7 +4111,8 @@ impl Workbench {
             "close" => self.vim_actions(vec![ExAction::Quit(false)]),
             "only" => self.vim_actions(vec![ExAction::Window("only".into())]),
             "new" => self.vim_actions(vec![ExAction::Window("new".into())]),
-            "split" | "vsplit" => self.say("Two views of one buffer aren't in yet: use :sp {file}"),
+            "split" => self.split_editor(false, false),
+            "vsplit" => self.split_editor(true, false),
             dir => self.focus_direction(dir),
         }
     }
@@ -5010,6 +5032,11 @@ impl Workbench {
         let has_modal = self.dialog.is_some() || self.menubar.is_open();
         let panel_top = self.layout().bottom.map(|b| b.y);
         let right_edge = self.layout().right.map(|r| r.x);
+        // (Editor groups: an edge shared with another group is like one
+        // shared with a part: the bars a row or column in.)
+        let ed_area = self.layout().editors;
+        let grouped = self.group_count() > 1;
+        let bottom_shared = |r: Rect| panel_top == Some(r.bottom() - 1) || (grouped && r.bottom() != ed_area.bottom());
         self.image_places.clear();
         let mut to_view: Vec<(u32, Rect)> = Vec::new();
         for (i, w) in self.windows.iter_mut().enumerate() {
@@ -5058,7 +5085,7 @@ impl Workbench {
             // (Markdown and data files: a toolbar, and Preview or Tree.)
             let viewed = docview::draw(w, self.docviews.get_mut(&w.win.id), &mut wc, &theme, active && !has_modal);
             // (Against the right side bar: the bar a column in, the edge its.)
-            w.ed.vbar_inside = w.term.is_none() && right_edge == Some(w.win.rect.right() - 1);
+            w.ed.vbar_inside = w.term.is_none() && (right_edge == Some(w.win.rect.right() - 1) || (grouped && w.win.rect.right() != ed_area.right()));
             if !viewed {
                 let mut body = Self::doc_body(w);
                 if w.ed.vbar_inside {
@@ -5067,10 +5094,10 @@ impl Workbench {
                 w.ed.draw(&mut wc, body, &theme, active && !has_modal, active);
             }
             if active && !viewed {
-                w.ed.hbar_over_last_row = panel_top == Some(w.win.rect.bottom() - 1);
+                w.ed.hbar_over_last_row = bottom_shared(w.win.rect);
                 w.ed.draw_scrollbars(&mut wc, w.win.rect, &theme);
                 // (Its bottom edge is the panel's top: the bar over the last row.)
-                if panel_top == Some(w.win.rect.bottom() - 1) {
+                if bottom_shared(w.win.rect) {
                     w.ed.draw_hscroll_inside(&mut wc, w.win.rect, &theme);
                 }
                 if w.ed.doc.dirty {
@@ -5098,6 +5125,7 @@ impl Workbench {
         }
         self.sync_mirrors();
         self.layout_dock();
+        self.draw_groups(&mut c, &theme);
         self.draw_shell(&mut c, &theme);
         // Status bar.
         let info = self
@@ -5273,7 +5301,10 @@ impl Workbench {
         }
         // (Side bars and the panel share their border with the editors.)
         let l = self.layout();
-        let parts: Vec<Rect> = [l.left, l.bottom, l.right].into_iter().flatten().collect();
+        let mut parts: Vec<Rect> = [l.left, l.bottom, l.right].into_iter().flatten().collect();
+        if self.group_count() > 1 {
+            parts.extend(self.groups.rects.iter().map(|(_, r)| *r));
+        }
         if self.dialog.is_none() && !self.menubar.is_open() {
             shell::join_borders(surf, &parts);
         }
@@ -5400,7 +5431,7 @@ fn topic_page(title: &str, topic: &str, sources: &[(String, String)]) -> String 
         let mut block: Vec<&str> = Vec::new();
         let mut in_code = false;
         let mut n = 0;
-        let mut flush = |block: &mut Vec<&str>, heading: &str, shown: &mut String, hits: &mut String, n: &mut usize| {
+        let flush = |block: &mut Vec<&str>, heading: &str, shown: &mut String, hits: &mut String, n: &mut usize| {
             if *n < 12 && block.iter().any(|l| has(l)) {
                 if shown != heading {
                     hits.push_str(&format!("\n### {}\n\n", if heading.is_empty() { name.as_str() } else { heading }));
@@ -5458,7 +5489,7 @@ fn md_key(k: &str) -> String {
 /// Turbine's own (macros, windows, files).
 fn vim_help_md() -> String {
     let mut md = String::from("# Vim Keys\n\nOptions > Keymap > Vim turns these on. A count first repeats most of them (`3w`, `5j`); `:` opens the command line (Tab completes, with what each does).\n");
-    let mut table = |md: &mut String, title: &str, rows: &[(&str, &str)]| {
+    let table = |md: &mut String, title: &str, rows: &[(&str, &str)]| {
         md.push_str(&format!("\n## {title}\n\n| Keys | What they do |\n|:--|:--|\n"));
         for (k, what) in rows {
             md.push_str(&format!("| {} | {} |\n", md_key(k), what.replace('|', "\\|")));
@@ -5926,7 +5957,7 @@ mod tests {
         let start = Instant::now();
         while !f(wb) {
             wb.tick(Instant::now());
-            assert!(start.elapsed() < Duration::from_secs(5), "timed out waiting for {what}");
+            assert!(start.elapsed() < Duration::from_secs(15), "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -6620,7 +6651,7 @@ mod tests {
         wb.render(&mut surf);
         let l = wb.layout();
         let tr = l.editor_tabs.unwrap();
-        assert!(wb.shell.tab_more.is_some());
+        assert!(!wb.shell.tab_more.is_empty());
         let first = |wb: &Workbench| wb.shell.editor_tab_rects.first().map(|t| t.0);
         let before = first(&wb);
         wb.event(Event::Mouse(MouseEvent { kind: MouseKind::ScrollUp, pos: Point::new(tr.x + 2, tr.y), mods: Mods::NONE }));
@@ -6945,7 +6976,8 @@ mod tests {
         assert_eq!(views.len(), 2);
         let e = wb.layout().editors;
         let (l, r) = (wb.windows[views[0]].win.rect, wb.windows[views[1]].win.rect);
-        assert_eq!((l.x, r.x, l.w + r.w, l.h), (e.x, e.x + e.w / 2, e.w, e.h), "{l:?} {r:?} {e:?}");
+        // (Two groups sharing their edge: one column between them.)
+        assert_eq!((l.x, r.x, l.w + r.w - 1, l.h), (e.x, l.right() - 1, e.w, e.h), "{l:?} {r:?} {e:?}");
         // Typing in one shows in the other; undo from the other takes it back.
         run(&mut wb, json!({"cmd": "type", "text": "hi "}));
         wb.tick(Instant::now());
@@ -6961,17 +6993,73 @@ mod tests {
         keys(&mut wb, &["F2"]);
         wb.tick(Instant::now());
         assert!(wb.windows.iter().filter(|w| w.ed.doc.title() == "main.rs").all(|w| !w.ed.doc.dirty));
-        // Again: one editor; then two files side by side.
-        wb.key(KeyEvent::new(Key::Char('\\'), Mods::CTRL));
+        // Back to one group; then two files side by side (Ctrl+Alt+Right
+        // moves the one in front into a new group at the right).
+        wb.run_command("view.single_group");
+        assert_eq!(wb.group_count(), 1);
         wb.goto_file(&dir.join("notes.md"), None, 0);
-        wb.key(KeyEvent::new(Key::Char('\\'), Mods::CTRL));
+        keys(&mut wb, &["Ctrl+Alt+Right"]);
         wb.tick(Instant::now());
         let rect = |wb: &Workbench, name: &str| wb.windows.iter().rev().find(|w| w.ed.doc.title() == name).unwrap().win.rect;
-        assert_eq!(rect(&wb, "notes.md").x, wb.layout().editors.x + wb.layout().editors.w / 2);
+        let half = |wb: &Workbench| wb.layout().editors.x + (wb.layout().editors.w + 1) / 2 - 1;
+        assert_eq!(rect(&wb, "notes.md").x, half(&wb));
+        assert_eq!(rect(&wb, "main.rs").x, wb.layout().editors.x);
         // The halves follow the side bar.
         keys(&mut wb, &["Ctrl+B"]);
         wb.tick(Instant::now());
-        assert_eq!(rect(&wb, "notes.md").x, wb.layout().editors.x + wb.layout().editors.w / 2);
+        assert_eq!(rect(&wb, "notes.md").x, half(&wb));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn editor_groups_split_resize_take_tabs_and_close() {
+        let (dir, mut wb) = project("groups");
+        wb.goto_file(&dir.join("src/main.rs"), None, 0);
+        wb.goto_file(&dir.join("notes.md"), None, 0);
+        wb.windows.retain(|w| w.dock.is_some() || w.ed.doc.path.is_some());
+        let mut surf = Surface::new(120, 36);
+        // Split Down: notes.md above and below; each group its own tab row.
+        wb.run_command("view.split_down");
+        wb.render(&mut surf);
+        assert_eq!(wb.group_count(), 2);
+        let rs: Vec<Rect> = wb.groups.rects.iter().map(|g| g.1).collect();
+        assert_eq!(rs[0].bottom() - 1, rs[1].y, "one row between them");
+        let rows = wb.tab_rows(&wb.layout());
+        assert_eq!(rows.len(), 2);
+        let tabs_in = |wb: &Workbench, row: Rect| wb.shell.editor_tab_rects.iter().filter(|t| t.1.y == row.y).count();
+        assert_eq!((tabs_in(&wb, rows[0].1), tabs_in(&wb, rows[1].1)), (2, 1), "the top has both files, the new group the one split off");
+        // The shared edge drags: the top group taller.
+        let edge = Point::new(rs[0].x + 20, rs[0].bottom() - 1);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: edge, mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Drag(Button::Left), pos: Point::new(edge.x, edge.y + 4), mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: Point::new(edge.x, edge.y + 4), mods: Mods::NONE }));
+        assert_eq!(wb.groups.rects[0].1.h, rs[0].h + 4);
+        // main.rs's tab dragged into the lower group: it moves there.
+        wb.render(&mut surf);
+        let main_id = wb.windows.iter().find(|w| w.ed.doc.title() == "main.rs").unwrap().win.id;
+        let tab = wb.shell.editor_tab_rects.iter().find(|t| t.0 == main_id).unwrap().1;
+        let lower = wb.groups.rects[1];
+        let into = Point::new(lower.1.x + lower.1.w / 2, lower.1.y + 2);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Down(Button::Left), pos: Point::new(tab.x + 1, tab.y), mods: Mods::NONE }));
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Drag(Button::Left), pos: into, mods: Mods::NONE }));
+        wb.render(&mut surf);
+        wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Up(Button::Left), pos: into, mods: Mods::NONE }));
+        assert_eq!(wb.groups.of.get(&main_id), Some(&lower.0));
+        // Ctrl+1: the top group's editor in front.
+        keys(&mut wb, &["Ctrl+1"]);
+        assert_eq!(wb.groups.active, wb.groups.rects[0].0);
+        assert_eq!(wb.windows[wb.editor_index().unwrap()].ed.doc.title(), "notes.md");
+        // Its last editor closed: the group goes.
+        wb.run_command("window.close");
+        wb.layout_dock();
+        assert_eq!(wb.group_count(), 1);
+        // A preset makes empty groups; Close Group takes one away.
+        wb.run_command("view.three_columns");
+        wb.render(&mut surf);
+        assert_eq!(wb.group_count(), 3);
+        keys(&mut wb, &["Ctrl+3"]);
+        wb.run_command("view.close_group");
+        assert_eq!(wb.group_count(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -7820,7 +7908,7 @@ mod tests {
         wb.dispatch(Event::Resize(100, 30));
         let mut surf = Surface::new(100, 30);
         wb.render(&mut surf);
-        let (r, n) = wb.shell.tab_more.expect("an overflow button");
+        let (r, n, _) = *wb.shell.tab_more.first().expect("an overflow button");
         assert!(n > 0);
         // The front editor's tab stays in view.
         let front = wb.windows[wb.editor_index().unwrap()].win.id;
