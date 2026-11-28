@@ -7231,7 +7231,12 @@ mod tests {
         let at = Point::new(x, area.y + 2);
         wb.event(Event::Mouse(MouseEvent { kind: MouseKind::Moved, pos: at, mods: Mods::NONE }));
         wb.tick(Instant::now() + Duration::from_millis(700));
-        wait_until(&mut wb, "the hover tooltip", |wb| wb.tip.shown.as_ref().is_some_and(|(_, t)| t.contains("fake hover")));
+        let start = Instant::now();
+        while !wb.tip.shown.as_ref().is_some_and(|(_, t)| t.contains("fake hover")) {
+            wb.tick(Instant::now());
+            assert!(start.elapsed() < Duration::from_secs(15), "no hover tooltip: shown {:?}, asked {:?}, looked {}, at {:?}", wb.tip.shown, wb.tip.hover, wb.tip.looked, wb.tip.at);
+            std::thread::sleep(Duration::from_millis(5));
+        }
 
         // Shift+F12 on "println!": its uses, in the Search view.
         keys(&mut wb, &["Shift+F12"]);

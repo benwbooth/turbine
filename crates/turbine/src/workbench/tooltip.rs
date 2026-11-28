@@ -16,7 +16,7 @@ pub(super) struct TipState {
     /// and the text.
     pub shown: Option<(Rect, String)>,
     /// Looked for at this resting place already (found nothing).
-    looked: bool,
+    pub(super) looked: bool,
     /// The language server asked what's under the mouse: its request, and
     /// the place the answer belongs to.
     pub hover: Option<((String, PathBuf), i64, Rect)>,
