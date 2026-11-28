@@ -603,7 +603,7 @@ fn menus() -> Vec<Menu> {
             vec![
                 it("~C~ontents", "F1", "help.contents"),
                 it("~I~ndex", "Shift+F1", "help.index"),
-                it("~T~opic Search", "Ctrl+F1", "lsp.hover"),
+                it("~T~opic Search", "Ctrl+F1", "help.topic"),
                 sep(),
                 it("~L~anguage Guide", "", "help.language"),
                 it("Language ~G~uides...", "", "help.guides"),
@@ -2235,6 +2235,41 @@ impl Workbench {
         self.lsp_requests.insert((key, id), (LspReq::Rename, win));
     }
 
+    /// Help > Topic Search (Ctrl+F1, Borland's): the word at the cursor (or
+    /// the selection; else it asks) looked up in the language's guide and
+    /// Turbine's manual, every section it's in on one page; the language
+    /// server's hover too, when there's one.
+    pub(super) fn topic_search(&mut self, topic: Option<String>) {
+        let sel = self.windows.last().and_then(|w| w.ed.selected_text()).filter(|t| !t.contains('\n') && t.len() < 80);
+        let topic = topic.or(sel).unwrap_or_else(|| self.word_at_cursor()).trim().to_string();
+        if topic.is_empty() {
+            let d = Dialog::new("topic", "Topic Search")
+                .body(ui::input("q", "~T~opic:", "").chars(40))
+                .buttons(vec![ui::button("ok", "~S~earch", true), ui::button("cancel", "Cancel", false)]);
+            self.dialog = Some(d);
+            return;
+        }
+        let lang = self.windows.iter().rev().find(|w| w.special.is_none() && w.term.is_none()).and_then(|w| w.lang.clone());
+        let in_editor = self.windows.last().is_some_and(|w| w.special.is_none() && w.term.is_none());
+        if in_editor && self.lsp_here().is_some() {
+            self.lsp_request(LspReq::Hover);
+        }
+        let title = format!("Topic: {topic}");
+        self.show_help(&title, &format!("# {title}\n\nSearching the guides…\n"));
+        let tx = self.guide_tx.clone();
+        self.guides_fetching += 1;
+        std::thread::spawn(move || {
+            let mut sources: Vec<(String, String)> = Vec::new();
+            if let Some(g) = lang.as_deref().and_then(turbine_services::guides::find) {
+                if let Ok(md) = turbine_services::guides::guide_markdown(g.key(), false) {
+                    sources.push((g.title.to_string(), md));
+                }
+            }
+            sources.push(("Turbine".into(), MANUAL.to_string()));
+            let _ = tx.send(("topic".into(), title.clone(), Ok(topic_page(&title, &topic, &sources))));
+        });
+    }
+
     /// The word at the cursor (for Rename's field).
     fn word_at_cursor(&self) -> String {
         let Some(w) = self.windows.last() else { return String::new() };
@@ -2742,6 +2777,7 @@ impl Workbench {
             | "run.to_cursor" | "run.breakpoint" | "run.stack" => self.debug_command(cmd),
             "run.arguments" => self.arguments_dialog(),
             "lsp.hover" => self.lsp_request(LspReq::Hover),
+            "help.topic" => self.topic_search(None),
             "go.definition" => self.lsp_request(LspReq::Definition),
             "build.make" | "build.all" | "build.compile" | "build.stop" | "terminal.task" | "terminal.build" | "run.without_debug" => self.build_command(cmd),
             "view.preview" => self.open_preview(),
@@ -3444,6 +3480,12 @@ impl Workbench {
             return;
         }
         match kind.as_str() {
+            "topic" => {
+                let q = d.value("q").unwrap_or_default();
+                if !q.trim().is_empty() {
+                    self.topic_search(Some(q));
+                }
+            }
             "goto" => {
                 if let Ok(n) = d.value("line").unwrap_or_default().trim().parse::<usize>() {
                     if let Some(w) = self.active() {
@@ -3772,7 +3814,7 @@ impl Workbench {
         } else if k.is(Key::F(2), Mods::SHIFT) {
             Some("edit.rename")
         } else if k.is(Key::F(1), Mods::CTRL) {
-            Some("lsp.hover")
+            Some("help.topic")
         } else if k.is(Key::F(9), Mods::CTRL) {
             Some("run.run")
         } else if k.is(Key::F(9), Mods::NONE) {
@@ -5332,6 +5374,78 @@ fn bar_drag(w: &mut EdWin, horizontal: bool, inside: bool, skip: i32, p: Point, 
     set_bar_first(w, horizontal, (at * span + room / 2) / room);
 }
 
+/// Topic Search's page: each section (under its heading) of each source
+/// that has the topic as a word, the paragraph or code with it quoted.
+fn topic_page(title: &str, topic: &str, sources: &[(String, String)]) -> String {
+    let needle = topic.to_lowercase();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let has = |line: &str| {
+        let l = line.to_lowercase();
+        l.match_indices(&needle).any(|(i, _)| {
+            let before = l[..i].chars().next_back().is_none_or(|c| !is_word(c));
+            let after = l[i + needle.len()..].chars().next().is_none_or(|c| !is_word(c));
+            before && after
+        })
+    };
+    let mut md = format!("# {title}\n");
+    let mut found = 0;
+    for (name, text) in sources {
+        let mut hits = String::new();
+        let mut heading = String::new();
+        let mut shown_heading = String::new();
+        // (A paragraph or code block at a time: the one with the topic, quoted.)
+        let mut block: Vec<&str> = Vec::new();
+        let mut in_code = false;
+        let mut n = 0;
+        let mut flush = |block: &mut Vec<&str>, heading: &str, shown: &mut String, hits: &mut String, n: &mut usize| {
+            if *n < 12 && block.iter().any(|l| has(l)) {
+                if shown != heading {
+                    hits.push_str(&format!("\n### {}\n\n", if heading.is_empty() { name.as_str() } else { heading }));
+                    *shown = heading.to_string();
+                }
+                let lines: Vec<&str> = block.iter().take(14).copied().collect();
+                hits.push_str(&lines.join("\n"));
+                hits.push_str("\n\n");
+                *n += 1;
+            }
+            block.clear();
+        };
+        for line in text.lines() {
+            if line.trim_start().starts_with("```") {
+                block.push(line);
+                if in_code {
+                    flush(&mut block, &heading, &mut shown_heading, &mut hits, &mut n);
+                }
+                in_code = !in_code;
+                continue;
+            }
+            if in_code {
+                block.push(line);
+                continue;
+            }
+            if let Some(h) = line.strip_prefix('#') {
+                flush(&mut block, &heading, &mut shown_heading, &mut hits, &mut n);
+                heading = h.trim_start_matches('#').trim().to_string();
+                continue;
+            }
+            if line.trim().is_empty() {
+                flush(&mut block, &heading, &mut shown_heading, &mut hits, &mut n);
+            } else {
+                block.push(line);
+            }
+        }
+        flush(&mut block, &heading, &mut shown_heading, &mut hits, &mut n);
+        if n > 0 {
+            md.push_str(&format!("\n## In {name}\n{hits}"));
+            found += n;
+        }
+    }
+    if found == 0 {
+        md.push_str(&format!("\nNothing about `{topic}` in {}. Help > Language Guides lists every guide; Ctrl+Shift+F searches the project.\n", sources.iter().map(|s| s.0.as_str()).collect::<Vec<_>>().join(" or ")));
+    }
+    md
+}
+
 /// A table cell's text as code: its pipes escaped (a table's columns).
 fn md_key(k: &str) -> String {
     format!("`{}`", k.replace('|', "\\|"))
@@ -5946,6 +6060,20 @@ mod tests {
         let ed: Vec<_> = wb.windows.iter().filter(|w| w.dock.is_none()).collect();
         assert!(ed.len() >= 2 && ed.iter().all(|w| w.win.zoomed && w.win.rect == ed[0].win.rect));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn topic_search_finds_the_word_in_the_guides() {
+        let guide = "# Rust\n\n## Loops\n\nUse `loop` for ever.\n\nA for loop: for x in v.\n\n## Matching\n\nmatch on enums.\n\n```rust\nmatch x { _ => {} }\n```\n";
+        let md = topic_page("Topic: match", "match", &[("Rust".into(), guide.into()), ("Turbine".into(), "# Turbine\n\nNothing here.\n".into())]);
+        assert!(md.contains("## In Rust") && md.contains("### Matching") && md.contains("match x { _ => {} }"), "{md}");
+        assert!(!md.contains("Loops") && !md.contains("In Turbine"), "whole words, only where it is: {md}");
+        let none = topic_page("Topic: zzz", "zzz", &[("Rust".into(), guide.into())]);
+        assert!(none.contains("Nothing about `zzz` in Rust"));
+        // With no word at the cursor: it asks.
+        let mut wb = bench();
+        wb.run_command("help.topic");
+        assert_eq!(wb.dialog.as_ref().map(|d| d.kind.as_str()), Some("topic"));
     }
 
     #[test]
@@ -7036,6 +7164,9 @@ mod tests {
         let text = wb.dialog.as_ref().unwrap().value("text").unwrap_or_default();
         assert!(text.contains("fake hover: println"), "{text}");
         keys(&mut wb, &["Esc"]);
+        // (And the guides' page for it, in front: closed again.)
+        assert!(wb.windows.last().is_some_and(|w| w.win.title.starts_with("HELP: Topic: println")));
+        wb.run_command("window.close");
 
         // The mouse resting on code: the server's hover in a tooltip.
         let mut surf = Surface::new(120, 36);
