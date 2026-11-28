@@ -73,6 +73,16 @@ pub fn fake_server() -> std::io::Result<RpcProcess> {
                 }
                 "textDocument/completion" => {
                     let text = docs.get(&uri).cloned().unwrap_or_default();
+                    // (A shell option being typed, `--co`: options replacing
+                    // it from its dashes, as a shell's server says.)
+                    let (line, ch) = (p["position"]["line"].as_u64().unwrap_or(0), p["position"]["character"].as_u64().unwrap_or(0));
+                    let before: String = text.lines().nth(line as usize).unwrap_or("").chars().take(ch as usize).collect();
+                    if let Some(at) = before.rfind(' ').map(|i| i + 1).filter(|&i| before[i..].starts_with("--")) {
+                        let range = json!({"start": {"line": line, "character": at}, "end": {"line": line, "character": ch}});
+                        let items: Vec<Value> = ["--color", "--columns"].iter().map(|o| json!({"label": o, "detail": "option", "filterText": o, "textEdit": {"range": range, "newText": o}})).collect();
+                        reply(&mut w, json!({"isIncomplete": false, "items": items}));
+                        continue;
+                    }
                     let mut words: Vec<String> = vec!["println!".into(), "print!".into(), "panic!".into()];
                     for w in text.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| w.len() > 2) {
                         if !words.iter().any(|x| x == w) {

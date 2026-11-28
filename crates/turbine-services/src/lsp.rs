@@ -313,6 +313,11 @@ pub struct CompletionItem {
     pub insert: String,
     pub detail: String,
     pub kind: u8,
+    /// Where the server says the insert goes from (its textEdit's start),
+    /// when it says: a shell's `--col` or `src/fo` is more than a word.
+    pub start: Option<Pos>,
+    /// What to match what's typed against (filterText), when not the label.
+    pub filter: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -747,6 +752,8 @@ impl LspClient {
                                     insert,
                                     detail: it["detail"].as_str().unwrap_or("").to_string(),
                                     kind: it["kind"].as_u64().unwrap_or(0) as u8,
+                                    start: it["textEdit"].get("range").or_else(|| it["textEdit"].get("insert")).map(|r| pos(&r["start"])),
+                                    filter: it["filterText"].as_str().map(str::to_string),
                                 };
                                 (sort, item)
                             })

@@ -71,6 +71,9 @@ struct Completion {
     /// Indexes into `items` that match what's typed.
     shown: Vec<usize>,
     popup: ListPopup,
+    /// The server's items start before the word (`--col`, `src/fo`): what's
+    /// typed may hold any but spaces, matched against their filter text.
+    wide: bool,
 }
 
 /// Starts a debug adapter for a language: None when there is none.
@@ -2138,6 +2141,18 @@ impl Workbench {
                 }
                 comp.waiting = None;
                 comp.items = items;
+                // (Replacing from where the server says, when that's before
+                // the word: a shell option's dashes, a path's folders.)
+                if let (Some(start), Some(w)) = (comp.items.first().and_then(|i| i.start), self.windows.iter().find(|w| w.win.id == comp.win_id)) {
+                    if start.line as usize == comp.line {
+                        let line = w.ed.doc.line(comp.line);
+                        let at = w.ed.doc.line_byte_to_char(comp.line, lsp::byte_of_utf16(&line, start.character));
+                        if at < comp.anchor && at <= w.ed.cursor {
+                            comp.anchor = at;
+                            comp.wide = true;
+                        }
+                    }
+                }
                 if comp.items.is_empty() {
                     self.completion = None;
                     self.say("No completions here");
@@ -2401,6 +2416,7 @@ impl Workbench {
             items: Vec::new(),
             shown: Vec::new(),
             popup: ListPopup::new(Vec::new()),
+            wide: false,
         });
     }
 
@@ -2418,7 +2434,7 @@ impl Workbench {
             return;
         }
         let typed: String = w.ed.doc.rope.slice(comp.anchor..w.ed.cursor).to_string();
-        if typed.chars().any(|c| !(c.is_alphanumeric() || c == '_')) {
+        if typed.chars().any(|c| if comp.wide { c.is_whitespace() } else { !(c.is_alphanumeric() || c == '_') }) {
             self.completion = None;
             return;
         }
@@ -2426,9 +2442,10 @@ impl Workbench {
             return;
         }
         let t = typed.to_lowercase();
-        let mut shown: Vec<usize> = (0..comp.items.len()).filter(|&i| comp.items[i].label.to_lowercase().starts_with(&t)).collect();
+        let key = |it: &CompletionItem| if comp.wide { it.filter.as_deref().unwrap_or(&it.insert).to_lowercase() } else { it.label.to_lowercase() };
+        let mut shown: Vec<usize> = (0..comp.items.len()).filter(|&i| key(&comp.items[i]).starts_with(&t)).collect();
         if shown.is_empty() {
-            shown = (0..comp.items.len()).filter(|&i| comp.items[i].label.to_lowercase().contains(&t)).collect();
+            shown = (0..comp.items.len()).filter(|&i| key(&comp.items[i]).contains(&t)).collect();
         }
         if shown.is_empty() {
             self.completion = None;
@@ -7166,6 +7183,31 @@ mod tests {
         // The Extensions view lists it.
         wait_until(&mut wb, "the list", |wb| wb.shell.extensions.list.rows.iter().any(|r| r.text == "hello" && r.icon == "✓"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A server whose items replace more than the word (a shell's `--co`):
+    /// the list stays open through dashes and the dashes aren't doubled.
+    #[test]
+    fn completion_replaces_from_the_servers_start() {
+        let dir = std::env::temp_dir().join(format!("turbine-lsp-wide-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("main.rs");
+        std::fs::write(&f, "ls --co\n").unwrap();
+        let mut wb = Workbench::new(&[f.clone()]);
+        wb.set_lsp_spawner(Box::new(|lang, root| Some(turbine_services::fake::fake_server().map(|rpc| LspClient::with_rpc(rpc, root, lang)))));
+        wb.driver.cps = 0.0;
+        wb.dispatch(Event::Resize(100, 30));
+        wait_until(&mut wb, "the server", |wb| wb.windows[0].lsp_key.is_some() && wb.lsp.values().all(|c| c.is_ready()));
+        keys(&mut wb, &["End", "Ctrl+Space"]);
+        wait_until(&mut wb, "completion list", |wb| wb.completion.as_ref().is_some_and(|c| c.waiting.is_none() && !c.popup.items.is_empty()));
+        let labels: Vec<String> = wb.completion.as_ref().unwrap().popup.items.iter().map(|i| i.0.clone()).collect();
+        assert_eq!(labels, ["--color", "--columns"]);
+        run(&mut wb, json!({"cmd": "type", "text": "lo"}));
+        let labels: Vec<String> = wb.completion.as_ref().unwrap().popup.items.iter().map(|i| i.0.clone()).collect();
+        assert_eq!(labels, ["--color"]);
+        keys(&mut wb, &["Enter"]);
+        assert_eq!(wb.windows[0].ed.doc.line(0), "ls --color");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
