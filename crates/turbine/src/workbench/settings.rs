@@ -236,6 +236,7 @@ impl Workbench {
             // (Renamed: the old key saved the old default, showing them.)
             "show_hidden_files": self.shell.explorer.show_hidden,
             "chat_model": self.chat_model,
+            "recent_commands": self.recent_commands,
             "thinking": self.chat_thinking,
             "chat_agent": self.shell.chat_agent,
             "agent_speed": self.driver.cps,
@@ -288,6 +289,9 @@ impl Workbench {
         }
         if let Some(b) = v["show_hidden_files"].as_bool() {
             self.shell.explorer.set_show_hidden(b);
+        }
+        if let Some(a) = v["recent_commands"].as_array() {
+            self.recent_commands = a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
         }
         if let Some(t) = v["thinking"].as_str() {
             self.setting_set("thinking", t);

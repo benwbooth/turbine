@@ -1,7 +1,9 @@
 //! The command palette and quick open (Cursor's Ctrl+Shift+P and Ctrl+P):
 //! one field over a list, filtered fuzzily as you type. What's typed first
 //! picks the mode, as in VS Code: `>` commands, `:` a line, `@` a symbol in
-//! the file, `#` a symbol in the project, anything else a file in the project.
+//! the file, `#` a symbol in the project, `?` the modes, anything else a
+//! file in the project. As VS Code's: what was used lately first (commands
+//! and files), and the letters that matched lit.
 
 use crate::views::LineInput;
 use std::path::{Path, PathBuf};
@@ -16,6 +18,8 @@ pub enum Pick {
     Line(usize),
     /// A place in a file: (path, line, UTF-16 column).
     Place(PathBuf, usize, usize),
+    /// Another mode: what goes in the field (`?`'s list).
+    Mode(String),
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +43,29 @@ pub struct Palette {
     root: PathBuf,
     /// The items behind the list's rows.
     shown: Vec<Item>,
+    /// Commands and files used lately, latest first (they lead the list).
+    recent_commands: Vec<String>,
+    recent_files: Vec<PathBuf>,
+}
+
+/// Where `query`'s letters matched in `text` (byte ranges, for marking),
+/// as `fuzzy` finds them.
+pub fn fuzzy_marks(query: &str, text: &str) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    let mut it = text.char_indices();
+    for qc in query.chars().flat_map(char::to_lowercase) {
+        for (b, c) in it.by_ref() {
+            if c.to_lowercase().eq(std::iter::once(qc)) {
+                let e = (b + c.len_utf8()) as u32;
+                match out.last_mut() {
+                    Some(last) if last.1 == b as u32 => last.1 = e,
+                    _ => out.push((b as u32, e)),
+                }
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// How well `query` matches `text` as a subsequence: None when it doesn't;
@@ -84,6 +111,8 @@ impl Palette {
             files_rx: None,
             root: root.to_path_buf(),
             shown: Vec::new(),
+            recent_commands: Vec::new(),
+            recent_files: Vec::new(),
         };
         p.input.set(start);
         // The project's files, listed in the background.
@@ -131,8 +160,16 @@ impl Palette {
         true
     }
 
+    /// What was used lately: commands (their ids) and files, latest first.
+    pub fn set_recent(&mut self, commands: Vec<String>, files: Vec<PathBuf>) {
+        self.recent_commands = commands;
+        self.recent_files = files;
+        self.refilter();
+    }
+
     pub fn title(&self) -> &'static str {
         match self.input.text.chars().next() {
+            Some('?') => "Help: what the palette can do",
             Some('>') => "Command Palette",
             Some(':') => "Go to Line",
             Some('@') => "Go to Symbol in Editor",
@@ -144,6 +181,14 @@ impl Palette {
     /// Rebuild the list for what's typed.
     pub fn refilter(&mut self) {
         let text = self.input.text.clone();
+        // `?`: the modes, to pick one (VS Code's).
+        if text.starts_with('?') {
+            let modes = [("", "… Go to File"), (">", "> Show and Run Commands"), ("@", "@ Go to Symbol in Editor"), ("#", "# Go to Symbol in Workspace"), (":", ": Go to Line"), ("?", "? Help")];
+            self.shown = modes.iter().map(|(k, l)| Item { label: l.to_string(), detail: String::new(), pick: Pick::Mode(k.to_string()) }).collect();
+            self.list.set_rows(self.shown.iter().map(|i| Row::new(i.label.clone())).collect());
+            self.list.select(0);
+            return;
+        }
         let (pool, q): (&[Item], &str) = match text.chars().next() {
             Some('>') => (&self.commands, text[1..].trim()),
             Some('@') => (&self.symbols, text[1..].trim()),
@@ -171,22 +216,46 @@ impl Palette {
             }
             _ => (&self.files, text.trim()),
         };
-        let mut scored: Vec<(i32, &Item)> = pool
+        // (Used lately: first when nothing's typed, ahead of equals after.)
+        let recency = |it: &Item| -> Option<usize> {
+            match &it.pick {
+                Pick::Command(c) => self.recent_commands.iter().position(|r| r == c),
+                Pick::Open(p) => self.recent_files.iter().position(|r| r == p),
+                _ => None,
+            }
+        };
+        let mut scored: Vec<(i32, Option<usize>, &Item)> = pool
             .iter()
             .filter_map(|it| {
                 // (Files match on their path too, the name counting most.)
                 let s = fuzzy(q, &it.label).map(|s| s + 1000).or_else(|| fuzzy(q, &format!("{}/{}", it.detail, it.label)));
-                s.map(|s| (s, it))
+                s.map(|s| (s, recency(it), it))
             })
             .collect();
-        if !q.is_empty() {
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
+        if q.is_empty() {
+            scored.sort_by_key(|(_, r, _)| r.unwrap_or(usize::MAX));
+        } else {
+            scored.sort_by(|a, b| (b.0 + b.1.map_or(0, |r| 50 - r.min(50) as i32)).cmp(&(a.0 + a.1.map_or(0, |r| 50 - r.min(50) as i32))));
         }
-        self.shown = scored.into_iter().take(500).map(|(_, it)| it.clone()).collect();
+        let lately: Vec<bool> = scored.iter().take(500).map(|(_, r, _)| r.is_some()).collect();
+        self.shown = scored.into_iter().take(500).map(|(_, _, it)| it.clone()).collect();
         let rows: Vec<Row> = if self.shown.is_empty() {
             vec![Row::new(if self.files_rx.is_some() && !text.starts_with(['>', '@']) { "Listing files…" } else { "No matching results" })]
         } else {
-            self.shown.iter().map(|i| Row::new(i.label.clone()).detail(i.detail.clone())).collect()
+            self.shown
+                .iter()
+                .zip(lately)
+                .map(|(i, recent)| {
+                    // (Recently used ones say so, as VS Code's do; the
+                    // letters typed lit in the label.)
+                    let detail = match (recent && q.is_empty(), i.detail.is_empty()) {
+                        (true, true) => "recently used".to_string(),
+                        (true, false) => format!("{}  recently used", i.detail),
+                        _ => i.detail.clone(),
+                    };
+                    Row::new(i.label.clone()).detail(detail).marks(fuzzy_marks(q, &i.label))
+                })
+                .collect()
         };
         self.list.set_rows(rows);
         self.list.select(0);
@@ -256,6 +325,19 @@ mod tests {
         p.refilter();
         assert_eq!(p.pick(0), Some(Pick::Open(dir.join("src/lib.rs"))));
         assert_eq!(p.title(), "Go to File");
+        // Used lately: first, said so; the typed letters lit.
+        p.set_recent(vec!["file.save".into()], Vec::new());
+        p.input.set(">");
+        p.refilter();
+        assert_eq!(p.pick(0), Some(Pick::Command("file.save".into())));
+        assert!(p.list.rows[0].detail.contains("recently used"));
+        p.input.set(">tp");
+        p.refilter();
+        assert_eq!(p.list.rows[0].marks, vec![(6, 7), (13, 14)], "T and P of View: Toggle Panel");
+        // `?`: the modes.
+        p.input.set("?");
+        p.refilter();
+        assert_eq!(p.pick(1), Some(Pick::Mode(">".into())));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

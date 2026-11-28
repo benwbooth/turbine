@@ -667,7 +667,8 @@ impl Workbench {
 
     pub(super) fn open_palette(&mut self, start: &str) {
         let root = self.shell.explorer.root.clone();
-        let p = Palette::new(start, self.palette_commands(), Vec::new(), &root);
+        let mut p = Palette::new(start, self.palette_commands(), Vec::new(), &root);
+        p.set_recent(self.recent_commands.clone(), self.extras.recent.clone());
         self.shell.palette = Some(p);
         self.palette_symbols();
     }
@@ -675,7 +676,20 @@ impl Workbench {
     fn palette_pick(&mut self, i: usize) {
         let Some(p) = self.shell.palette.take() else { return };
         match p.pick(i) {
-            Some(Pick::Command(c)) => self.run_command(&c),
+            // (`?`'s list: that mode, the palette still open.)
+            Some(Pick::Mode(m)) => {
+                let mut p = p;
+                p.input.set(&m);
+                p.refilter();
+                self.shell.palette = Some(p);
+            }
+            Some(Pick::Command(c)) => {
+                // (Remembered: it leads the list next time, as VS Code's.)
+                self.recent_commands.retain(|x| *x != c);
+                self.recent_commands.insert(0, c.clone());
+                self.recent_commands.truncate(30);
+                self.run_command(&c);
+            }
             Some(Pick::Open(f)) => self.goto_file(&f, None, 0),
             Some(Pick::Place(f, line, col16)) => {
                 self.goto_file(&f, Some(line), 0);
@@ -706,7 +720,8 @@ impl Workbench {
         let w = 72.min(area.w - 4).max(20);
         let rows = self.shell.palette.as_ref().map_or(1, |p| p.list.rows.len() as i32);
         let h = (rows + 3).clamp(5, 18).min(area.h);
-        let cx = l.editors.x + l.editors.w / 2;
+        // (Dropping from the command center, as VS Code's; else over the editors.)
+        let cx = self.top_items().iter().find(|t| t.action == "center").map_or(l.editors.x + l.editors.w / 2, |c| c.rect.x + c.rect.w / 2);
         let x = (cx - w / 2).clamp(area.x, (area.right() - w).max(area.x));
         Rect::new(x, area.y, w, h)
     }

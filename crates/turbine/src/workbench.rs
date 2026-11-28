@@ -290,6 +290,8 @@ pub struct Workbench {
     chat_streaming: Option<(u64, String)>,
     /// The chat model the person picked (else the hub's loaded one).
     chat_model: Option<String>,
+    /// Commands run from the palette lately, latest first (they lead it).
+    recent_commands: Vec<String>,
     /// Editor groups (VS Code's split editors).
     groups: groups::Groups,
     /// How hard the chat's model thinks ("off" … "high"; None: its own way).
@@ -727,6 +729,7 @@ impl Workbench {
             chat_history: Vec::new(),
             chat_streaming: None,
             chat_model: None,
+            recent_commands: Vec::new(),
             groups: groups::Groups::default(),
             chat_thinking: None,
             chat_wait: None,
