@@ -111,6 +111,9 @@ pub struct EditorView {
     /// The up-down bar inside the window's last column, not on its edge
     /// (the edge being the right side bar's, which drags to resize it).
     pub vbar_inside: bool,
+    /// The sideways bar is over the last text row (the panel under the
+    /// window): the up-down bar stops a row above it, an empty corner between.
+    pub hbar_over_last_row: bool,
     /// Faint lines at each indent level (VS Code's indent guides).
     pub indent_guides: bool,
     /// (version, columns) of the file's indent step.
@@ -202,6 +205,7 @@ impl EditorView {
             cursors: Vec::new(),
             column_mode: false,
             vbar_inside: false,
+            hbar_over_last_row: false,
             indent_guides: true,
             guide_step: (u64::MAX, 0),
             rainbow_brackets: true,
@@ -1235,7 +1239,12 @@ impl EditorView {
         // (Thumbs as long as the share in view, where the view is.)
         let rows = self.area.h.max(1) as usize;
         let vx = if self.vbar_inside { frame.right() - 2 } else { frame.right() - 1 };
-        draw_vscroll(c, vx, frame.y + 1, frame.h - 2, self.scroll_y, rows, self.doc.len_lines().max(self.scroll_y + rows), theme.scheme.scrollbar, ch);
+        let corner = self.hbar_over_last_row && self.hbar_inside_shown();
+        let vh = frame.h - 2 - i32::from(corner);
+        if corner {
+            c.print(vx, frame.bottom() - 2, " ", theme.scheme.editor);
+        }
+        draw_vscroll(c, vx, frame.y + 1, vh, self.scroll_y, rows, self.doc.len_lines().max(self.scroll_y + rows), theme.scheme.scrollbar, ch);
         let w = (self.area.w - self.gutter_width()).max(1) as usize;
         let longest = self.longest_in_view().max(self.scroll_x + w);
         // (Borland's windows show line:column in the bottom edge's first

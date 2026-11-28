@@ -5067,6 +5067,7 @@ impl Workbench {
                 w.ed.draw(&mut wc, body, &theme, active && !has_modal, active);
             }
             if active && !viewed {
+                w.ed.hbar_over_last_row = panel_top == Some(w.win.rect.bottom() - 1);
                 w.ed.draw_scrollbars(&mut wc, w.win.rect, &theme);
                 // (Its bottom edge is the panel's top: the bar over the last row.)
                 if panel_top == Some(w.win.rect.bottom() - 1) {
@@ -5328,7 +5329,9 @@ fn set_bar_first(w: &mut EdWin, horizontal: bool, first: usize) {
 fn bar_track(w: &EdWin, horizontal: bool, inside: bool, skip: i32) -> (i32, i32) {
     let r = w.win.rect;
     if !horizontal {
-        return (r.y + 2, (r.h - 4).max(0));
+        // (A row shorter when the sideways bar is over the last row: the corner.)
+        let corner = i32::from(w.ed.hbar_over_last_row && w.ed.hbar_inside_shown());
+        return (r.y + 2, (r.h - 4 - corner).max(0));
     }
     if inside {
         let x = w.ed.area().x + (w.ed.area().w - w.ed.text_width() as i32);
