@@ -2930,30 +2930,8 @@ impl Workbench {
                 self.dialog = Some(d);
             }
             "help.vim" => {
-                let mut items = Vec::new();
-                for (section, keys) in turbine_vi::vi::Vi::help() {
-                    items.push(format!("── {section} ──"));
-                    for (k, what) in keys {
-                        items.push(format!("{k:<14} {what}"));
-                    }
-                }
-                items.push("── Turbine ──".into());
-                for (k, what) in [
-                    ("q{reg} … q", "record a macro"),
-                    ("[n]@{reg} @@", "play a macro (@: repeats the last :)"),
-                    ("Ctrl-W w/W", "next / previous window"),
-                    ("Ctrl-W h/j/k/l", "window to the left/below/above/right"),
-                    ("Ctrl-W q / o / n", "close / only this / new window"),
-                    (":e :w :q :wq :x", "files and windows, as vim"),
-                    (":sp :vs {file}", "open a file beside this one"),
-                    (":bn :bp :new :only", "windows as buffers"),
-                ] {
-                    items.push(format!("{k:<14} {what}"));
-                }
-                let d = Dialog::new("vimhelp", "Vim Keys")
-                    .body(ui::list("keys", items, 0).lines(24))
-                    .buttons(vec![ui::button("ok", "O~K~", true)]);
-                self.dialog = Some(d);
+                let md = vim_help_md();
+                self.show_help("Vim Keys", &md);
             }
             "window.next" => {
                 // (Editors only: docked windows have their tabs.)
@@ -2988,18 +2966,8 @@ impl Workbench {
                 self.dialog = Some(d);
             }
             "help.keys" => {
-                let lines = [
-                    "F10 / Alt+letter   Menus",
-                    "F2  Save    F3  Open    Ctrl+N  New",
-                    "F5  Zoom    F6  Next    Alt+F3  Close",
-                    "Alt+1..9    Go to window",
-                    "Shift+arrows select; Ctrl+X/C/V clipboard",
-                    "Ctrl+Z/Y undo/redo; Ins overwrite",
-                    "Drag title to move, edges to resize",
-                    "Agents: Esc stops, Space pauses/resumes",
-                ];
-                let d = Dialog::new("keys", "Keyboard").body(ui::label(&lines.join("\n"))).buttons(vec![ui::button("ok", "O~K~", true)]);
-                self.dialog = Some(d);
+                let md = keys_help_md(&self.menubar.menus, self.keymap == Keymap::Vim);
+                self.show_help("Keyboard", &md);
             }
             "agent.demo" => self.queue_demo(),
             "agent.stop" => {
@@ -5362,6 +5330,95 @@ fn bar_drag(w: &mut EdWin, horizontal: bool, inside: bool, skip: i32, p: Point, 
     let at = (if horizontal { p.x } else { p.y }) - start - grab as i32;
     let at = at.clamp(0, room as i32) as usize;
     set_bar_first(w, horizontal, (at * span + room / 2) / room);
+}
+
+/// A table cell's text as code: its pipes escaped (a table's columns).
+fn md_key(k: &str) -> String {
+    format!("`{}`", k.replace('|', "\\|"))
+}
+
+/// Help > Vim Keys: each of vi's groups a table (keys, what they do), then
+/// Turbine's own (macros, windows, files).
+fn vim_help_md() -> String {
+    let mut md = String::from("# Vim Keys\n\nOptions > Keymap > Vim turns these on. A count first repeats most of them (`3w`, `5j`); `:` opens the command line (Tab completes, with what each does).\n");
+    let mut table = |md: &mut String, title: &str, rows: &[(&str, &str)]| {
+        md.push_str(&format!("\n## {title}\n\n| Keys | What they do |\n|:--|:--|\n"));
+        for (k, what) in rows {
+            md.push_str(&format!("| {} | {} |\n", md_key(k), what.replace('|', "\\|")));
+        }
+    };
+    for (section, keys) in turbine_vi::vi::Vi::help() {
+        let title = section.strip_prefix("vi: ").unwrap_or(section);
+        let mut t: String = title.chars().take(1).flat_map(char::to_uppercase).collect();
+        t.push_str(&title.chars().skip(1).collect::<String>());
+        table(&mut md, &t, &keys);
+    }
+    table(
+        &mut md,
+        "Turbine's own",
+        &[
+            ("q{reg} … q", "record a macro"),
+            ("[n]@{reg}  @@", "play a macro (@: repeats the last :)"),
+            ("Ctrl-W w  Ctrl-W W", "next / previous window"),
+            ("Ctrl-W h j k l", "the window to the left, below, above, right"),
+            ("Ctrl-W q  o  n", "close / only this one / new window"),
+            (":e :w :q :wq :x", "files and windows, as vim"),
+            (":sp :vs {file}", "open a file beside this one"),
+            (":bn :bp :new :only", "windows as buffers"),
+        ],
+    );
+    md
+}
+
+/// Help > Keyboard: every menu's shortcuts (from the menus themselves, so
+/// it's never out of date), then the keys no menu shows.
+fn keys_help_md(menus: &[Menu], vim: bool) -> String {
+    let mut md = String::from("# Keyboard\n\nF10 or Alt and a menu's letter opens the menus; each item's keys are beside it. Ctrl+Shift+P finds any command by name.\n");
+    if vim {
+        md.push_str("\nThe Vim keymap is on: in Normal mode the letters are vim's (Help > Vim Keys); the Ctrl and F-keys below still work.\n");
+    }
+    for m in menus {
+        let rows: Vec<(String, String)> = m.items.iter().filter(|i| !i.shortcut.is_empty() && !i.label.is_empty()).map(|i| (i.shortcut.clone(), i.label.replace('~', "").trim_end_matches("...").to_string())).collect();
+        if rows.is_empty() {
+            continue;
+        }
+        md.push_str(&format!("\n## {}\n\n| Keys | Does |\n|:--|:--|\n", m.plain_title()));
+        for (k, what) in rows {
+            md.push_str(&format!("| {} | {} |\n", md_key(&k), what));
+        }
+    }
+    md.push_str("\n## Editing\n\n| Keys | Does |\n|:--|:--|\n");
+    for (k, what) in [
+        ("Shift+arrows", "select"),
+        ("Ctrl+arrows", "a word at a time"),
+        ("Alt+click", "another cursor"),
+        ("Double / triple / quadruple click", "select a word / line / paragraph (drag for more)"),
+        ("Ctrl+Shift+\\", "the matching bracket"),
+        ("Ins", "overwrite"),
+        ("Tab", "accept the grey suggestion"),
+        ("Ctrl+Space", "completions"),
+        ("Ctrl+.", "quick fix"),
+        ("Alt+Z", "word wrap"),
+        ("Ctrl+\\", "split the editors"),
+        ("Ctrl+= Ctrl+- Ctrl+0", "zoom the text (the app)"),
+    ] {
+        md.push_str(&format!("| {} | {} |\n", md_key(k), what));
+    }
+    md.push_str("\n## Windows and parts\n\n| Keys | Does |\n|:--|:--|\n");
+    for (k, what) in [
+        ("Alt+1 … Alt+9", "go to a window by its number"),
+        ("Ctrl+B", "the side bar"),
+        ("Ctrl+J", "the panel"),
+        ("Ctrl+`", "a terminal"),
+        ("Ctrl+L", "the AI chat"),
+        ("Ctrl+.  (in the chat)", "Ask or Agent"),
+        ("Esc", "back to the editor"),
+        ("Drag a title / an edge", "move / resize a window"),
+    ] {
+        md.push_str(&format!("| {} | {} |\n", md_key(k), what));
+    }
+    md.push_str("\n## The agent\n\n| Keys | Does |\n|:--|:--|\n| `Space` | pause or go on |\n| `Esc` | stop it |\n");
+    md
 }
 
 /// The chat's placeholder while the model starts or thinks.
