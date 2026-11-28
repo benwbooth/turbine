@@ -47,7 +47,7 @@ pub fn icon(name: &str, dir: bool, open: bool) -> &'static str {
         "lock" => "\u{f023}",
         "c" | "h" => "\u{e61e}",
         "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" | "ino" => "\u{e61d}",
-        "cs" => "\u{f81a}",
+        "cs" => "\u{e648}",
         "go" => "\u{e626}",
         "java" | "jar" | "class" => "\u{e738}",
         "kt" | "kts" => "\u{e634}",
